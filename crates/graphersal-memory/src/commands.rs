@@ -1,6 +1,13 @@
-//! Running a command. In this pre-release every command reports which stage delivers it.
+//! Running a command. In this pre-release only `mcp --no-daemon` works; every other command
+//! reports which stage delivers it.
 
-use crate::cli::Command;
+use std::io::{BufRead, Write};
+
+use crate::cli::{Cli, Command};
+use crate::{mcp, store};
+
+/// Exit code of a command that failed.
+pub const EXIT_FAILED: u8 = 1;
 
 /// Exit code of a command that is not implemented yet (the same code as invalid usage: the
 /// invocation cannot be served).
@@ -16,7 +23,7 @@ pub fn planned_stage(command: &Command) -> (&'static str, &'static str) {
         Command::Import { .. } | Command::Export { .. } => {
             ("M3", "import of the file memory and rule export")
         }
-        Command::Mcp { .. } => ("M1", "memory core served over stdio"),
+        Command::Mcp { .. } => ("M2", "the shared daemon and the stdio shim"),
         Command::Daemon => ("M2", "the shared daemon and the stdio shim"),
         Command::Bench { .. } => ("M5", "the built-in A/B"),
         Command::Ui => ("M7", "the browser UI for develop mode"),
@@ -42,12 +49,67 @@ pub fn command_name(command: &Command) -> &'static str {
 /// The message printed to stderr for a command that is not implemented yet.
 pub fn not_implemented_message(command: &Command) -> String {
     let (stage, what) = planned_stage(command);
+    let hint = match command {
+        Command::Mcp { .. } => {
+            "\nTo serve the memory in this process (one session at a time), add --no-daemon."
+        }
+        _ => "",
+    };
     format!(
-        "graphersal-memory {}: not implemented yet (planned in stage {stage}: {what}).\n\
+        "graphersal-memory {}: not implemented yet (planned in stage {stage}: {what}).{hint}\n\
          graphersal-memory is a pre-release; see docs/roadmap.md at \
          https://github.com/graphersal/graphersal-memory",
         command_name(command)
     )
+}
+
+/// Runs the command line: `mcp --no-daemon` serves MCP on `stdin`/`stdout`, every other
+/// command reports its stage. Diagnostics go to `stderr`; returns the process exit code.
+pub fn run_cli(
+    cli: &Cli,
+    stdin: impl BufRead,
+    stdout: impl Write + Send,
+    stderr: &mut dyn Write,
+) -> u8 {
+    match &cli.command {
+        Command::Mcp {
+            profile,
+            no_daemon: true,
+            project,
+        } => {
+            let served = serve_options(cli.data_dir.as_deref(), *profile, project.as_deref())
+                .and_then(|options| mcp::serve(&options, stdin, stdout));
+            match served {
+                Ok(()) => 0,
+                Err(err) => {
+                    let _ = writeln!(stderr, "graphersal-memory mcp: {err}");
+                    EXIT_FAILED
+                }
+            }
+        }
+        command => run(command, stderr),
+    }
+}
+
+/// What `mcp --no-daemon` serves: the data directory (flag, environment, platform) and the
+/// project (flag, else the git root of the current directory).
+fn serve_options(
+    data_dir: Option<&std::path::Path>,
+    profile: crate::cli::Profile,
+    project: Option<&std::path::Path>,
+) -> Result<mcp::ServeOptions, String> {
+    let data_dir = store::resolve_data_dir(
+        data_dir,
+        &|name| std::env::var(name).ok(),
+        store::Platform::current(),
+    )?;
+    let cwd = std::env::current_dir()
+        .map_err(|err| format!("cannot read the current directory: {err}"))?;
+    Ok(mcp::ServeOptions {
+        data_dir,
+        profile,
+        project: mcp::project_key(project, &cwd),
+    })
 }
 
 /// Runs a command: writes its diagnostics to `stderr` and returns the process exit code.
@@ -70,7 +132,7 @@ mod tests {
             ("uninstall", "M3"),
             ("status", "M3"),
             ("doctor", "M3"),
-            ("mcp", "M1"),
+            ("mcp", "M2"),
             ("daemon", "M2"),
             ("ui", "M7"),
             ("bench", "M5"),
@@ -87,5 +149,16 @@ mod tests {
             );
             assert!(text.contains(&format!("stage {stage}")), "{text}");
         }
+    }
+
+    #[test]
+    fn mcp_without_no_daemon_names_the_flag() {
+        let cli = Cli::try_parse_from(["graphersal-memory", "mcp"]).unwrap();
+        let mut err = Vec::new();
+        let code = run_cli(&cli, std::io::empty(), Vec::new(), &mut err);
+        assert_eq!(code, EXIT_NOT_IMPLEMENTED);
+        let text = String::from_utf8(err).unwrap();
+        assert!(text.contains("planned in stage M2"), "{text}");
+        assert!(text.contains("--no-daemon"), "{text}");
     }
 }

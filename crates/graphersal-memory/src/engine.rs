@@ -31,8 +31,8 @@ mod tests {
         let pin = concat!("rev = \"", engine_rev_short!());
         assert_eq!(
             manifest.matches(pin).count(),
-            2,
-            "both engine crates pin the same rev"
+            4,
+            "every engine crate pins the same rev"
         );
     }
 }

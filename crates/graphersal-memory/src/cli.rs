@@ -4,6 +4,8 @@
 //! command that is not built yet says so and names the stage that delivers it
 //! (`crate::commands`).
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand, ValueEnum};
 
 /// The long `--version` text: the product version and the engine revision it is built on.
@@ -26,8 +28,8 @@ const LONG_VERSION: &str = concat!(
         graphersal-memory keeps your agent's rules, decisions, past sessions and facts in a local \
         graph database and lets the agent search them through MCP, instead of loading a growing \
         memory file on every turn. Everything stays on your machine.\n\n\
-        PRE-RELEASE: none of the commands is implemented yet. Each one says which stage delivers it; the plan \
-        is in docs/roadmap.md.",
+        PRE-RELEASE: only `mcp --no-daemon` works yet (one store served over stdio in this \
+        process). Every other command says which stage delivers it; the plan is in docs/roadmap.md.",
     after_help = "Start with `graphersal-memory install` (planned). \
         Docs: https://github.com/graphersal/graphersal-memory",
     propagate_version = true,
@@ -38,6 +40,10 @@ pub struct Cli {
     /// The command to run.
     #[command(subcommand)]
     pub command: Command,
+    /// The data directory holding the stores (default: the per-user data directory; the
+    /// environment variable GRAPHERSAL_MEMORY_DIR overrides it too).
+    #[arg(long, global = true, value_name = "DIR")]
+    pub data_dir: Option<PathBuf>,
 }
 
 /// The product's commands.
@@ -74,6 +80,10 @@ pub enum Command {
         /// Serve the store in this process instead of connecting to the shared daemon.
         #[arg(long)]
         no_daemon: bool,
+        /// The project this session works on (default: the git repository root of the current
+        /// directory, else the current directory).
+        #[arg(long, value_name = "ROOT")]
+        project: Option<PathBuf>,
     },
     /// Run the background daemon that owns the stores (started on demand by `mcp`).
     Daemon,
@@ -170,7 +180,8 @@ mod tests {
             parse(&["mcp"]).unwrap().command,
             Command::Mcp {
                 profile: Profile::Use,
-                no_daemon: false
+                no_daemon: false,
+                project: None
             }
         );
     }
@@ -183,7 +194,8 @@ mod tests {
                 .command,
             Command::Mcp {
                 profile: Profile::Develop,
-                no_daemon: true
+                no_daemon: true,
+                project: None
             }
         );
         assert_eq!(
@@ -199,6 +211,29 @@ mod tests {
             parse(&["bench", "--dry-run"]).unwrap().command,
             Command::Bench { dry_run: true }
         );
+    }
+
+    #[test]
+    fn project_and_data_dir_parse() {
+        let cli = parse(&[
+            "mcp",
+            "--no-daemon",
+            "--project",
+            "/w/a",
+            "--data-dir",
+            "/d",
+        ])
+        .unwrap();
+        assert_eq!(cli.data_dir, Some(PathBuf::from("/d")));
+        assert_eq!(
+            cli.command,
+            Command::Mcp {
+                profile: Profile::Use,
+                no_daemon: true,
+                project: Some(PathBuf::from("/w/a"))
+            }
+        );
+        assert_eq!(parse(&["status"]).unwrap().data_dir, None);
     }
 
     #[test]
