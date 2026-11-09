@@ -23,6 +23,9 @@ Where a harness has no hooks, synchronisation runs from the MCP server itself or
   entries recognisable as ours. Your own text and entries are never touched.
 - If you edit inside the managed block by hand, the edit is reported as a conflict. It is never
   silently overwritten (and `uninstall` leaves such a block for you to remove).
+- A block an earlier version wrote and nobody edited is updated by `install` and removed by
+  `uninstall`, like the current one: each version knows the fingerprints of the earlier block
+  texts. A block of a version it does not know (a newer one) is kept by `install` and reported.
 - `uninstall` removes exactly the managed parts and leaves the rest as it was.
 
 ## Claude Code

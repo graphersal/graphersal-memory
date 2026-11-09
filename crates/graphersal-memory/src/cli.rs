@@ -8,11 +8,11 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-/// The long `--version` text: the product version and the engine revision it is built on.
+/// The long `--version` text: the product version and the engine version it is built on.
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    " (pre-release; engine: graphersal git ",
-    crate::engine::engine_rev_short!(),
+    " (pre-release; engine: graphersal ",
+    crate::engine::engine_version!(),
     ")"
 );
 
@@ -458,11 +458,11 @@ mod tests {
     }
 
     #[test]
-    fn version_names_the_engine_revision() {
+    fn version_names_the_engine_version() {
         let err = parse(&["--version"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
         assert!(LONG_VERSION.starts_with(env!("CARGO_PKG_VERSION")));
-        assert!(LONG_VERSION.contains(crate::engine::engine_rev_short!()));
+        assert!(LONG_VERSION.contains(concat!("graphersal ", crate::engine::engine_version!())));
     }
 
     #[test]

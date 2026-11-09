@@ -16,7 +16,8 @@
 //! `install` and `import --sessions`) queues a run and is answered at once; one indexer thread
 //! runs the queued requests (merged while one runs), writing through each project's store in
 //! small session-thread jobs, and `sessions_status` reports its progress. The daemon does not
-//! exit idle while the indexer works.
+//! exit idle while the indexer works or a store's scheduled-job runs are in progress (the idle
+//! time counts from the end of that work).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -409,8 +410,19 @@ impl Daemon {
         loop {
             std::thread::sleep(tick);
             let indexing = self.lock_indexer().running;
+            let background: usize = self
+                .stores
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values()
+                .map(|store| store.background_runs())
+                .sum();
             let idle = {
                 let mut state = self.lock_state();
+                if background > 0 {
+                    // Scheduled-job runs are work too: the idle time counts from their end.
+                    state.last_change = Instant::now();
+                }
                 let idle = !state.stopping
                     && !indexing
                     && state.connections == 0
@@ -430,7 +442,9 @@ impl Daemon {
     }
 
     /// Ends the process: the socket goes first (new shims start a new daemon once this one's
-    /// pid lock is free), then every store is closed cleanly.
+    /// pid lock is free), then every store is closed cleanly (its job ticker stopped, its
+    /// scheduled-job runs finished: `StoreRuntime::close`). The process exit only ends the
+    /// accept loop and the connection threads; the stores are closed before it.
     fn shutdown(&self, why: &str) -> ! {
         if self.shutting_down.swap(true, Ordering::SeqCst) {
             // Another thread is closing the stores and ends the process.

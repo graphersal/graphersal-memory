@@ -1,0 +1,386 @@
+name: Release
+
+# Builds the `graphersal-memory` binary for five platforms, each natively on its own runner except
+# macos-x86_64 (cross-compiled on the Apple Silicon runner: GitHub's Intel macOS images are being
+# retired, and macOS minutes are the expensive ones), with the `dist` profile of the root
+# Cargo.toml (release + fat LTO + stripped symbols). Linux is a static musl build (runs on every
+# distribution). Each build is smoke-tested on its runner (`--version`, `--help`, and an MCP round
+# trip of `mcp --no-daemon` over stdin on a temporary data directory; macos-x86_64 through
+# Rosetta 2) and packed as `graphersal-memory-v<version>-<platform>.tar.gz` (Windows: `.zip`) with
+# LICENSE, NOTICE and README.md. The `checksums` job writes `SHA256SUMS` over the archives and the
+# installers (`install.sh`, `install.ps1`), and `installers-test` runs both installers (Linux:
+# install.sh incl. a refused checksum mismatch; Windows: install.ps1 under PowerShell 7 and, through
+# `iex`, Windows PowerShell 5.1) against these files served like a release by a local HTTP server.
+#
+# A real release (a pushed tag `v<version>`, or `workflow_dispatch` on such a tag with
+# `dry_run: false`) adds build provenance attestations (public repositories only: GitHub offers
+# them for private repositories on Enterprise Cloud alone) and creates a DRAFT GitHub Release with
+# the archives, the installers and SHA256SUMS attached. The maintainer checks the draft and
+# publishes it by hand; nothing is ever published by this workflow.
+#
+# Dry run on any branch (builds, tests and uploads the artifacts, publishes nothing):
+#   gh workflow run Release --ref <branch>
+# Real release: push the tag `v<version>` (it must equal the workspace version), or
+#   gh workflow run Release --ref v<version> -f dry_run=false
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build, smoke-test and checksum only; no attestation, no draft release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The workspace version, and the tag of a real release
+        id: version
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$DRY_RUN" = true ]; then
+            echo "Dry run of $version on $GITHUB_REF"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "::error::A real release runs on a tag: push v$version, or run with dry_run"; exit 1 ;;
+          esac
+          tag="${GITHUB_REF#refs/tags/v}"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::The tag v$tag does not match the workspace version $version"
+            exit 1
+          fi
+          echo "Releasing $version"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: graphersal-memory (${{ matrix.platform }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86_64, os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { platform: linux-aarch64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { platform: macos-arm64, os: macos-latest, target: aarch64-apple-darwin }
+          - { platform: macos-x86_64, os: macos-latest, target: x86_64-apple-darwin }
+          - { platform: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc }
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: musl-gcc for C code in dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: Rosetta 2 for the x86_64 smoke test (macos-x86_64)
+        if: matrix.platform == 'macos-x86_64'
+        run: |
+          arch -x86_64 /usr/bin/true 2>/dev/null \
+            || sudo softwareupdate --install-rosetta --agree-to-license
+      - name: Build
+        run: cargo build --locked -p graphersal-memory --profile dist --target "$TARGET"
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          exe=""
+          [ "$RUNNER_OS" = Windows ] && exe=".exe"
+          bin="target/$TARGET/dist/graphersal-memory$exe"
+          run=("$bin")
+          [ "$PLATFORM" = macos-x86_64 ] && run=(arch -x86_64 "$bin")
+          ls -l "$bin"
+          if [ "$RUNNER_OS" != Windows ]; then file "$bin"; fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            file "$bin" | grep -Eq 'statically linked|static-pie linked'
+          fi
+          if [ "$PLATFORM" = macos-x86_64 ]; then file "$bin" | grep -q x86_64; fi
+
+          "${run[@]}" --version | tee version.txt
+          grep -qF "graphersal-memory $VERSION " version.txt
+          grep -qF "engine: graphersal " version.txt
+          "${run[@]}" --help > help.txt
+          grep -qF "Usage: graphersal-memory" help.txt
+
+          # One MCP session over stdin on a temporary data directory: initialize, the tool list,
+          # a write and a read of the memory. End of input ends the session.
+          data="$RUNNER_TEMP/gm-data"
+          project="$RUNNER_TEMP/gm-project"
+          mkdir -p "$data" "$project"
+          {
+            echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
+            echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+            echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+            echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"remember","arguments":{"slug":"smoke","kind":"project","summary":"Smoke test memory","body":"Written by the release smoke test."}}}'
+            echo '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memories","arguments":{}}}'
+          } | "${run[@]}" mcp --no-daemon --data-dir "$data" --project "$project" > mcp.out
+          cut -c1-300 mcp.out
+          test "$(wc -l < mcp.out)" -ge 4
+          grep -q '"id":1,.*"serverInfo":{[^}]*"name":"graphersal-memory"' mcp.out
+          grep -q '"id":2,.*"name":"remember"' mcp.out
+          grep '"id":3,' mcp.out | grep -q '"isError":false'
+          grep '"id":4,' mcp.out | grep -q 'Smoke test memory'
+      - name: Archive
+        run: |
+          set -euo pipefail
+          exe=""
+          [ "$RUNNER_OS" = Windows ] && exe=".exe"
+          name="graphersal-memory-v$VERSION-$PLATFORM"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/dist/graphersal-memory$exe" "dist/$name/"
+          cp LICENSE NOTICE README.md "dist/$name/"
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a -tzip -bso0 "$name.zip" "$name"
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+          rm -r "$name"
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  installers:
+    name: installers
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck install.sh
+        run: shellcheck install.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-installers
+          path: |
+            install.sh
+            install.ps1
+          if-no-files-found: error
+
+  checksums:
+    name: SHA256SUMS
+    needs: [build, installers]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Five archives, two installers and their SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -l
+          test "$(find . -maxdepth 1 \( -name 'graphersal-memory-v*-*.tar.gz' -o -name 'graphersal-memory-v*-*.zip' \) | wc -l)" -eq 5
+          test -f install.sh && test -f install.ps1
+          sha256sum graphersal-memory-v* install.sh install.ps1 > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-checksums
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+
+  # The installers against this run's files, served like a GitHub release
+  # (`latest/download/<file>`, `download/v<version>/<file>`) from a local HTTP server.
+  installers-test:
+    name: installers (${{ matrix.os }})
+    needs: [check, checksums]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: A local release site
+        run: |
+          set -euo pipefail
+          site="$RUNNER_TEMP/site"
+          mkdir -p "$site/latest/download" "$site/download/v$VERSION"
+          cp dist/* "$site/latest/download/"
+          cp dist/* "$site/download/v$VERSION/"
+          python -m http.server 8765 --bind 127.0.0.1 --directory "$site" > "$RUNNER_TEMP/http.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:8765/latest/download/SHA256SUMS && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/http.log"
+          exit 1
+      - name: install.sh (latest, a given version, a damaged archive)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          base=http://127.0.0.1:8765
+          sh dist/install.sh --base-url "$base" --dir "$RUNNER_TEMP/bin1" | tee out1.txt
+          "$RUNNER_TEMP/bin1/graphersal-memory" --version | grep -qF "graphersal-memory $VERSION "
+          grep -qF "graphersal-memory install" out1.txt
+          GRAPHERSAL_MEMORY_BASE_URL="$base" sh dist/install.sh --version "$VERSION" --dir "$RUNNER_TEMP/bin2"
+          "$RUNNER_TEMP/bin2/graphersal-memory" --version | grep -qF "graphersal-memory $VERSION "
+          # A checksum that does not match: refused, nothing installed.
+          bad="$RUNNER_TEMP/site/download/v0.0.0-bad"
+          mkdir -p "$bad"
+          cp dist/*linux-x86_64.tar.gz "$bad/graphersal-memory-v0.0.0-bad-linux-x86_64.tar.gz"
+          echo "$(printf '0%.0s' $(seq 1 64))  graphersal-memory-v0.0.0-bad-linux-x86_64.tar.gz" > "$bad/SHA256SUMS"
+          if sh dist/install.sh --base-url "$base" --version v0.0.0-bad --dir "$RUNNER_TEMP/bin3"; then
+            echo "::error::install.sh accepted a checksum mismatch"
+            exit 1
+          fi
+          test ! -e "$RUNNER_TEMP/bin3/graphersal-memory"
+      - name: install.ps1 (PowerShell 7, latest)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'bin1'
+          & ./dist/install.ps1 -BaseUrl http://127.0.0.1:8765 -Dir $dir
+          $version = & (Join-Path $dir 'graphersal-memory.exe') --version
+          if ($version -notlike "graphersal-memory $env:VERSION *") { throw "unexpected: $version" }
+      - name: install.ps1 (Windows PowerShell 5.1 through iex, a given version)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:GRAPHERSAL_MEMORY_BASE_URL = 'http://127.0.0.1:8765'
+          $env:GRAPHERSAL_MEMORY_VERSION = "v$env:VERSION"
+          $env:GRAPHERSAL_MEMORY_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'bin2'
+          Get-Content -Raw ./dist/install.ps1 | Invoke-Expression
+          $version = & (Join-Path $env:GRAPHERSAL_MEMORY_INSTALL_DIR 'graphersal-memory.exe') --version
+          if ($version -notlike "graphersal-memory $env:VERSION *") { throw "unexpected: $version" }
+
+  # A real release of a public repository only: a dry run never asks for more than
+  # `contents: read`, and GitHub refuses attestations in a private repository outside Enterprise
+  # Cloud.
+  attest:
+    name: build provenance attestations
+    needs: [check, checksums]
+    if: needs.check.outputs.release == 'true' && !github.event.repository.private
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/graphersal-memory-v*
+            dist/install.sh
+            dist/install.ps1
+
+  github-release:
+    name: draft GitHub Release
+    needs: [check, checksums, installers-test, attest]
+    # `attest` is skipped in a private repository: a skipped need does not stop the release.
+    if: >-
+      always() && needs.check.outputs.release == 'true' && needs.checksums.result == 'success'
+      && needs.installers-test.result == 'success'
+      && (needs.attest.result == 'success' || needs.attest.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify the files against SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -l
+          sha256sum -c SHA256SUMS
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          graphersal-memory $VERSION.
+
+          ## Install
+
+          macOS and Linux:
+
+          \`\`\`sh
+          curl -fsSL https://github.com/$REPO/releases/download/$tag/install.sh | sh -s -- --version $tag
+          graphersal-memory install
+          \`\`\`
+
+          Windows (PowerShell):
+
+          \`\`\`powershell
+          & ([scriptblock]::Create((irm https://github.com/$REPO/releases/download/$tag/install.ps1))) -Version $tag
+          graphersal-memory install
+          \`\`\`
+
+          Or download the archive for your platform below, check it against \`SHA256SUMS\`, and put
+          \`graphersal-memory\` on your \`PATH\`. From source: \`cargo install --locked --git
+          https://github.com/$REPO --tag $tag graphersal-memory\`.
+          EOF
+          gh release create "$tag" --repo "$REPO" --draft --verify-tag \
+            --title "graphersal-memory $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+            dist/graphersal-memory-v* dist/install.sh dist/install.ps1 dist/SHA256SUMS

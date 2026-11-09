@@ -421,3 +421,74 @@ fn a_session_of_another_project_is_not_readable_by_id_or_prefix() {
     assert!(prefixed.contains("Session of project a"), "{prefixed}");
     a.close();
 }
+
+#[test]
+fn the_project_is_bound_by_the_engine_and_never_echoed() {
+    let data = TempDir::new("bound");
+    let mut a = Client::start(data.path(), ProfileKind::Use, "/work/a");
+    remember(&mut a, "a-only", "Only in project a", "project");
+    // The answer's call line echoes the client's call without the bound project.
+    let read = a.ok("memory", json!({"slug": "a-only"}));
+    let call = read.lines().next().unwrap_or_default();
+    assert!(call.starts_with("call:"), "{read}");
+    assert!(!call.contains("/work/a"), "{read}");
+    // A faked project is overridden: the call line does not repeat it either.
+    let faked = a.ok("memory", json!({"slug": "a-only", "project": "/work/b"}));
+    assert!(faked.contains("Only in project a"), "{faked}");
+    assert!(!faked.contains("/work/b"), "{faked}");
+    a.close();
+
+    let mut d = Client::start(data.path(), ProfileKind::Develop, "/work/b");
+    // run_saved_query with a faked project still runs in the connection's project.
+    let listed = d.ok(
+        "run_saved_query",
+        json!({"name": "memories", "params": {"project": "/work/a"}}),
+    );
+    assert!(!listed.contains("a-only"), "{listed}");
+    d.close();
+}
+
+#[test]
+fn the_profiles_carry_the_product_title_and_no_write_warning() {
+    let data = TempDir::new("title");
+    for (kind, title) in [
+        (ProfileKind::Use, "graphersal-memory"),
+        (ProfileKind::Develop, "graphersal-memory (develop)"),
+    ] {
+        let mut client = Client::start(data.path(), kind, "/work/a");
+        let init = client.request(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "test", "version": "1"}}),
+        );
+        assert_eq!(init["result"]["serverInfo"]["title"], title, "{init}");
+        for tool in client.tools() {
+            if catalog::FUNCTIONS.contains(&tool["name"].as_str().unwrap()) {
+                let description = tool["description"].as_str().unwrap();
+                assert!(
+                    !description.contains("CHANGES DATA"),
+                    "{}: {description}",
+                    tool["name"]
+                );
+            }
+        }
+        client.close();
+    }
+}
+
+#[test]
+fn closing_a_runtime_stops_its_job_ticker_and_releases_the_store() {
+    let data = TempDir::new("ticker");
+    let dir = crate::store::default_store_dir(data.path());
+    for _ in 0..2 {
+        let runtime = std::sync::Arc::new(
+            mcp::StoreRuntime::open("default", &dir, std::sync::Arc::new(mcp::endpoint())).unwrap(),
+        );
+        runtime.start_jobs().unwrap();
+        assert_eq!(runtime.background_runs(), 0);
+        let started = std::time::Instant::now();
+        runtime.close().unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        // The next round opens the same store: it was released.
+    }
+}

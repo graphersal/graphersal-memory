@@ -3,14 +3,14 @@
 //! graphersal-memory is a consumer of the public graphersal API. An engine gap found here is
 //! fixed in the graphersal repository, never worked around with a local copy of engine code.
 
-/// The graphersal git revision pinned in the workspace `Cargo.toml` (first 8 hex digits), as a
-/// literal for `concat!`.
-macro_rules! engine_rev_short {
+/// The graphersal version pinned in the workspace `Cargo.toml` (every engine crate pins the same
+/// exact version), as a literal for `concat!`.
+macro_rules! engine_version {
     () => {
-        "063be87d"
+        "0.6.0"
     };
 }
-pub(crate) use engine_rev_short;
+pub(crate) use engine_version;
 
 #[cfg(test)]
 mod tests {
@@ -24,15 +24,26 @@ mod tests {
         const { assert!(graphersal_mcp::MIN_ANSWER_CHARS > 0) };
     }
 
-    /// The revision shown by `--version` is the one the workspace pins.
+    /// The version shown by `--version` is the one the workspace pins for every engine crate,
+    /// and the one the lock file resolved.
     #[test]
-    fn version_revision_matches_the_pin() {
+    fn version_matches_the_pin() {
         let manifest = include_str!("../../../Cargo.toml");
-        let pin = concat!("rev = \"", engine_rev_short!());
+        let pin = concat!("\"=", engine_version!(), "\"");
         assert_eq!(
             manifest.matches(pin).count(),
             4,
-            "every engine crate pins the same rev"
+            "every engine crate pins the same exact version"
         );
+        let lock = include_str!("../../../Cargo.lock");
+        for name in [
+            "graphersal",
+            "graphersal-mcp",
+            "graphersal-serve",
+            "graphersal-session",
+        ] {
+            let entry = format!("name = \"{name}\"\nversion = \"{}\"", engine_version!());
+            assert!(lock.contains(&entry), "Cargo.lock resolves {name}");
+        }
     }
 }

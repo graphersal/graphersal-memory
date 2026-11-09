@@ -15,7 +15,9 @@
 //! - **The managed rule block** in the user instruction file (`~/.claude/CLAUDE.md`), between
 //!   `<!-- graphersal-memory:begin ... -->` and `<!-- graphersal-memory:end -->`; the begin line
 //!   carries the fingerprint of the block's text, so a hand edit inside is detected and reported
-//!   as a conflict, never overwritten.
+//!   as a conflict, never overwritten. A block an earlier version wrote (its fingerprint is in
+//!   `PREVIOUS_BLOCK_FINGERPRINTS`) and left untouched is updated by `install` and removed by
+//!   `uninstall` like the current one.
 //!
 //! The JSON files are edited in place (`crate::jsonedit`): only our members are inserted or
 //! removed, the rest of the text keeps its bytes. (`claude mcp add` is not used: it rewrites the
@@ -80,8 +82,19 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
   with `forget`.
 - Do not write memory files (`MEMORY.md` and the files beside it) any more. Files written anyway
   are imported into the graph at the next session start.
-- Past sessions (`sessions(text)`, `session(id)`) are not indexed yet in this version.
+- Past sessions of this project: `sessions(text)` finds what was decided, corrected or left
+  open in them (from their summaries, when summaries are on), `session(id)` reads one, and
+  `recall(text, k, \"turn\")` finds what was literally said.
 ";
+
+/// The fingerprints of the rule block texts earlier versions wrote (oldest first; add the
+/// current one here whenever `RULE_BLOCK` changes). An untouched block with one of them is
+/// updated by `install` and removed by `uninstall`; one with an unknown fingerprint whose text
+/// still matches it (a newer version's block) is kept by `install` and reported.
+pub const PREVIOUS_BLOCK_FINGERPRINTS: &[&str] = &[
+    // 0.0.0 (stages M3-M5): "Past sessions ... are not indexed yet in this version."
+    "e255edadf6bd5788",
+];
 
 /// Where Claude Code keeps its files.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +242,8 @@ pub struct FoundBlock {
     pub intact: bool,
     /// Whether it is the block this version writes.
     pub current: bool,
+    /// Whether it is untouched and its text one this or an earlier version wrote.
+    pub known: bool,
 }
 
 /// The managed block of `text`: `Ok(None)` without one, `Err` for a begin line without an end
@@ -263,11 +278,13 @@ pub fn find_block(text: &str) -> Result<Option<FoundBlock>, String> {
         end += 1;
     }
     let intact = fsutil::fingerprint(content.as_bytes()) == recorded;
+    let current = intact && text[start..end] == block_text();
     Ok(Some(FoundBlock {
         start,
         end,
         intact,
-        current: intact && text[start..end] == block_text(),
+        current,
+        known: current || (intact && PREVIOUS_BLOCK_FINGERPRINTS.contains(&recorded)),
     }))
 }
 
@@ -590,6 +607,15 @@ fn plan_block(
             None
         }
         Ok(Some(found)) if found.current => None,
+        Ok(Some(found)) if !found.known => {
+            conflicts.push(format!(
+                "{}: the managed block was written by another (newer?) version of \
+                 graphersal-memory; kept as it is. Run that version's install, or delete the \
+                 block and run install again.",
+                path.display()
+            ));
+            None
+        }
         Ok(Some(found)) => Some(format!(
             "{}{}{}",
             &text[..found.start],
@@ -603,7 +629,7 @@ fn plan_block(
         }
     };
     let line = match (&after, find_block(&text)) {
-        (_, Err(_)) | (None, Ok(Some(FoundBlock { intact: false, .. }))) => {
+        (_, Err(_)) | (None, Ok(Some(FoundBlock { known: false, .. }))) => {
             "CONFLICT (see the report)".to_string()
         }
         (None, _) => "already written".to_string(),
@@ -1591,6 +1617,9 @@ pub fn inspect(setup: &Setup) -> Inspection {
         Ok(Some(text)) => match find_block(&text) {
             Ok(None) => PartState::Missing,
             Ok(Some(found)) if found.current => PartState::Installed,
+            Ok(Some(found)) if found.known => {
+                PartState::Outdated("written by an earlier version".to_string())
+            }
             Ok(Some(found)) if found.intact => {
                 PartState::Outdated("written by another version".to_string())
             }
@@ -1757,9 +1786,7 @@ pub fn doctor(setup: &Setup) -> Vec<Finding> {
             ),
             reinstall,
         )),
-        PartState::Outdated(_) => {
-            findings.push(problem("rule block written by another version", reinstall))
-        }
+        PartState::Outdated(why) => findings.push(problem(format!("rule block {why}"), reinstall)),
         PartState::Conflict(why) => findings.push(problem(
             format!("rule block {why} in {}", setup.paths.instructions.display()),
             "move your text out of the block or delete the block, then run install again",

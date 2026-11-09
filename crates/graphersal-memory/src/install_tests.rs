@@ -744,3 +744,150 @@ fn install_asks_for_summaries_and_keeps_them_off_by_default() {
         memory.close();
     }
 }
+
+/// The rule block text of 0.0.0 (stages M3-M5), as installed blocks still carry it.
+const BLOCK_0_0_0: &str = "\
+## Memory: graphersal-memory
+
+Your long-term memory of this user lives in a local graph, served by the MCP server
+`graphersal-memory`, not in memory files.
+
+- Search it before you answer from memory or ask the user something they may have told you
+  before: `memories(text)` for rules, decisions and preferences, `recall(text)` for everything,
+  `memory(slug)` to read one in full.
+- Save with `remember`: search with `memories(text)` first, so you replace a memory instead of
+  duplicating it; scope \"global\" for rules and preferences that hold in every project. Remove
+  with `forget`.
+- Do not write memory files (`MEMORY.md` and the files beside it) any more. Files written anyway
+  are imported into the graph at the next session start.
+- Past sessions (`sessions(text)`, `session(id)`) are not indexed yet in this version.
+";
+
+/// A managed block with `text` and the fingerprint `fingerprint` on its begin line.
+fn block_with(text: &str, fingerprint: &str) -> String {
+    let current = crate::fsutil::fingerprint(install::RULE_BLOCK.as_bytes());
+    install::block_text()
+        .replace(install::RULE_BLOCK, text)
+        .replace(&current, fingerprint)
+}
+
+/// The instruction file with the block of `install` replaced by `block`.
+fn with_block(setup: &Setup, block: &str) -> String {
+    let text = read(&setup.paths.instructions);
+    let found = install::find_block(&text).unwrap().unwrap();
+    format!("{}{block}{}", &text[..found.start], &text[found.end..])
+}
+
+#[test]
+fn every_earlier_block_text_is_known_and_the_current_one_is_not_among_them() {
+    let previous = crate::fsutil::fingerprint(BLOCK_0_0_0.as_bytes());
+    assert!(
+        install::PREVIOUS_BLOCK_FINGERPRINTS.contains(&previous.as_str()),
+        "{previous}"
+    );
+    let current = crate::fsutil::fingerprint(install::RULE_BLOCK.as_bytes());
+    assert!(!install::PREVIOUS_BLOCK_FINGERPRINTS.contains(&current.as_str()));
+    assert!(!install::RULE_BLOCK.contains("not indexed yet"));
+    let old = block_with(BLOCK_0_0_0, &previous);
+    let found = install::find_block(&format!("# Mine\n\n{old}"))
+        .unwrap()
+        .unwrap();
+    assert!(found.intact && found.known && !found.current);
+}
+
+#[test]
+fn an_untouched_block_of_an_earlier_version_is_updated_and_uninstalled_cleanly() {
+    let home = TempDir::new("old-home");
+    let data = TempDir::new("old-data");
+    existing_home(home.path());
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    run_install(&setup, &memory, yes());
+    let current = read(&setup.paths.instructions);
+    // The file as an earlier version left it.
+    let previous = crate::fsutil::fingerprint(BLOCK_0_0_0.as_bytes());
+    let old = with_block(&setup, &block_with(BLOCK_0_0_0, &previous));
+    std::fs::write(&setup.paths.instructions, &old).unwrap();
+    let status = install::status_lines(&setup).join("\n");
+    assert!(
+        status.contains("rule block") && status.contains("written by an earlier version"),
+        "{status}"
+    );
+
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("update the block to this version"), "{out}");
+    assert_eq!(read(&setup.paths.instructions), current);
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+
+    // Uninstall straight from the earlier version's block removes it, and only it.
+    run_install(&setup, &memory, yes());
+    let old = with_block(&setup, &block_with(BLOCK_0_0_0, &previous));
+    std::fs::write(&setup.paths.instructions, format!("{old}\nMore of mine.\n")).unwrap();
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    let rules = read(&setup.paths.instructions);
+    assert!(!rules.contains("graphersal-memory:begin"), "{rules}");
+    assert!(
+        rules.contains("Be brief.") && rules.contains("More of mine."),
+        "{rules}"
+    );
+    memory.close();
+}
+
+#[test]
+fn a_hand_edited_block_of_an_earlier_version_is_still_a_conflict() {
+    let home = TempDir::new("oldedit-home");
+    let data = TempDir::new("oldedit-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    run_install(&setup, &memory, yes());
+    let previous = crate::fsutil::fingerprint(BLOCK_0_0_0.as_bytes());
+    let edited = BLOCK_0_0_0.replace("Save with", "Please save with");
+    let text = with_block(&setup, &block_with(&edited, &previous));
+    std::fs::write(&setup.paths.instructions, &text).unwrap();
+
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("conflict:") && out.contains("edited by hand"),
+        "{out}"
+    );
+    assert_eq!(read(&setup.paths.instructions), text);
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("not removed"), "{out}");
+    assert_eq!(read(&setup.paths.instructions), text);
+    memory.close();
+}
+
+#[test]
+fn a_block_of_an_unknown_version_is_kept_by_install_and_removed_by_uninstall() {
+    let home = TempDir::new("newer-home");
+    let data = TempDir::new("newer-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    run_install(&setup, &memory, yes());
+    // A newer version's text: untouched (its fingerprint matches) but not one this version knows.
+    let newer = format!("{}- A rule of a newer version.\n", install::RULE_BLOCK);
+    let fingerprint = crate::fsutil::fingerprint(newer.as_bytes());
+    let text = with_block(&setup, &block_with(&newer, &fingerprint));
+    std::fs::write(&setup.paths.instructions, &text).unwrap();
+    let status = install::status_lines(&setup).join("\n");
+    assert!(status.contains("written by another version"), "{status}");
+
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("conflict:") && out.contains("newer?"), "{out}");
+    assert_eq!(read(&setup.paths.instructions), text);
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !setup.paths.instructions.exists()
+            || !read(&setup.paths.instructions).contains("graphersal-memory:begin")
+    );
+    memory.close();
+}
