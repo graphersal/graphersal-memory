@@ -1,7 +1,9 @@
 # How it works
 
-> Pre-release: this page describes the target design. Nothing here is implemented yet; see the
-> [status table](../README.md#status).
+> Pre-release: this page describes the target design. Implemented so far (M1): the store in the
+> per-user data directory, project and global memories, the two profiles with their access policy,
+> and one store served over stdio in one process (`mcp --no-daemon`). The daemon, the shim, the
+> socket and the handshake are not; see the [status table](../README.md#status).
 
 ## Processes
 
@@ -66,7 +68,21 @@ They all talk to one daemon, which is the single writer of each store.
 | `develop` | off | the above plus schema, saved queries, indexes, health, benchmark | for improving the memory's structure; enable it when you need it, disable it so it costs no context |
 
 The daemon chooses the profile per connection, from the handshake. A client cannot raise its own
-profile from inside MCP.
+profile from inside MCP. (Until the daemon arrives, `mcp --no-daemon --profile use|develop` picks
+it.)
+
+How `use` is enforced today: the server offers only the memory functions as tools, and any other
+tool call is refused. The queries run under an engine access policy built at start from what the
+memory functions are inferred to write: reading, plus creating, updating and deleting data. Schema
+and saved-query changes are denied. The policy works on kinds of writes, not on labels, so the
+tool list is what keeps a `use` client to the memory functions.
+
+The memory functions are saved queries kept in the store (folder `memory`, marked as the
+product's). When graphersal-memory is upgraded, it replaces them and the schema with its own
+version, so edit copies under another name. Each memory function that reads or writes memories
+takes the project as a parameter. The server sets it on every call to the connection's project and
+hides it from the tool list, so an agent cannot read another project's memories by passing a
+different one.
 
 ## The engine
 

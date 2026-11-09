@@ -4,10 +4,11 @@
 graph on your machine, searched through MCP instead of loaded on every turn.**
 
 > [!WARNING]
-> **Pre-release. Nothing in this repository works yet.** This README describes the product we are
-> building, and the [status table](#status) says what exists. Today the binary has its command set and
-> help text, and every command says which stage will deliver it. Don't install it expecting memory
-> yet. Star or watch the repository if you want to follow along.
+> **Pre-release. Only the memory core works so far.** This README describes the product we are
+> building, and the [status table](#status) says what exists. Today you can serve the memory to one
+> agent session by hand ([try it](#try-the-memory-core)); the daemon, the one-command install and
+> session indexing are still to come, and every command that is not built yet says which stage
+> delivers it. Star or watch the repository if you want to follow along.
 
 ## The problem
 
@@ -201,14 +202,39 @@ Details: [docs/harnesses.md](docs/harnesses.md).
 
 | Feature | Status |
 |---|---|
-| Command-line skeleton (`--help`, command set) | available (every command reports "not implemented yet") |
-| Memory core: store, memory tools, MCP over stdio | planned (M1) |
+| Command-line skeleton (`--help`, command set) | available (commands of later stages report "not implemented yet") |
+| Memory core: store, memory tools, project and global memories, `use`/`develop` profiles, MCP over stdio (`mcp --no-daemon`) | available (M1; one session at a time) |
 | Shared daemon + stdio shim, several sessions at once | planned (M2) |
 | One-command install / uninstall for Claude Code, import, rule export | planned (M3) |
 | Indexing past sessions, opt-in summaries and facts | planned (M4) |
 | Built-in A/B (`bench`) | planned (M5) |
 | Release binaries and one-line installers | planned (M6) |
 | Other harnesses, browser UI, desktop app | planned (M7) |
+
+### Try the memory core
+
+Until the daemon (M2) and `install` (M3) arrive, you can serve the memory to one agent session in
+the same process. Build it with Rust (`cargo install --locked --git
+https://github.com/graphersal/graphersal-memory graphersal-memory`), then register it in Claude
+Code by hand:
+
+```sh
+claude mcp add graphersal-memory -- graphersal-memory mcp --no-daemon
+```
+
+- The store is created on first use in your per-user data directory (macOS
+  `~/Library/Application Support/graphersal-memory`, Linux `~/.local/share/graphersal-memory`,
+  Windows `%LOCALAPPDATA%\graphersal-memory`). `--data-dir DIR` or the environment variable
+  `GRAPHERSAL_MEMORY_DIR` puts it elsewhere, for example to try it on a throwaway store.
+- The project is the git repository root of the directory the harness starts it in (or that
+  directory); `--project ROOT` sets it. Memories are stored for the project unless the agent
+  saves them as global, and searches see the project's memories plus the global ones.
+- `--profile use` (the default) offers the memory tools: `memories`, `memory`, `remember`,
+  `forget`, `sessions`, `session`, `recall`. `--profile develop` adds schema, query, GQL and
+  saved-query tools.
+- One store serves one session at a time in this mode: a second session started while the first
+  runs fails to open the store. Past sessions are not indexed yet (M4), so `sessions` finds nothing
+  until then.
 
 The roadmap in user-facing words: [docs/roadmap.md](docs/roadmap.md). Why this exists:
 [docs/why.md](docs/why.md).
