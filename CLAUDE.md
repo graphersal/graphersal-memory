@@ -15,8 +15,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/cli.rs`: the clap command definitions and help text, plus parsing tests;
   - `src/commands.rs`: running a command (`run_cli`): `mcp` runs the shim (`--no-daemon`:
     serves in this process), `daemon` runs (`--foreground`) or starts the daemon, `install`,
-    `uninstall`, `status`, `doctor`, `import` and the hidden `hook` work on Claude Code (`Setup`
-    from the environment); `ui`, `bench`, `export` report their planned stage and exit with code 2;
+    `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench` and the hidden `hook` work on
+    Claude Code (`Setup` from the environment; `bench_options` for `bench`); `ui`, `export`
+    report their planned stage and exit with code 2;
   - `src/install.rs`: Claude Code's paths (`ClaudePaths`: `~/.claude.json`, `~/.claude/` or
     `$CLAUDE_CONFIG_DIR`), the plan and apply of `install` (MCP members, hook groups, the managed
     rule block `RULE_BLOCK` with its fingerprinted begin line), the state and backups in
@@ -55,6 +56,19 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `claude` resolved through `PATH`/`PATHEXT`, so npm's `claude.cmd` is found; std runs a
     `.cmd` through `cmd.exe` with safe quoting, so keep line breaks out of arguments) and `run`
     (stdin prompt, timeout, output);
+  - `src/bench.rs` + `src/bench/`: the built-in A/B (`bench`, `bench questions`): `Options`, the
+    `Harness` trait (`Process`: the real `claude -p` through `harness::run`; `DryRun`: canned,
+    no cost), the estimate and the cost guard (refuse above the budget, `--max-budget-usd` per
+    call, stop at the budget), the run (warm-up per arm, run id at the start of every prompt,
+    repeats, a judge call per answer), `Usage` and the verdict parsing;
+    `bench/questions.rs` the question set (generated from RAW transcripts with turn ids, never
+    from our summaries; `bench/questions/<project slug>.json`, user-editable, confirmed by
+    `--review`); `bench/arms.rs` the sandbox per arm (`mcp.json`, `settings.json`, `system.md`,
+    `cwd/`; the graph arm on `Store::fork_dir` of the live store served by `mcp --no-daemon`);
+    `bench/report.rs` the aggregation and `report.md`/`report.json` in `bench/<timestamp>/`;
+  - `src/bench_tests.rs`: `bench` in-process with a scripted harness on a temporary home and data
+    directory (the live files unchanged, the sandboxes never naming them, report numbers, budget
+    refusal and stop, confirmation, dry run);
   - `src/projects.rs`: `<data dir>/projects.json`: each project's git remote (credentials removed),
     recorded by the daemon when a project first connects (for re-mapping moved repositories later);
   - `src/fsutil.rs`: atomic writes and the FNV-1a fingerprint;
@@ -102,7 +116,10 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `tests/sessions_tests.rs`: the real binary's hooks, `import --sessions` and `summaries` on a
     temporary home with fixture transcripts (their time set a day back) and a fake `claude`
     shell script that records its calls; asserts zero calls without consent.
-- Planned areas (one module each when they arrive): `bench`, `export`, other
+  - `tests/bench_tests.rs`: the real binary's `bench` with a fake `claude` on `PATH` that records
+    its calls (dry run: zero calls; a run through the harness: the flags of every call, the live
+    store and the sources unchanged, the spend in the report).
+- Planned areas (one module each when they arrive): `export`, other
   harnesses (`install.rs` is Claude Code only; split it per harness when the second arrives).
 
 ## Memory model
@@ -163,8 +180,9 @@ CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and W
    daemon at its end (the daemon is detached: no test harness kills it for you). It NEVER reads or writes the real `~/.claude`, the user's stores or
    transcripts, or a running daemon or MCP server of the user. Tests make no network calls and
    call no model; LLM-dependent paths are tested with a fake harness binary.
-3. **The user's live configuration is never changed by a benchmark**, and install only writes
-   managed, marked parts. `uninstall` must restore the configuration byte for byte, and a test
+3. **The user's live configuration is never changed by a benchmark** (every `bench` arm is a
+   sandbox in the run directory; the graph arm works on a fork of the store), and install only
+   writes managed, marked parts. `uninstall` must restore the configuration byte for byte, and a test
    proves it (`install_tests.rs`, both of them). Tests never write under the real `~/.claude`:
    an in-process test builds its `Setup` from a temporary home (`install_tests::setup_in`) and
    never calls `run_cli` for install/status (that reads the real environment).

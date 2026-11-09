@@ -1,11 +1,11 @@
 # How it works
 
-> Pre-release: this page describes the target design. Implemented so far (M1 to M4): the store in
+> Pre-release: this page describes the target design. Implemented so far (M1 to M5): the store in
 > the per-user data directory, project and global memories, the two profiles with their access
 > policy, the daemon with the shim, the socket, the handshake, start on demand, idle exit, upgrade
 > and crash recovery, the settings file, the project records, the installation into Claude Code
 > with its hooks, the import of the file memory, and the background indexing of past sessions
-> with opt-in summaries. Not yet: the `ui` command, isolated project stores; see the
+> with opt-in summaries, and the built-in A/B ([Measuring it](ab-testing.md)). Not yet: the `ui` command, isolated project stores; see the
 > [status table](../README.md#status).
 
 ## Processes

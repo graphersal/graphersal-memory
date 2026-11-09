@@ -22,6 +22,7 @@ graphersal-memory is designed so that nothing leaves your machine unless you ask
 |---|---|---|
 | Nothing | by default | - |
 | Session summaries | only if you opt in, once per finished session (see below) | through **your own harness** (for example `claude -p` on your own subscription), to the model provider you already use |
+| The A/B (`bench`) | only when you run `graphersal-memory bench` and accept its estimate (see below) | through **your own harness**, like the summaries |
 | Embedding model download (planned) | only if you accept it during install | a one-time download of potion-multilingual-128M; the built-in embedder needs none |
 | Binary install or update | when you run the installer | GitHub Releases or crates.io |
 
@@ -70,6 +71,27 @@ servers and no transcript of its own (`--tools "" --strict-mcp-config --no-sessi
 and graphersal-memory's own hooks do nothing in it. The answer (a JSON summary) is stored in the
 graph on your machine; the harness's provider handles the prompt under the terms of your own
 account, as for any other session of yours.
+
+## The A/B: what `bench` sends
+
+`bench` runs only when you start it, shows its cost estimate first and asks (`--yes` skips the
+question, `--dry-run` sends nothing at all). Through your harness command it sends:
+
+- **to generate the questions** (once per project, or when you run `bench questions`): excerpts of
+  your newest finished raw transcripts of the project, up to about 120,000 characters: the text
+  of your prompts and of the assistant's text replies, each cut short, with their turn ids. Tool
+  inputs, tool output and thinking are not sent. The questions, reference answers and source
+  excerpts are stored in `bench/questions/` in the data directory;
+- **to answer them**, per arm: for the file-memory arm your `CLAUDE.md` files (without
+  graphersal-memory's marked block) and `MEMORY.md` in the prompt, with the memory files readable
+  from a copy; for the graphersal-memory arm the same instruction files, and the agent reads what
+  it searches for from a copy of your store; the no-memory arm gets neither;
+- **to judge each answer**: the question, its reference answer and the answer.
+
+Every call runs without your settings, hooks, plugins or MCP servers, with read-only tools, and
+with no transcript of its own (`--no-session-persistence`). The reports stay in `bench/` in the
+data directory. Claude Code may still update its own bookkeeping files for each run, as it does
+for any `claude -p` you run; graphersal-memory changes none of your configuration.
 
 ## Removing it
 

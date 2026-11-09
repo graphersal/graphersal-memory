@@ -4,13 +4,12 @@
 graph on your machine, searched through MCP instead of loaded on every turn.**
 
 > [!WARNING]
-> **Pre-release. The memory core, the shared daemon, the one-command install for Claude Code and
-> the indexing of past sessions (with opt-in summaries) work so far.** This README describes the
-> product we are building, and the [status table](#status) says what exists. Today you build the
-> binary with Rust and run `graphersal-memory install` ([try it](#try-it)); release binaries and
-> the built-in A/B are still to come, and every command that is not built yet says which stage
-> delivers it. Star or watch the repository if you want to
-> follow along.
+> **Pre-release. The memory core, the shared daemon, the one-command install for Claude Code, the
+> indexing of past sessions (with opt-in summaries) and the built-in A/B work so far.** This
+> README describes the product we are building, and the [status table](#status) says what
+> exists. Today you build the binary with Rust and run `graphersal-memory install`
+> ([try it](#try-it)); release binaries are still to come, and every command that is not built
+> yet says which stage delivers it. Star or watch the repository if you want to follow along.
 
 ## The problem
 
@@ -144,20 +143,32 @@ small background daemon on demand. The daemon exits after two idle hours (config
 
 ## Does it help? Measure it
 
-We don't ask you to take our word for it. `graphersal-memory bench` will run an A/B on **your own**
-memory and sessions:
+We don't ask you to take our word for it. `graphersal-memory bench` runs an A/B on **your own**
+memory and sessions (Claude Code):
 
-- **Arms**: no memory; your current setup as it is (including another memory tool, if you use
-  one); and graphersal-memory.
-- **Sandboxed**: every arm runs in a sandbox built for the run. Your live configuration is never
-  switched off or changed.
-- **References from raw transcripts**: questions and reference answers come from your raw session
-  transcripts, which every arm shares. They never come from our own summaries, which would favour
-  us. You confirm a sample of them.
+```sh
+graphersal-memory bench --dry-run      # the plan, the sandboxes and the cost estimate; spends nothing
+graphersal-memory bench                # shows the estimate, asks, runs, writes the report
+graphersal-memory bench questions --review   # read and confirm the generated questions
+```
+
+- **Arms**: no memory; your file memory as it is (`CLAUDE.md`, `MEMORY.md` and the memory
+  files); and graphersal-memory. An arm with your whole current setup (including another memory
+  tool, if you use one) is planned.
+- **Sandboxed**: every arm runs in a sandbox built for the run: its own MCP and settings files,
+  an empty working directory, read-only tools, and for graphersal-memory a copy of your store.
+  Your live configuration and store are never switched off or changed.
+- **References from raw transcripts**: questions and reference answers are generated from your
+  raw session transcripts, which every arm shares, never from our own summaries, which would
+  favour us. Each names the turns it comes from, and you can review and edit them.
 - **Judged and reported**: a judge scores each answer from 0 to 5 and flags confidently wrong
-  answers. The report gives quality, cost, tokens and cost per score point.
+  answers. The report gives quality, cost, tokens, turns and cost per score point, per arm and
+  per category.
+- **Cost guard**: you see an estimate first; a run above `--budget` ($3 by default) is refused,
+  and a run stops when its real spend reaches it. It runs through your own `claude -p`, on your
+  account.
 
-Method: [docs/ab-testing.md](docs/ab-testing.md).
+Method and a first run of the built-in bench: [docs/ab-testing.md](docs/ab-testing.md).
 
 ### What we measured so far
 
@@ -187,7 +198,8 @@ compared with graph memory. The answerer and the judge were both `claude -p --mo
 - **History favours the graph by construction.** File memory has no session history at all, so it
   scores 0 there. Some history references were written from the same LLM session summaries that
   the graph serves, which favours the graph. The product's `bench` builds references from raw
-  transcripts for this reason.
+  transcripts for this reason; its first, much smaller run is in
+  [docs/ab-testing.md](docs/ab-testing.md#a-first-run-of-the-built-in-bench).
 - **The best-scoring configuration is reported.** Earlier configurations of the graph arm on the
   same questions scored 4.19 and 4.33.
 
@@ -199,6 +211,9 @@ Sources and the full method are in [docs/ab-testing.md](docs/ab-testing.md#our-f
 - **Everything stays local.** The memory store lives in your per-user data directory, and the
   daemon listens on a local socket that only your OS user can open. There are no network ports.
 - **No telemetry.** Nothing is reported anywhere.
+- **The A/B runs only when you run it.** `bench` sends excerpts of your raw transcripts (to
+  generate questions) and your memory (to answer them) through your own harness, after showing
+  the estimate and asking.
 - **Summaries are opt-in.** Session summaries run only through your own harness (for example
   `claude -p` on your own subscription), never through an API key of ours or a service of ours.
   They run only after you agree, with a cost estimate first and a monthly budget cap. Above the
@@ -212,7 +227,7 @@ Details: [docs/privacy.md](docs/privacy.md).
 
 | Harness | Status |
 |---|---|
-| Claude Code | install, uninstall, import of the file memory, hooks, rule block (M3); past sessions and opt-in summaries (M4) |
+| Claude Code | install, uninstall, import of the file memory, hooks, rule block (M3); past sessions and opt-in summaries (M4); the A/B, `bench` (M5) |
 | opencode | planned (M7) |
 | OpenAI Codex CLI | planned (M7) |
 | Cursor | planned (M7) |
@@ -224,13 +239,13 @@ Details: [docs/harnesses.md](docs/harnesses.md).
 
 | Feature | Status |
 |---|---|
-| Command-line skeleton (`--help`, command set) | available (commands of later stages report "not implemented yet": `ui`, `bench`, `export`) |
+| Command-line skeleton (`--help`, command set) | available (commands of later stages report "not implemented yet": `ui`, `export`) |
 | Memory core: store, memory tools, project and global memories, `use`/`develop` profiles, MCP over stdio | available (M1) |
 | Shared daemon + stdio shim, several sessions at once (`mcp`, `daemon`, the daemon part of `status`) | available (M2; Linux and macOS tested, Windows builds but is untested) |
 | One-command install / uninstall for Claude Code, `status`, `doctor`, import of the file memory (`import`), the managed rule block, the session hooks, `config.json` | available (M3; Linux and macOS tested, Windows builds and its unit tests run) |
 | Import of `CLAUDE.md` rules, export of rules kept in the graph (`export`), the model download | planned |
 | Indexing past sessions (`import --sessions`, the hooks), opt-in summaries and facts through your own harness (`summaries estimate`, `status`, `enable`, `disable`), cost estimate and monthly budget cap | available (M4; tested with a fake harness, no model was called in the tests) |
-| Built-in A/B (`bench`) | planned (M5) |
+| Built-in A/B (`bench`, `bench questions`): arms no memory / file memory / graphersal-memory, sandboxed, questions from raw transcripts, judge, report, cost guard, dry run | available (M5; Claude Code; tested with a fake harness, and one small real run). The arm with your whole current setup is planned |
 | Release binaries and one-line installers | planned (M6) |
 | Other harnesses, browser UI, desktop app | planned (M7) |
 
@@ -280,6 +295,9 @@ Restart your Claude Code sessions afterwards. Details:
   `summaries status` shows the month's spend, `summaries disable` switches them off. They run
   through `claude -p --model sonnet` on your own account, or the command in `config.json`
   (`summaries.harness_command`).
+- The A/B: `graphersal-memory bench --dry-run` shows what a run would do and cost, `bench` runs
+  it (see [Does it help? Measure it](#does-it-help-measure-it)). Reports go to `bench/` in the
+  data directory.
 - To register it by hand instead: `claude mcp add -s user graphersal-memory -- graphersal-memory
   mcp`.
 
@@ -297,8 +315,9 @@ deleted.
 
 **Does it need a GPU, a cloud account or Docker?** No. It is one binary with a built-in embedder.
 
-**I already use another memory tool.** Keep it. The A/B can compare it against graphersal-memory
-without changing your setup. Import from another MCP memory tool goes through the agent itself:
+**I already use another memory tool.** Keep it. Comparing it against graphersal-memory in the A/B
+(an arm with your whole current setup, without changing it) is planned; today `bench` compares
+no memory, your file memory and graphersal-memory. Import from another MCP memory tool goes through the agent itself:
 both servers are connected, the agent reads from one and writes to the other.
 
 ## Built on Graphersal
