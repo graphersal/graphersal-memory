@@ -13,6 +13,7 @@ mod config;
 mod daemon;
 mod engine;
 mod fsutil;
+mod harness;
 mod hook;
 mod import;
 mod install;

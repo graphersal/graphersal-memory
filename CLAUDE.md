@@ -51,6 +51,10 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     --strict-mcp-config --no-session-persistence`), `run_harness` (prompt on stdin, timeout,
     `GRAPHERSAL_MEMORY_HOOK=off`), `parse_answer`, `Spend` (`<data dir>/sessions/spend.json`),
     `Summarizer` (exists only when enabled; budget check before each call), `facts`, `render`;
+  - `src/harness.rs`: running the user's harness: `program_path` (Windows: a bare name such as
+    `claude` resolved through `PATH`/`PATHEXT`, so npm's `claude.cmd` is found; std runs a
+    `.cmd` through `cmd.exe` with safe quoting, so keep line breaks out of arguments) and `run`
+    (stdin prompt, timeout, output);
   - `src/projects.rs`: `<data dir>/projects.json`: each project's git remote (credentials removed),
     recorded by the daemon when a project first connects (for re-mapping moved repositories later);
   - `src/fsutil.rs`: atomic writes and the FNV-1a fingerprint;

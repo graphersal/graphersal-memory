@@ -19,10 +19,8 @@
 //! harness reports (`total_cost_usd` of `claude -p`) is added, or the estimate when it reports
 //! none. Above the cap only raw turns are indexed; summaries catch up the next month.
 
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -361,7 +359,8 @@ pub fn harness_args(command: &[String]) -> Vec<String> {
     args
 }
 
-/// Runs the harness once: the prompt on stdin, the answer on stdout.
+/// Runs the harness once: the prompt on stdin, the answer on stdout (`crate::harness::run`:
+/// `claude.cmd` on Windows is found through `PATHEXT`).
 pub fn run_harness(
     command: &[String],
     prompt: &str,
@@ -369,70 +368,29 @@ pub fn run_harness(
     timeout: Duration,
 ) -> Result<Summary, String> {
     let args = harness_args(command);
-    let Some((program, rest)) = args.split_first() else {
+    if args.is_empty() {
         return Err("summaries.harness_command is empty".to_string());
-    };
-    let mut child = Command::new(program)
-        .args(rest)
-        .current_dir(work_dir)
-        .env(HOOK_ENV, "off")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("cannot run the harness {program}: {err}"))?;
-    let stdin = child.stdin.take();
-    let input = prompt.to_string();
-    let writer = std::thread::spawn(move || {
-        if let Some(mut stdin) = stdin {
-            let _ = stdin.write_all(input.as_bytes());
-        }
-    });
-    let mut stdout = child.stdout.take();
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        if let Some(stdout) = stdout.as_mut() {
-            let _ = stdout.take(64 * 1024 * 1024).read_to_end(&mut out);
-        }
-        out
-    });
-    let mut stderr = child.stderr.take();
-    let errors = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.take(64 * 1024).read_to_end(&mut out);
-        }
-        out
-    });
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
+    }
+    let output = crate::harness::run(&args, prompt, work_dir, &[(HOOK_ENV, "off")], timeout)
+        .map_err(|err| {
+            if err.contains("did not finish") {
+                format!(
                     "the harness did not finish within {} minutes",
                     timeout.as_secs() / 60
-                ));
+                )
+            } else {
+                err
             }
-            Err(err) => return Err(format!("cannot wait for the harness: {err}")),
-        }
-    };
-    let _ = writer.join();
-    let out = reader.join().unwrap_or_default();
-    let err = errors.join().unwrap_or_default();
-    let text = String::from_utf8_lossy(&out);
-    match parse_answer(&text) {
+        })?;
+    match parse_answer(&output.stdout) {
         Ok(summary) => Ok(summary),
         Err(why) => Err(format!(
             "{why} (exit {}; stdout: {}; stderr: {})",
-            status
-                .code()
+            output
+                .code
                 .map_or_else(|| "signal".to_string(), |c| c.to_string()),
-            clip(text.trim(), 300),
-            clip(String::from_utf8_lossy(&err).trim(), 300)
+            clip(output.stdout.trim(), 300),
+            clip(output.stderr.trim(), 300)
         )),
     }
 }
