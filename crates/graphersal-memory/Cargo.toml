@@ -11,7 +11,8 @@ authors.workspace = true
 readme = "../../README.md"
 keywords = ["mcp", "memory", "agents", "graph", "claude"]
 categories = ["command-line-utilities", "development-tools"]
-# Not published before the first release (stage M6).
+# Not on crates.io: releases are GitHub Release binaries (.github/workflows/release.yml) and
+# `cargo install --git`.
 publish = false
 
 [[bin]]

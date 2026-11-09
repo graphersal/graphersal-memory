@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/graphersal-memory"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -33,6 +33,18 @@ fd-lock = "4"
 # AF_UNIX sockets on Windows (10 1803 and later), the shim <-> daemon transport; std offers
 # them only on Unix (`std::os::unix::net`). Windows only.
 uds_windows = "1.1"
+
+[profile.release]
+# One codegen unit, as the engine's own release builds use.
+codegen-units = 1
+
+# The prebuilt binaries of every GitHub Release (.github/workflows/release.yml): release code,
+# whole-program LTO, symbols stripped. Panics keep unwinding (never `panic = "abort"`): the engine
+# rolls an interrupted unit back while it unwinds, so a store keeps no half-applied change.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+strip = true
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
