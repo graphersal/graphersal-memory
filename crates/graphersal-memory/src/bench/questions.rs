@@ -273,6 +273,32 @@ impl Excerpt {
             .find(|(turn, _)| turn == id)
             .map(|(_, text)| text.as_str())
     }
+
+    /// The excerpt's turn id a generator meant by `cited`: the id itself, or one written
+    /// loosely (in brackets, without `turn:`, with `session:`, or with a shortened session
+    /// uuid) when exactly one turn of the excerpt matches.
+    pub fn resolve(&self, cited: &str) -> Option<String> {
+        let cited = cited.trim().trim_matches(['[', ']', '`', '"', '\'']).trim();
+        if self.excerpt_of(cited).is_some() {
+            return Some(cited.to_string());
+        }
+        let rest = cited.find("turn:").map_or(cited, |at| &cited[at + 5..]);
+        let rest = rest.strip_prefix("session:").unwrap_or(rest);
+        let (session, n) = rest.rsplit_once(':')?;
+        let n: String = n.chars().take_while(char::is_ascii_digit).collect();
+        if session.len() < 4 || n.is_empty() {
+            return None;
+        }
+        let mut found = self.turns.iter().map(|(id, _)| id).filter(|id| {
+            id.strip_prefix("turn:")
+                .and_then(|id| id.rsplit_once(':'))
+                .is_some_and(|(uuid, turn)| turn == n && uuid.starts_with(session))
+        });
+        match (found.next(), found.next()) {
+            (Some(id), None) => Some(id.clone()),
+            _ => None,
+        }
+    }
 }
 
 /// The JSON schema of the generator's answer.
@@ -347,14 +373,14 @@ pub fn parse(answer: &Value, excerpt: &Excerpt, count: usize) -> Result<Vec<Ques
         let mut sources = Vec::new();
         let mut excerpts = Vec::new();
         for id in item["sources"].as_array().into_iter().flatten() {
-            let Some(id) = id.as_str().map(|s| s.trim().trim_matches(['[', ']'])) else {
+            let Some(id) = id.as_str().and_then(|id| excerpt.resolve(id)) else {
                 continue;
             };
-            if let Some(start) = excerpt.excerpt_of(id)
-                && !sources.iter().any(|s| s == id)
+            if let Some(start) = excerpt.excerpt_of(&id)
+                && !sources.contains(&id)
             {
-                sources.push(id.to_string());
                 excerpts.push(start.to_string());
+                sources.push(id);
             }
         }
         if sources.is_empty() {
@@ -423,6 +449,40 @@ mod tests {
                                   "sources": ["turn:s1:0"]}]}))});
         assert_eq!(parse(&in_result, &excerpt(), 5).unwrap().len(), 1);
         assert!(parse(&json!({"result": "sorry"}), &excerpt(), 5).is_err());
+    }
+
+    #[test]
+    fn loosely_cited_turn_ids_resolve_when_unique() {
+        let excerpt = Excerpt {
+            text: String::new(),
+            turns: vec![
+                ("turn:84f54f2f-ea8b-4a43:12".into(), "a".into()),
+                ("turn:84f54f2f-ea8b-4a43:3".into(), "b".into()),
+                ("turn:84f5ffff-0000-0000:3".into(), "c".into()),
+            ],
+            sessions: 2,
+        };
+        let id = "turn:84f54f2f-ea8b-4a43:12";
+        for cited in [
+            id,
+            "[turn:84f54f2f-ea8b-4a43:12]",
+            "turn:84f54f2f:12",
+            "84f54f2f-ea8b-4a43:12",
+            "turn:session:84f54f2f:12",
+            " `turn:84f54f2f-ea8b:12` ",
+        ] {
+            assert_eq!(excerpt.resolve(cited).as_deref(), Some(id), "{cited}");
+        }
+        // Ambiguous, unknown, too short or malformed: none.
+        for cited in [
+            "turn:84f5:3",
+            "turn:abcd:1",
+            "turn:84:12",
+            "turn:84f54f2f:x",
+            "x",
+        ] {
+            assert_eq!(excerpt.resolve(cited), None, "{cited}");
+        }
     }
 
     #[test]

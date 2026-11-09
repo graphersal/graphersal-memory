@@ -463,15 +463,26 @@ fn generate(
         input: prompt,
         cwd,
     });
+    // The raw answer stays beside the run, to see what a failed generation answered.
+    let raw = work.join("answer.json");
+    let _ = crate::fsutil::write_atomic(
+        &raw,
+        format!("{}\n", crate::jsonedit::render(&value, Some("  "), 0)).as_bytes(),
+    );
     let cost = value["total_cost_usd"].as_f64().unwrap_or(0.0);
     if value["is_error"] == Value::Bool(true) {
         return Err(format!(
-            "generating the questions failed (${cost:.3} spent): {}",
+            "generating the questions failed (${cost:.3} spent; the answer is in {}): {}",
+            raw.display(),
             value["result"].as_str().unwrap_or("error")
         ));
     }
-    let questions = questions::parse(&value, excerpt, count)
-        .map_err(|err| format!("{err} (${cost:.3} spent)"))?;
+    let questions = questions::parse(&value, excerpt, count).map_err(|err| {
+        format!(
+            "{err} (${cost:.3} spent; the answer is in {})",
+            raw.display()
+        )
+    })?;
     Ok(QuestionSet {
         project: options.project.clone(),
         generated_at: crate::daemon::now_utc(),
