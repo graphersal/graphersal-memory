@@ -1,0 +1,279 @@
+//! The shim <-> daemon protocol (internal; it may change in any release, the protocol number
+//! says which one a side speaks).
+//!
+//! A connection starts with ONE JSON line from the client and ONE JSON line answer:
+//!
+//! - a handshake: `{"shim_version", "protocol": 1, "profile": "use"|"develop", "project":
+//!   {"root", "name"?}, "harness": {"name", "version"?}, "data_dir"?}` -> `{"ok": true,
+//!   "daemon_version", "store"}`, then the connection carries plain MCP stdio framing
+//!   (newline-delimited JSON-RPC) in both directions until either side closes it;
+//! - or a control request: `{"protocol": 1, "control": "status"|"stop"}` -> one answer, then
+//!   the daemon closes the connection.
+//!
+//! A refusal is `{"ok": false, "daemon_version", "error": {"code", "message"}}`; the codes are
+//! the [`Refusal`] variants. `restarting` and `stopping` are retried by the shim (the daemon
+//! exits; the next attempt starts a new one).
+
+use serde_json::{Value, json};
+
+use crate::cli::Profile;
+
+/// The protocol number this binary speaks.
+pub const PROTOCOL: u64 = 1;
+
+/// The longest handshake or control line accepted (64 KiB).
+pub const MAX_HANDSHAKE_BYTES: usize = 64 * 1024;
+
+/// This binary's version.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Why the daemon refused a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The line is not a handshake (not JSON, a field missing or of the wrong type).
+    BadHandshake,
+    /// The client speaks another protocol number.
+    Protocol,
+    /// The profile is not `use` or `develop`.
+    UnknownProfile,
+    /// The client works on another data directory than the daemon serves.
+    DataDir,
+    /// The store of the project cannot be opened.
+    Store,
+    /// The daemon is older than the shim and exits now so a new one starts (retry).
+    Restarting,
+    /// The daemon is stopping (retry).
+    Stopping,
+}
+
+impl Refusal {
+    /// The code on the wire.
+    pub fn code(self) -> &'static str {
+        match self {
+            Refusal::BadHandshake => "bad_handshake",
+            Refusal::Protocol => "protocol",
+            Refusal::UnknownProfile => "unknown_profile",
+            Refusal::DataDir => "data_dir",
+            Refusal::Store => "store",
+            Refusal::Restarting => "restarting",
+            Refusal::Stopping => "stopping",
+        }
+    }
+
+    /// Whether the shim retries (the daemon goes away and the next attempt starts a new one).
+    pub fn is_retryable_code(code: &str) -> bool {
+        code == Refusal::Restarting.code() || code == Refusal::Stopping.code()
+    }
+}
+
+/// A refusal answer line (without its line end).
+pub fn refusal(kind: Refusal, message: &str) -> String {
+    json!({"ok": false, "daemon_version": VERSION,
+           "error": {"code": kind.code(), "message": message}})
+    .to_string()
+}
+
+/// A handshake as the daemon reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handshake {
+    /// The shim's version.
+    pub shim_version: String,
+    /// The connection's profile.
+    pub profile: Profile,
+    /// The project key (its root).
+    pub project: String,
+    /// The harness's name (diagnostics only).
+    pub harness: String,
+    /// The data directory the shim works on, when it says.
+    pub data_dir: Option<String>,
+}
+
+/// What the first line of a connection asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opening {
+    /// An MCP connection.
+    Handshake(Handshake),
+    /// A control request (`status`, `stop`).
+    Control(String),
+}
+
+/// Parses the first line of a connection; the error is the refusal to answer.
+pub fn parse_opening(line: &[u8]) -> Result<Opening, (Refusal, String)> {
+    let bad = |what: &str| {
+        (
+            Refusal::BadHandshake,
+            format!(
+                "the first line is not a graphersal-memory handshake ({what}); expected \
+                 {{\"protocol\": {PROTOCOL}, \"shim_version\", \"profile\", \"project\": \
+                 {{\"root\"}}, \"harness\": {{\"name\"}}}}"
+            ),
+        )
+    };
+    let value: Value = serde_json::from_slice(line).map_err(|_| bad("not JSON"))?;
+    let object = value.as_object().ok_or_else(|| bad("not an object"))?;
+    let protocol = object
+        .get("protocol")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| bad("no protocol number"))?;
+    if protocol != PROTOCOL {
+        return Err((
+            Refusal::Protocol,
+            format!(
+                "protocol {protocol} is not supported by this daemon (version {VERSION}, \
+                 protocol {PROTOCOL}): use a graphersal-memory binary of the same release for \
+                 the shim and the daemon"
+            ),
+        ));
+    }
+    if let Some(control) = object.get("control") {
+        let control = control
+            .as_str()
+            .ok_or_else(|| bad("control is not a string"))?;
+        return Ok(Opening::Control(control.to_string()));
+    }
+    let text = |key: &str| object.get(key).and_then(Value::as_str);
+    let shim_version = text("shim_version").ok_or_else(|| bad("no shim_version"))?;
+    let profile = text("profile").ok_or_else(|| bad("no profile"))?;
+    let profile = match profile {
+        "use" => Profile::Use,
+        "develop" => Profile::Develop,
+        other => {
+            return Err((
+                Refusal::UnknownProfile,
+                format!("unknown profile '{other}': expected use or develop"),
+            ));
+        }
+    };
+    let project = object
+        .get("project")
+        .and_then(|project| project.get("root"))
+        .and_then(Value::as_str)
+        .filter(|root| !root.is_empty())
+        .ok_or_else(|| bad("no project root"))?;
+    let harness = object
+        .get("harness")
+        .and_then(|harness| harness.get("name"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("no harness name"))?;
+    Ok(Opening::Handshake(Handshake {
+        shim_version: shim_version.to_string(),
+        profile,
+        project: project.to_string(),
+        harness: harness.to_string(),
+        data_dir: text("data_dir").map(str::to_string),
+    }))
+}
+
+/// The handshake line the shim sends (without its line end).
+pub fn handshake_line(profile: Profile, project: &str, harness: &str, data_dir: &str) -> String {
+    let name = std::path::Path::new(project)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    json!({
+        "shim_version": VERSION,
+        "protocol": PROTOCOL,
+        "profile": match profile { Profile::Use => "use", Profile::Develop => "develop" },
+        "project": {"root": project, "name": name},
+        "harness": {"name": harness, "version": null},
+        "data_dir": data_dir,
+    })
+    .to_string()
+}
+
+/// A control request line (without its line end).
+pub fn control_line(control: &str) -> String {
+    json!({"protocol": PROTOCOL, "control": control}).to_string()
+}
+
+/// Whether version `a` is older than version `b` (`major.minor.patch[-pre]`, semver order; a
+/// version that does not parse is never older).
+pub fn older(a: &str, b: &str) -> bool {
+    match (parse_version(a), parse_version(b)) {
+        (Some(a), Some(b)) => {
+            if a.0 != b.0 {
+                return a.0 < b.0;
+            }
+            match (a.1, b.1) {
+                (Some(_), None) => true,
+                (Some(x), Some(y)) => x < y,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+type Version<'a> = ((u64, u64, u64), Option<&'a str>);
+
+fn parse_version(text: &str) -> Option<Version<'_>> {
+    let text = text.split('+').next()?;
+    let (core, pre) = match text.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (text, None),
+    };
+    let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
+    let triple = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some((triple, pre))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_handshake_round_trips() {
+        let line = handshake_line(Profile::Develop, "/w/app", "claude-code", "/d");
+        let Ok(Opening::Handshake(handshake)) = parse_opening(line.as_bytes()) else {
+            panic!("{line}");
+        };
+        assert_eq!(handshake.profile, Profile::Develop);
+        assert_eq!(handshake.project, "/w/app");
+        assert_eq!(handshake.harness, "claude-code");
+        assert_eq!(handshake.shim_version, VERSION);
+        assert_eq!(handshake.data_dir.as_deref(), Some("/d"));
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["project"]["name"], "app");
+        assert_eq!(
+            parse_opening(control_line("status").as_bytes()),
+            Ok(Opening::Control("status".into()))
+        );
+    }
+
+    #[test]
+    fn refusals_name_what_is_wrong() {
+        let (kind, message) = parse_opening(b"hello").unwrap_err();
+        assert_eq!(kind, Refusal::BadHandshake);
+        assert!(message.contains("not JSON"), "{message}");
+        let (kind, message) = parse_opening(
+            br#"{"protocol":1,"shim_version":"0.0.0","profile":"admin","project":{"root":"/w"},"harness":{"name":"x"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(kind, Refusal::UnknownProfile);
+        assert!(message.contains("'admin'") && message.contains("use or develop"));
+        let (kind, message) = parse_opening(br#"{"protocol":2,"control":"status"}"#).unwrap_err();
+        assert_eq!(kind, Refusal::Protocol);
+        assert!(message.contains("protocol 2"), "{message}");
+        let (kind, message) =
+            parse_opening(br#"{"protocol":1,"shim_version":"0.0.0","profile":"use"}"#).unwrap_err();
+        assert_eq!(kind, Refusal::BadHandshake);
+        assert!(message.contains("no project root"), "{message}");
+        let line = refusal(Refusal::Stopping, "bye");
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error"]["code"], "stopping");
+        assert!(Refusal::is_retryable_code("restarting"));
+        assert!(!Refusal::is_retryable_code("protocol"));
+    }
+
+    #[test]
+    fn versions_compare_in_semver_order() {
+        assert!(older("0.0.0-old", "0.0.0"));
+        assert!(older("0.1.9", "0.2.0"));
+        assert!(older("1.0.0-alpha", "1.0.0-beta"));
+        assert!(!older("0.2.0", "0.2.0"));
+        assert!(!older("0.3.0", "0.2.0"));
+        assert!(!older("0.2.0", "0.2.0-rc1"));
+        assert!(!older("garbage", "0.1.0"));
+        assert!(!older("0.1.0+build", "0.1.0"));
+    }
+}

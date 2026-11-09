@@ -1,5 +1,6 @@
-//! The MCP side: the two built-in profiles (`use`, `develop`), the project of a connection, and
-//! serving one store over stdio in this process (`graphersal-memory mcp --no-daemon`).
+//! The MCP side: the two built-in profiles (`use`, `develop`), the project of a connection, an
+//! open store served over MCP ([`StoreRuntime`]: the daemon holds one per store), and serving
+//! the default store over stdio in this process (`graphersal-memory mcp --no-daemon`).
 //!
 //! The engine pieces: `graphersal-serve` runs the store's session on its own thread
 //! (`spawn_session`, `Context`), `graphersal-mcp` speaks MCP (`Profile`, `Connection`,
@@ -12,14 +13,15 @@ use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use graphersal_mcp::{McpConfig, Profile};
+use graphersal::persist::Store;
+use graphersal_mcp::{Mcp, McpConfig, Profile};
 use graphersal_serve::{Context, Exposure, HostCheck, Runner};
 use graphersal_session::{Session, SessionPresets};
 use serde_json::{Value, json};
 
 use crate::catalog;
 use crate::cli::Profile as ProfileKind;
-use crate::store;
+use crate::{registry, store};
 
 /// The instructions of the `use` server.
 pub const USE_INSTRUCTIONS: &str = include_str!("mcp/use.md");
@@ -105,7 +107,7 @@ pub fn project_key(flag: Option<&Path>, cwd: &Path) -> String {
 }
 
 /// `path` canonicalized (without Windows' verbatim prefix), else as given.
-fn canonical(path: &Path) -> PathBuf {
+pub(crate) fn canonical(path: &Path) -> PathBuf {
     match std::fs::canonicalize(path) {
         Ok(path) => {
             let text = path.display().to_string();
@@ -136,50 +138,128 @@ pub fn serve(
     read: impl BufRead,
     write: impl Write + Send,
 ) -> Result<(), String> {
-    let store = store::open_or_create(&store::default_store_dir(&options.data_dir))?;
-    let served = store.clone();
-    let (jobs, use_policy) = graphersal_serve::spawn_session(
-        SessionPresets::new(),
-        move |session: &mut Session| -> Result<_, String> {
-            session
-                .attach_store(served, "memory")
-                .map_err(|err| err.to_string())?;
-            catalog::apply(session)?;
-            catalog::use_policy(session)
-        },
-        None,
-    )
-    .map_err(|err| format!("cannot start the memory store: {err}"))?;
-    let context = Context::builder(
-        Runner::Session(jobs),
-        HostCheck::new(Exposure::Loopback, 0, ""),
-    )
-    .store(Some(store.clone()))
-    .mcp(Some(graphersal_mcp::Mcp::new(false, None, false)))
-    .mcp_profile(profile(options.profile, use_policy)?)
-    .build();
-    let served = context
-        .mcp_connection()
-        .map_err(|err| err.to_string())
-        .and_then(|connection| {
-            let binding = Arc::new(ProjectBinding::new(&options.project));
-            let result = graphersal_mcp::serve_lines(
-                &connection,
-                BoundReader::new(read, binding.clone()),
-                BoundWriter::new(write, binding),
-            )
-            .map_err(|err| format!("the MCP stream failed: {}", err.message()));
-            drop(connection);
-            result
-        });
-    // Close the store before returning: the session thread drops its handle, then the last one
-    // goes here (a later open in this process, or the next process, finds it unlocked).
-    let closed = context
-        .call(|session| *session = Session::new())
-        .map_err(|err| format!("cannot close the memory store: {}", err.message()));
-    drop(context);
-    drop(store);
+    let runtime = StoreRuntime::open(
+        registry::DEFAULT_STORE,
+        &store::default_store_dir(&options.data_dir),
+        Arc::new(endpoint()),
+    )?;
+    let served = runtime.serve(options.profile, &options.project, None, read, write);
+    let closed = runtime.close();
     served.and(closed)
+}
+
+/// The MCP endpoint every store's contexts share (its statistics and tool catalog are the
+/// process's).
+pub fn endpoint() -> Mcp {
+    Mcp::new(false, None, false)
+}
+
+/// One open store served over MCP: its session thread (`graphersal-serve`'s runtime) and one
+/// context per profile over that session, so connections of both profiles share the store's
+/// single writer.
+pub struct StoreRuntime {
+    name: String,
+    store: Arc<Store>,
+    using: Arc<Context>,
+    developing: Arc<Context>,
+}
+
+impl StoreRuntime {
+    /// Opens (creates on first use) the store `name` in `dir`, applies the product catalog and
+    /// starts its session thread; `mcp` is the process's endpoint.
+    pub fn open(name: &str, dir: &Path, mcp: Arc<Mcp>) -> Result<Self, String> {
+        let store = store::open_or_create(dir)?;
+        let served = store.clone();
+        let (jobs, use_policy) = graphersal_serve::spawn_session(
+            SessionPresets::new(),
+            move |session: &mut Session| -> Result<_, String> {
+                session
+                    .attach_store(served, "memory")
+                    .map_err(|err| err.to_string())?;
+                catalog::apply(session)?;
+                catalog::use_policy(session)
+            },
+            None,
+        )
+        .map_err(|err| format!("cannot start the memory store {}: {err}", dir.display()))?;
+        let context = |kind: ProfileKind| -> Result<Arc<Context>, String> {
+            Ok(Context::builder(
+                Runner::Session(jobs.clone()),
+                HostCheck::new(Exposure::Loopback, 0, ""),
+            )
+            .store(Some(store.clone()))
+            .shared_mcp(mcp.clone())
+            .mcp_profile(profile(kind, use_policy.clone())?)
+            .build())
+        };
+        Ok(Self {
+            name: name.to_string(),
+            using: context(ProfileKind::Use)?,
+            developing: context(ProfileKind::Develop)?,
+            store,
+        })
+    }
+
+    /// The store's name in the registry.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The context of the profile `kind`.
+    pub fn context(&self, kind: ProfileKind) -> &Arc<Context> {
+        match kind {
+            ProfileKind::Use => &self.using,
+            ProfileKind::Develop => &self.developing,
+        }
+    }
+
+    /// Ticks the store's scheduled jobs; their work runs on job worker threads, never on the
+    /// session thread (`graphersal_serve::start_job_ticker`).
+    pub fn start_jobs(&self) -> Result<(), String> {
+        graphersal_serve::start_job_ticker(&self.using, None)
+            .map_err(|err| format!("cannot start the scheduled jobs of {}: {err}", self.name))
+    }
+
+    /// Serves one MCP connection of profile `kind` bound to `project` over newline-delimited
+    /// JSON-RPC on `read`/`write`, until `read` ends.
+    pub fn serve(
+        &self,
+        kind: ProfileKind,
+        project: &str,
+        identity: Option<&str>,
+        read: impl BufRead,
+        write: impl Write + Send,
+    ) -> Result<(), String> {
+        let connection = self
+            .context(kind)
+            .mcp_connection()
+            .map_err(|err| err.to_string())?;
+        let connection = match identity {
+            Some(identity) => connection.with_identity(identity),
+            None => connection,
+        };
+        let binding = Arc::new(ProjectBinding::new(project));
+        graphersal_mcp::serve_lines(
+            &connection,
+            BoundReader::new(read, binding.clone()),
+            BoundWriter::new(write, binding),
+        )
+        .map_err(|err| format!("the MCP stream failed: {}", err.message()))
+    }
+
+    /// Closes the store: the session lets go of it, then the store is shut down (WAL synced,
+    /// marked closed cleanly, its lock released), so a later open finds it unlocked.
+    pub fn close(&self) -> Result<(), String> {
+        let released = self
+            .using
+            .call(|session| *session = Session::new())
+            .map_err(|err| format!("cannot close the memory store: {}", err.message()));
+        let shut = self
+            .store
+            .shutdown()
+            .map_err(|err| format!("cannot close the memory store {}: {err}", self.name));
+        released.and(shut)
+    }
 }
 
 /// Binds the `project` parameter of the memory functions to one project, on the JSON-RPC

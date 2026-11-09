@@ -25,6 +25,10 @@ graphersal-mcp = { workspace = true }
 graphersal-serve = { workspace = true }
 graphersal-session = { workspace = true }
 serde_json = { workspace = true }
+fd-lock = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+uds_windows = { workspace = true }
 
 [lints]
 workspace = true
