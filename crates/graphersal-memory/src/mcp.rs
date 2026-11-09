@@ -143,6 +143,8 @@ pub fn serve(
         &store::default_store_dir(&options.data_dir),
         Arc::new(endpoint()),
     )?;
+    // Not fatal: the project record only helps a later re-mapping of a moved repository.
+    let _ = crate::projects::record(&options.data_dir, &options.project);
     let served = runtime.serve(options.profile, &options.project, None, read, write);
     let closed = runtime.close();
     served.and(closed)

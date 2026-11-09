@@ -28,10 +28,11 @@ const LONG_VERSION: &str = concat!(
         graphersal-memory keeps your agent's rules, decisions, past sessions and facts in a local \
         graph database and lets the agent search them through MCP, instead of loading a growing \
         memory file on every turn. Everything stays on your machine.\n\n\
-        PRE-RELEASE: `mcp` (the stdio server a harness starts; it shares one background daemon \
-        with every other session), `daemon` and `status` (the daemon part) work. Every other \
-        command says which stage delivers it; the plan is in docs/roadmap.md.",
-    after_help = "Start with `graphersal-memory install` (planned). \
+        PRE-RELEASE: `install`, `uninstall`, `status`, `doctor` and `import` (for Claude Code), \
+        `mcp` (the stdio server a harness starts; it shares one background daemon with every \
+        other session) and `daemon` work. Every other command says which stage delivers it; \
+        the plan is in docs/roadmap.md.",
+    after_help = "Start with `graphersal-memory install`. \
         Docs: https://github.com/graphersal/graphersal-memory",
     propagate_version = true,
     subcommand_required = true,
@@ -64,6 +65,16 @@ pub enum Command {
         /// Show what would change without changing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Do not ask before changing anything.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Also download a better embedding model (planned: today the built-in embedder is
+        /// used and this only says so).
+        #[arg(long)]
+        with_model: bool,
+        /// Also register the develop MCP server (structure tools; off by default).
+        #[arg(long)]
+        enable_develop: bool,
     },
     /// Remove exactly what `install` added; your own settings stay untouched.
     Uninstall {
@@ -73,6 +84,15 @@ pub enum Command {
         /// Show what would change without changing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Do not ask before changing anything.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Also delete the data directory with every memory in it (asks first unless --yes).
+        #[arg(long, conflicts_with = "disable_develop")]
+        purge: bool,
+        /// Only unregister the develop MCP server; everything else stays installed.
+        #[arg(long)]
+        disable_develop: bool,
     },
     /// Show the daemon, the stores and what is installed where.
     Status,
@@ -112,7 +132,8 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Import existing memory: memory files, instruction-file rules, past sessions.
+    /// Import the harness's file memory (MEMORY.md and the memory files; new and changed files
+    /// only).
     Import {
         /// Show what would be imported without writing anything.
         #[arg(long)]
@@ -126,6 +147,13 @@ pub enum Command {
         /// Show the managed block without writing it.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Run a harness hook (the hooks `install` adds call this; not for you).
+    #[command(hide = true)]
+    Hook {
+        /// The hook event.
+        #[arg(value_enum)]
+        event: crate::hook::HookEvent,
     },
 }
 
@@ -195,7 +223,10 @@ mod tests {
             parse(&["install"]).unwrap().command,
             Command::Install {
                 harness: Harness::ClaudeCode,
-                dry_run: false
+                dry_run: false,
+                yes: false,
+                with_model: false,
+                enable_develop: false
             }
         );
         assert_eq!(
@@ -226,7 +257,10 @@ mod tests {
                 .command,
             Command::Uninstall {
                 harness: Harness::Cursor,
-                dry_run: true
+                dry_run: true,
+                yes: false,
+                purge: false,
+                disable_develop: false
             }
         );
         assert_eq!(
@@ -308,6 +342,46 @@ mod tests {
             assert!(help.contains(name), "help lacks {name}");
         }
         assert!(help.contains("PRE-RELEASE"));
+    }
+
+    #[test]
+    fn install_and_uninstall_options_parse() {
+        assert_eq!(
+            parse(&["install", "--yes", "--with-model", "--enable-develop"])
+                .unwrap()
+                .command,
+            Command::Install {
+                harness: Harness::ClaudeCode,
+                dry_run: false,
+                yes: true,
+                with_model: true,
+                enable_develop: true
+            }
+        );
+        assert_eq!(
+            parse(&["uninstall", "-y", "--purge"]).unwrap().command,
+            Command::Uninstall {
+                harness: Harness::ClaudeCode,
+                dry_run: false,
+                yes: true,
+                purge: true,
+                disable_develop: false
+            }
+        );
+        assert_eq!(
+            parse(&["uninstall", "--purge", "--disable-develop"])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::ArgumentConflict
+        );
+        assert_eq!(
+            parse(&["hook", "session-start"]).unwrap().command,
+            Command::Hook {
+                event: crate::hook::HookEvent::SessionStart
+            }
+        );
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("\n  hook"), "the hook command is hidden");
     }
 
     #[test]
