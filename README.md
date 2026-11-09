@@ -4,11 +4,12 @@
 graph on your machine, searched through MCP instead of loaded on every turn.**
 
 > [!WARNING]
-> **Pre-release. The memory core, the shared daemon and the one-command install for Claude Code
-> work so far.** This README describes the product we are building, and the [status table](#status)
-> says what exists. Today you build the binary with Rust and run `graphersal-memory install`
-> ([try it](#try-it)); release binaries and session indexing are still to come, and every command
-> that is not built yet says which stage delivers it. Star or watch the repository if you want to
+> **Pre-release. The memory core, the shared daemon, the one-command install for Claude Code and
+> the indexing of past sessions (with opt-in summaries) work so far.** This README describes the
+> product we are building, and the [status table](#status) says what exists. Today you build the
+> binary with Rust and run `graphersal-memory install` ([try it](#try-it)); release binaries and
+> the built-in A/B are still to come, and every command that is not built yet says which stage
+> delivers it. Star or watch the repository if you want to
 > follow along.
 
 ## The problem
@@ -105,9 +106,10 @@ changes anything (`--dry-run` only shows the plan, `--yes` skips the question). 
    off, so it is simply not registered until you run `install --enable-develop`
    (`uninstall --disable-develop` removes it again).
 2. **Adds two hooks** to `~/.claude/settings.json`. At session start and at session end, the
-   memory files of the current project that are new or changed are imported, and the session
-   start adds one status line to the agent's context. Neither blocks your session: each stops
-   after 15 seconds and never fails. (Indexing of finished sessions joins the hooks in stage M4.)
+   memory files of the current project that are new or changed are imported, the indexing of
+   finished sessions is queued in the background daemon, and the session start adds one status
+   line to the agent's context. Neither blocks your session: each stops after 15 seconds and
+   never fails, and the indexing itself never runs in the hook.
 3. **Imports your existing file memory**: `MEMORY.md` and the memory files of every project under
    `~/.claude/projects/`, with their kind, title, order and `[[links]]`, into the project they
    belong to. It reads them and does not change or delete them, and running it again updates
@@ -115,9 +117,14 @@ changes anything (`--dry-run` only shows the plan, `--yes` skips the question). 
 4. **Writes the managed rule block**, a clearly marked section in `~/.claude/CLAUDE.md`, telling the
    agent that its memory lives in graphersal-memory and how to use the tools. If you edit inside
    the block, install and uninstall report a conflict and leave your edit alone.
-5. **The better embedding model** (potion-multilingual-128M) is planned: `--with-model` says so
+5. **Indexes your past sessions** in the background: every finished transcript under
+   `~/.claude/projects/` becomes a searchable session with its turns, locally and for free.
+   **Summaries are asked for separately and default to no**: install shows the number of
+   sessions and an estimated cost, and only a "yes" (or `--summaries`) switches them on; `--yes`
+   alone leaves them off. See [Privacy](#privacy).
+6. **The better embedding model** (potion-multilingual-128M) is planned: `--with-model` says so
    today, and the built-in embedder works with no download.
-6. **Prints a report**: what was imported, which files changed, where the backups are.
+7. **Prints a report**: what was imported, which files changed, where the backups are.
 
 The JSON files are edited in place: only our entries are inserted, the rest of each file keeps its
 bytes, and every file is backed up into the data directory before its first change. (`claude mcp
@@ -205,7 +212,7 @@ Details: [docs/privacy.md](docs/privacy.md).
 
 | Harness | Status |
 |---|---|
-| Claude Code | install, uninstall, import of the file memory, hooks, rule block (M3); session indexing planned (M4) |
+| Claude Code | install, uninstall, import of the file memory, hooks, rule block (M3); past sessions and opt-in summaries (M4) |
 | opencode | planned (M7) |
 | OpenAI Codex CLI | planned (M7) |
 | Cursor | planned (M7) |
@@ -222,7 +229,7 @@ Details: [docs/harnesses.md](docs/harnesses.md).
 | Shared daemon + stdio shim, several sessions at once (`mcp`, `daemon`, the daemon part of `status`) | available (M2; Linux and macOS tested, Windows builds but is untested) |
 | One-command install / uninstall for Claude Code, `status`, `doctor`, import of the file memory (`import`), the managed rule block, the session hooks, `config.json` | available (M3; Linux and macOS tested, Windows builds and its unit tests run) |
 | Import of `CLAUDE.md` rules, export of rules kept in the graph (`export`), the model download | planned |
-| Indexing past sessions, opt-in summaries and facts | planned (M4) |
+| Indexing past sessions (`import --sessions`, the hooks), opt-in summaries and facts through your own harness (`summaries estimate`, `status`, `enable`, `disable`), cost estimate and monthly budget cap | available (M4; tested with a fake harness, no model was called in the tests) |
 | Built-in A/B (`bench`) | planned (M5) |
 | Release binaries and one-line installers | planned (M6) |
 | Other harnesses, browser UI, desktop app | planned (M7) |
@@ -263,7 +270,16 @@ Restart your Claude Code sessions afterwards. Details:
   second session fails to open the store, and so does a daemon while it runs).
 - `graphersal-memory import` imports new and changed memory files at any time (the hooks do it for
   the current project).
-- Past sessions are not indexed yet (M4), so `sessions` finds nothing until then.
+- Past sessions: finished Claude Code transcripts (unchanged for 30 minutes, or ended) are
+  indexed by the daemon in the background; the hooks queue it, and `graphersal-memory import
+  --sessions` runs it now with progress. Without summaries, `sessions()` lists the newest
+  sessions and `recall(text, label="turn")` searches what was said; `sessions(text)` searches the
+  facts of summaries, so it finds something once summaries are on.
+- Summaries: `graphersal-memory summaries estimate` shows the sessions waiting and an estimated
+  cost, `summaries enable` switches them on (it asks; `--budget 5` sets the monthly cap),
+  `summaries status` shows the month's spend, `summaries disable` switches them off. They run
+  through `claude -p --model sonnet` on your own account, or the command in `config.json`
+  (`summaries.harness_command`).
 - To register it by hand instead: `claude mcp add -s user graphersal-memory -- graphersal-memory
   mcp`.
 

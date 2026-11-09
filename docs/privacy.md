@@ -21,7 +21,7 @@ graphersal-memory is designed so that nothing leaves your machine unless you ask
 | What | When | Where it goes |
 |---|---|---|
 | Nothing | by default | - |
-| Session summaries | only if you opt in | through **your own harness** (for example `claude -p` on your own subscription), to the model provider you already use |
+| Session summaries | only if you opt in, once per finished session (see below) | through **your own harness** (for example `claude -p` on your own subscription), to the model provider you already use |
 | Embedding model download (planned) | only if you accept it during install | a one-time download of potion-multilingual-128M; the built-in embedder needs none |
 | Binary install or update | when you run the installer | GitHub Releases or crates.io |
 
@@ -34,13 +34,42 @@ graphersal-memory is designed so that nothing leaves your machine unless you ask
 Summaries make past sessions much more useful: decisions with their why, corrections, outcomes and
 open threads. They also cost model usage on your account. So:
 
-- they are **off until you agree**, and you choose the scope (past sessions, new sessions only, or
-  none);
-- you see a **cost estimate** before anything runs;
-- a **monthly budget cap** applies: above it, only raw turns are indexed, which is local and free,
-  and summaries catch up when the budget allows.
+- they are **off until you agree**: `install` asks (the default answer is no, and `--yes` alone
+  keeps them off; `--summaries` says yes), or `graphersal-memory summaries enable` asks later.
+  The switch is `"summaries": {"enabled": true}` in `config.json` in the data directory;
+  `summaries disable` turns it off again. `"since": "2026-11-01"` there limits them to newer
+  sessions;
+- you see a **cost estimate** before anything runs (`graphersal-memory summaries estimate`, also
+  shown by `install` and `summaries enable`): the sessions without a summary and an approximate
+  price at list price. It is an estimate (about four characters per token, $3 per million input
+  and $15 per million output tokens, plus the harness's own prompt), not a bill;
+- a **monthly budget cap** applies (`summaries.monthly_budget_usd`, $5 by default, per calendar
+  month in UTC): before each call the month's spend plus the call's estimate must stay within it;
+  after the call the cost your harness reports is added (`claude -p` reports it; for another
+  harness the estimate is counted). Above the cap, only raw turns are indexed, which is local and
+  free, and summaries catch up next month. `summaries status` shows the month's spend.
 
 Without summaries, raw turns are still indexed locally and searchable.
+
+### What is sent to your harness, and when
+
+Only with summaries on, and only from the background daemon (never from a hook or an agent's
+call): once per finished session (again only if the session grows later, for example when you
+resume it), the daemon runs your harness command (`claude -p --model sonnet` by default,
+`summaries.harness_command` in `config.json`) once and writes to its standard input:
+
+- the instructions (summarize in English: decisions with why, corrections, outcomes, open
+  threads), with the project's directory name;
+- the session's title, start and end time, git branches and the paths of the files edited;
+- Claude Code's own compaction summaries of the session;
+- the text of every prompt and every text reply of the assistant, long ones cut in the middle.
+
+It does not send tool calls' inputs, tool results (command output, file contents the assistant
+read), the thinking blocks, or anything of sub-agents. For `claude`, the run gets no tools, no MCP
+servers and no transcript of its own (`--tools "" --strict-mcp-config --no-session-persistence`),
+and graphersal-memory's own hooks do nothing in it. The answer (a JSON summary) is stored in the
+graph on your machine; the harness's provider handles the prompt under the terms of your own
+account, as for any other session of yours.
 
 ## Removing it
 

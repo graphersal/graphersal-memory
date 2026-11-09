@@ -4,11 +4,16 @@
 //! Both import the memory files of the session's project that are new or changed since their
 //! last import (a session may still write memory files, for example when the rule block is not
 //! followed), through the daemon. `session-start` then prints one status line, which Claude
-//! Code adds to the session's context; `session-end` prints nothing. The indexing of finished
-//! sessions arrives in stage M4; until then that part does nothing.
+//! Code adds to the session's context; `session-end` prints nothing.
+//!
+//! Both then ask the daemon to index finished sessions in the background (one control line,
+//! answered at once; `crate::sessions`): `session-start` names its own transcript as still
+//! being written, `session-end` names it as finished. The indexing (and the summaries, when the
+//! user opted in) runs in the daemon, never in the hook.
 //!
 //! A hook never blocks or fails the session: the work runs on a thread with a time limit, every
-//! error becomes a note on stderr, and the exit code is always 0.
+//! error becomes a note on stderr, and the exit code is always 0. With
+//! `GRAPHERSAL_MEMORY_HOOK=off` (set for the summaries' own harness runs) a hook does nothing.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -58,6 +63,36 @@ pub fn session_dir(input: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<
         .or_else(|| std::env::current_dir().ok())
 }
 
+/// The transcript of the session, from the hook input (`transcript_path`).
+pub fn transcript_path(input: &str) -> Option<PathBuf> {
+    serde_json::from_str::<Value>(input)
+        .ok()?
+        .get("transcript_path")?
+        .as_str()
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The indexing request of a hook: every transcript under the harness's projects directory,
+/// with the session's own transcript as still being written (start) or finished (end).
+pub fn index_request(
+    event: HookEvent,
+    paths: &ClaudePaths,
+    transcript: Option<PathBuf>,
+) -> crate::sessions::Request {
+    let mut request = crate::sessions::Request::new(&paths.projects);
+    if let Some(transcript) = transcript {
+        match event {
+            HookEvent::SessionStart => request.active.insert(transcript),
+            HookEvent::SessionEnd => request.ended.insert(transcript),
+        };
+    }
+    request
+}
+
+/// Sends an indexing request to the daemon (the hook's last step).
+pub type Enqueue = Box<dyn FnOnce(crate::sessions::Request) -> Result<(), String> + Send>;
+
 /// The hook's work: imports the session project's changed memory files.
 pub fn work(
     event: HookEvent,
@@ -93,7 +128,8 @@ pub fn work(
     if event == HookEvent::SessionStart {
         let mut line = "graphersal-memory: your memory is served by the MCP server \
                         graphersal-memory (memories(text), recall(text), memory(slug), remember, \
-                        forget); write memories there, not into memory files."
+                        forget; past sessions: sessions(text), session(id)); write memories \
+                        there, not into memory files."
             .to_string();
         if imported > 0 {
             line.push_str(&format!(
@@ -131,12 +167,29 @@ fn sync(
     done.unwrap_or_else(|| Ok(import::ImportReport::default()))
 }
 
-/// Runs a hook with the time limit: never fails, always returns exit code 0.
+/// Runs a hook with the time limit: never fails, always returns exit code 0 (without the
+/// indexing step: [`run_with`]).
+#[cfg(test)]
 pub fn run(
     event: HookEvent,
     paths: Result<ClaudePaths, String>,
     data_dir: PathBuf,
     connect: import::SendConnect,
+    stdin: impl Read + Send + 'static,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
+    run_with(event, paths, data_dir, connect, None, stdin, stdout, stderr)
+}
+
+/// [`run`], then `enqueue` the indexing of finished sessions (within the same time limit).
+#[allow(clippy::too_many_arguments)]
+pub fn run_with(
+    event: HookEvent,
+    paths: Result<ClaudePaths, String>,
+    data_dir: PathBuf,
+    connect: import::SendConnect,
+    enqueue: Option<Enqueue>,
     stdin: impl Read + Send + 'static,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -153,14 +206,23 @@ pub fn run(
             let outcome = match paths {
                 Ok(paths) => {
                     let mut connect = connect;
-                    work(
+                    let mut outcome = work(
                         event,
                         dir.as_deref(),
                         &paths,
                         &data_dir,
                         &mut *connect,
                         deadline,
-                    )
+                    );
+                    if let Some(enqueue) = enqueue {
+                        let request = index_request(event, &paths, transcript_path(&input));
+                        if let Err(err) = enqueue(request) {
+                            outcome
+                                .notes
+                                .push(format!("cannot queue the session indexing: {err}"));
+                        }
+                    }
+                    outcome
                 }
                 Err(err) => Outcome {
                     line: None,
@@ -215,6 +277,77 @@ mod tests {
             Some(PathBuf::from("/w/b"))
         );
         assert!(session_dir("", &|_| None).is_some());
+    }
+
+    #[test]
+    fn the_index_request_names_the_sessions_own_transcript() {
+        let paths =
+            ClaudePaths::resolve(&|name| (name == "HOME").then(|| "/h".to_string())).unwrap();
+        let input = r#"{"session_id": "s", "transcript_path": "/h/.claude/projects/p/s.jsonl"}"#;
+        let transcript = transcript_path(input);
+        assert_eq!(
+            transcript,
+            Some(PathBuf::from("/h/.claude/projects/p/s.jsonl"))
+        );
+        let start = index_request(HookEvent::SessionStart, &paths, transcript.clone());
+        assert_eq!(start.projects_dir, paths.projects);
+        assert!(start.active.contains(transcript.as_ref().unwrap()));
+        assert!(start.ended.is_empty());
+        let end = index_request(HookEvent::SessionEnd, &paths, transcript.clone());
+        assert!(end.ended.contains(transcript.as_ref().unwrap()));
+        assert_eq!(transcript_path("{}"), None);
+        assert_eq!(transcript_path("nope"), None);
+    }
+
+    #[test]
+    fn a_hook_queues_the_indexing_and_returns_at_once() {
+        let home = crate::mcp_tests::TempDir::new("hookq");
+        let paths = ClaudePaths::resolve(&|name| {
+            (name == "HOME").then(|| home.path().display().to_string())
+        })
+        .unwrap();
+        let (sent, received) = mpsc::channel();
+        let enqueue: Enqueue = Box::new(move |request| {
+            let _ = sent.send(request);
+            Ok(())
+        });
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let started = Instant::now();
+        let code = run_with(
+            HookEvent::SessionEnd,
+            Ok(paths.clone()),
+            home.path().to_path_buf(),
+            Box::new(|_| Err("not called".to_string())),
+            Some(enqueue),
+            std::io::Cursor::new(
+                br#"{"cwd": "/nowhere", "transcript_path": "/t/x.jsonl"}"#.to_vec(),
+            ),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 0);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let request = received.try_recv().unwrap();
+        assert!(request.ended.contains(Path::new("/t/x.jsonl")));
+        // A failing queue is a note, never a failure.
+        let mut err = Vec::new();
+        let code = run_with(
+            HookEvent::SessionStart,
+            Ok(paths),
+            home.path().to_path_buf(),
+            Box::new(|_| Err("not called".to_string())),
+            Some(Box::new(|_| Err("the daemon is away".to_string()))),
+            std::io::empty(),
+            &mut Vec::new(),
+            &mut err,
+        );
+        assert_eq!(code, 0);
+        assert!(
+            String::from_utf8(err)
+                .unwrap()
+                .contains("cannot queue the session indexing: the daemon is away")
+        );
     }
 
     #[test]

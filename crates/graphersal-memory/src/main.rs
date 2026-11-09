@@ -1,7 +1,7 @@
 //! `graphersal-memory`: local graph memory for AI coding agents.
 //!
-//! Pre-release: `install`, `uninstall`, `status`, `doctor` and `import` set graphersal-memory
-//! up in Claude Code, `mcp` serves the memory over stdio (through the shared daemon, or in this
+//! Pre-release: `install`, `uninstall`, `status`, `doctor`, `import` (also `--sessions`) and
+//! `summaries` set graphersal-memory up in Claude Code, `mcp` serves the memory over stdio (through the shared daemon, or in this
 //! process with `--no-daemon`), `daemon` manages the daemon; every other command reports the
 //! roadmap stage that delivers it and exits with code 2.
 
@@ -26,8 +26,11 @@ mod mcp_tests;
 mod projects;
 mod protocol;
 mod registry;
+mod sessions;
 mod shim;
 mod store;
+mod summaries;
+mod transcript;
 
 use std::process::ExitCode;
 

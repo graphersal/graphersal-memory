@@ -1,11 +1,12 @@
 # How it works
 
-> Pre-release: this page describes the target design. Implemented so far (M1 to M3): the store in
+> Pre-release: this page describes the target design. Implemented so far (M1 to M4): the store in
 > the per-user data directory, project and global memories, the two profiles with their access
 > policy, the daemon with the shim, the socket, the handshake, start on demand, idle exit, upgrade
 > and crash recovery, the settings file, the project records, the installation into Claude Code
-> with its hooks and the import of the file memory. Not yet: the `ui` command, isolated project
-> stores, background indexing; see the [status table](../README.md#status).
+> with its hooks, the import of the file memory, and the background indexing of past sessions
+> with opt-in summaries. Not yet: the `ui` command, isolated project stores; see the
+> [status table](../README.md#status).
 
 ## Processes
 
@@ -102,8 +103,10 @@ or `GRAPHERSAL_MEMORY_DIR` gets `<data dir>/run`, so each data directory has a d
   current project plus your global memory: preferences and cross-project rules. The global
   memories live in the same store, without a project.
 - **The settings file** (`config.json` in the data directory, written with the defaults by
-  `install`): `{"version": 1, "daemon": {"idle": "2h"}}`. A missing file means the defaults; keys
-  this version does not know are ignored, and `doctor` names them.
+  `install`): `{"version": 1, "daemon": {"idle": "2h"}, "summaries": {"enabled": false,
+  "harness_command": "claude -p --model sonnet", "monthly_budget_usd": 5}}` (plus the optional
+  `summaries.since`, a date). A missing file means the defaults; keys this version does not know
+  are ignored, and `doctor` names them.
 - **The project records** (`projects.json` in the data directory): every project that connected,
   with its git remote URL (the `origin` remote, else the first one, without credentials) and when it
   was first seen. The project key stays the canonical root path, so moving a repository orphans its
@@ -117,8 +120,45 @@ or `GRAPHERSAL_MEMORY_DIR` gets `<data dir>/run`, so each data directory has a d
   into it one way. Every MCP connection goes to exactly one store, and nothing references across
   stores.
 - Background work (backups, checkpoints, session indexing, summaries, imports) runs off the thread
-  that answers the agent, so a long job never makes a memory lookup wait. Today the daemon ticks
-  each store's scheduled jobs and runs them on worker threads of their own.
+  that answers the agent, so a long job never makes a memory lookup wait. The daemon ticks each
+  store's scheduled jobs and runs them on worker threads of their own; the session indexing runs
+  on a thread of its own and writes in small units (see below).
+
+## Past sessions
+
+- **Which sessions.** Every Claude Code transcript `~/.claude/projects/<project>/<session>.jsonl`
+  that is finished: unchanged for 30 minutes, or named by the `SessionEnd` hook. The transcript a
+  running session writes is left for later, and the transcripts of sub-agents (in
+  `<session>/subagents/`, and sub-agent records inside a transcript) are never indexed.
+- **What is kept.** A `session` vertex (`session:<transcript name>`: the title Claude Code
+  generated, start and end, branches, the files edited relative to the project, the number of
+  turns, Claude Code's own compaction summaries) and one `turn` per prompt
+  (`turn:<session>:<n>`: the prompt with the messages sent while the assistant worked and the
+  answers to its questions, the assistant's text replies until the next prompt, the names of the
+  tools it used). Tool inputs and results are not kept. Every vertex carries the session's
+  project: its working directory's git root, as for an agent session started there; a session's
+  vertices are visible only from that project.
+- **Robust parsing.** A line that is not JSON, a record type this version does not know and a
+  last line without its line end (a session being written) are skipped.
+- **Idempotent.** The session vertex carries a fingerprint of the transcript lines its turns came
+  from, set by the last batch of a session's writes; `sessions/claude-code.json` in the data
+  directory remembers each transcript's size, time and fingerprint, so an unchanged transcript is
+  not read again and a grown one (a resumed session) is indexed again.
+- **Never in the way.** The hooks only send one control line to the daemon (`index_sessions`),
+  answered at once, and return. The daemon's indexer thread parses off the store's session thread
+  and writes each session as one call for its properties plus calls of at most 40 turns, each a
+  short job on the session thread, so an agent's memory call waits at most for one such unit. The
+  daemon does not exit idle while the indexer works. `graphersal-memory import --sessions` sends
+  the same request and shows the progress (`sessions_status`).
+- **Summaries (opt-in).** With `summaries.enabled`, after the raw turns the indexer summarizes
+  each session without a summary of its current version through your harness (one call per
+  session, within the monthly budget; see [Privacy](privacy.md#what-is-sent-to-your-harness-and-when)),
+  stores the English summary on the session (`name` = headline, `summary`, `body`) and splits it
+  into `fact` vertices (`fact:<session>:<kind>:<i>`, kinds `decision` with its why, `correction`,
+  `outcome`, `open_thread`), linked from the session by `contains`. `sessions(text)` searches
+  these facts and answers each with its kind, why, date, session id and headline; `session(id)`
+  gives the whole summary. A failed summary is tried twice per session version, then waits until
+  the session changes.
 
 ## Profiles: the two MCP servers
 

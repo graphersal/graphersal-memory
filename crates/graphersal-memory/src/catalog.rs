@@ -23,6 +23,18 @@ pub const SCHEMA: &str = include_str!("catalog/schema.json");
 /// Name, description and parameters of every memory function, in tool order.
 const QUERIES: &str = include_str!("catalog/queries.json");
 
+/// Name, description and parameters of the internal functions: the product's own writes (the
+/// session indexing), never offered as tools of the `use` server.
+const INTERNAL: &str = include_str!("catalog/internal.json");
+
+/// The internal functions, in the order of `catalog/internal.json`.
+pub const INTERNAL_FUNCTIONS: [&str; 4] = [
+    "indexed_sessions",
+    "index_session",
+    "index_turns",
+    "set_summary",
+];
+
 /// The folder of the product's saved queries.
 pub const FOLDER: &str = "memory";
 
@@ -49,6 +61,10 @@ fn body(name: &str) -> Option<&'static str> {
         "sessions" => include_str!("catalog/sessions.rhai"),
         "session" => include_str!("catalog/session.rhai"),
         "recall" => include_str!("catalog/recall.rhai"),
+        "indexed_sessions" => include_str!("catalog/indexed_sessions.rhai"),
+        "index_session" => include_str!("catalog/index_session.rhai"),
+        "index_turns" => include_str!("catalog/index_turns.rhai"),
+        "set_summary" => include_str!("catalog/set_summary.rhai"),
         _ => return None,
     })
 }
@@ -64,7 +80,16 @@ pub struct Function {
 
 /// The memory functions of this binary's catalog.
 pub fn functions() -> Result<Vec<Function>, String> {
-    let list: Value = serde_json::from_str(QUERIES)
+    parse_functions(QUERIES)
+}
+
+/// The internal functions of this binary's catalog.
+pub fn internal_functions() -> Result<Vec<Function>, String> {
+    parse_functions(INTERNAL)
+}
+
+fn parse_functions(text: &str) -> Result<Vec<Function>, String> {
+    let list: Value = serde_json::from_str(text)
         .map_err(|err| format!("the built-in catalog is not valid JSON: {err}"))?;
     let entries = list
         .as_array()
@@ -102,7 +127,8 @@ pub fn fingerprint() -> String {
     };
     feed(SCHEMA);
     feed(QUERIES);
-    for name in FUNCTIONS {
+    feed(INTERNAL);
+    for name in FUNCTIONS.iter().chain(INTERNAL_FUNCTIONS.iter()) {
         feed(body(name).unwrap_or_default());
     }
     format!("{hash:016x}")
@@ -135,7 +161,8 @@ pub enum Applied {
 /// written when any product query is missing or carries another fingerprint; product queries
 /// this binary no longer has are dropped.
 pub fn apply(session: &mut Session) -> Result<Applied, String> {
-    let wanted = functions()?;
+    let mut wanted = functions()?;
+    wanted.extend(internal_functions()?);
     let current = fingerprint();
     let listed = session.list_queries(None).map_err(|err| err.to_string())?;
     let mut stored = Vec::new();
@@ -180,6 +207,38 @@ pub fn apply(session: &mut Session) -> Result<Applied, String> {
         }
     }
     Ok(Applied::Written)
+}
+
+/// Runs the saved query `name` with the named arguments `args` on the session (the product's
+/// own calls on the store's session thread: the session indexing) and returns its value. A
+/// failing run changes nothing (one unit) and is an error.
+pub fn call(session: &mut Session, name: &str, args: &Value) -> Result<Value, String> {
+    let script = graphersal_session::queries::query_call_text(name, args)
+        .map_err(|err| format!("{name}: {err}"))?;
+    let options = graphersal_session::RunOptions {
+        no_limit: true,
+        ..Default::default()
+    };
+    let answer: Value = serde_json::from_str(&session.execute(&script, &options))
+        .map_err(|err| format!("{name}: malformed engine answer: {err}"))?;
+    let execution = &answer["execution"];
+    if answer["ok"] != true {
+        let error = &execution["error"];
+        let message = error["diagnostic"]
+            .as_str()
+            .or_else(|| error["message"].as_str())
+            .unwrap_or("the query failed");
+        return Err(format!("{name}: {message}"));
+    }
+    // A single value comes back as the one result; a list as the results.
+    let value = match (&execution["results"], answer["terminal"].as_str()) {
+        (Value::Array(results), Some("value")) if results.len() == 1 => results[0].clone(),
+        (other, _) => other.clone(),
+    };
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        return Err(format!("{name}: {error}"));
+    }
+    Ok(value)
 }
 
 /// The access policy of the `use` profile: reading, plus exactly the kinds of data writes the
@@ -254,6 +313,29 @@ mod tests {
                 function.name
             );
         }
+    }
+
+    #[test]
+    fn internal_functions_have_bodies_and_are_no_tools() {
+        let internal = internal_functions().unwrap();
+        let names: Vec<&str> = internal.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, INTERNAL_FUNCTIONS);
+        for name in INTERNAL_FUNCTIONS {
+            assert!(!FUNCTIONS.contains(&name), "{name} must not be a tool");
+            assert!(body(name).unwrap().starts_with(&format!("fn {name}(")));
+        }
+        let mut session = Session::new();
+        apply(&mut session).unwrap();
+        for name in INTERNAL_FUNCTIONS {
+            let entry = session.get_query(name).unwrap();
+            assert_eq!(entry["status"], "ok", "{name}: {entry}");
+        }
+        assert_eq!(
+            call(&mut session, "indexed_sessions", &json!({})).unwrap(),
+            json!([])
+        );
+        let err = call(&mut session, "no_such_query", &json!({})).unwrap_err();
+        assert!(err.starts_with("no_such_query:"), "{err}");
     }
 
     #[test]

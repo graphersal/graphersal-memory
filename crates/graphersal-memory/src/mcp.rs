@@ -249,6 +249,15 @@ impl StoreRuntime {
         .map_err(|err| format!("the MCP stream failed: {}", err.message()))
     }
 
+    /// Runs the catalog function `name` (an internal one: the session indexing) with `args` on
+    /// the store's session thread.
+    pub fn call(&self, name: &str, args: Value) -> Result<Value, String> {
+        let name = name.to_string();
+        self.using
+            .call(move |session| catalog::call(session, &name, &args))
+            .map_err(|err| format!("the memory store {}: {}", self.name, err.message()))?
+    }
+
     /// Closes the store: the session lets go of it, then the store is shut down (WAL synced,
     /// marked closed cleanly, its lock released), so a later open finds it unlocked.
     pub fn close(&self) -> Result<(), String> {

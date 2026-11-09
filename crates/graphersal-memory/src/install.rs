@@ -293,6 +293,8 @@ pub struct InstallOptions {
     pub with_model: bool,
     /// Register the develop server too.
     pub enable_develop: bool,
+    /// Switch session summaries on without asking.
+    pub summaries: bool,
 }
 
 /// Options of `uninstall`.
@@ -675,6 +677,44 @@ fn plan_install(setup: &Setup, options: &InstallOptions) -> Result<InstallPlan, 
     steps.push(step);
     changes.extend(change);
 
+    let request = crate::sessions::Request::new(&setup.paths.projects);
+    let (found, active, todo, _) = crate::sessions::plan(&request, &setup.data_dir)?;
+    let settings = Config::load(&setup.data_dir)?;
+    let estimate = crate::sessions::estimate(
+        &setup.paths.projects,
+        &setup.data_dir,
+        crate::sessions::IDLE,
+        settings.summaries.since.as_deref(),
+    )?;
+    let summaries_line = if settings.summaries.enabled {
+        "summaries: on (already switched on in the settings file)".to_string()
+    } else if options.summaries {
+        format!(
+            "summaries: switched on (--summaries), through `{}`, at most ${:.2} per month; {}",
+            settings.summaries.harness_command.join(" "),
+            settings.summaries.monthly_budget_usd,
+            crate::commands::estimate_line(&estimate)
+        )
+    } else {
+        format!(
+            "summaries: off unless you agree below (`--summaries` switches them on; `--yes` \
+             alone leaves them off); {}",
+            crate::commands::estimate_line(&estimate)
+        )
+    };
+    steps.push(Step {
+        title: "Index past sessions (raw turns, locally, in the background)".to_string(),
+        lines: vec![
+            format!(
+                "{found} session transcript{} under {}: {todo} to index, {active} still being \
+                 written (indexed later)",
+                if found == 1 { "" } else { "s" },
+                setup.paths.projects.display()
+            ),
+            summaries_line,
+        ],
+    });
+
     steps.push(Step {
         title: "Embedding model".to_string(),
         lines: vec![if options.with_model {
@@ -716,7 +756,7 @@ fn print_steps(out: &mut dyn Write, steps: &[Step]) {
 }
 
 /// Asks `question`; true for `y`/`yes`.
-fn confirm(question: &str, input: &mut dyn BufRead, out: &mut dyn Write) -> bool {
+pub(crate) fn confirm(question: &str, input: &mut dyn BufRead, out: &mut dyn Write) -> bool {
     let _ = write!(out, "{question} [y/N] ");
     let _ = out.flush();
     let mut answer = String::new();
@@ -949,6 +989,51 @@ pub fn install(
             .map_err(|err| format!("cannot create {}: {err}", setup.data_dir.display()))?;
         fsutil::write_atomic(&path, Config::default_text().as_bytes())?;
         report.push(format!("created {}", path.display()));
+    }
+
+    // Summaries: only with consent (--summaries, or yes to the question; --yes alone: off).
+    let settings = Config::load(&setup.data_dir)?;
+    if !settings.summaries.enabled {
+        let agreed = options.summaries
+            || (!options.yes
+                && confirm(
+                    "\nSummarize finished sessions through your own harness (decisions, \
+                     corrections, outcomes, open threads; costs model usage, see the estimate \
+                     above)?",
+                    input,
+                    out,
+                ));
+        if agreed {
+            crate::commands::write_summaries(setup, true, None)?;
+            report.push(format!(
+                "summaries: on, through `{}`, at most ${:.2} per month (`graphersal-memory \
+                 summaries disable` switches them off)",
+                settings.summaries.harness_command.join(" "),
+                settings.summaries.monthly_budget_usd
+            ));
+        } else {
+            report.push(
+                "summaries: off (raw turns are indexed; `graphersal-memory summaries enable` \
+                 switches them on)"
+                    .to_string(),
+            );
+        }
+    }
+
+    // Past sessions: indexed by the daemon in the background, when it runs (the import
+    // started it); else at the next session start.
+    let request = crate::sessions::Request::new(&setup.paths.projects);
+    match crate::shim::request_running(&setup.run_dir, &request.to_control()) {
+        Ok(Some(answer)) if answer["ok"] == true => report.push(
+            "past sessions: indexing in the background (`graphersal-memory import --sessions` \
+             shows the progress)"
+                .to_string(),
+        ),
+        _ => report.push(
+            "past sessions: indexed at the next session start (or now: `graphersal-memory \
+             import --sessions`)"
+                .to_string(),
+        ),
     }
     if options.with_model {
         report.push(
@@ -1603,6 +1688,18 @@ fn problem(text: impl Into<String>, fix: impl Into<String>) -> Finding {
     }
 }
 
+/// Whether `program` exists: a path, or a name found on the `PATH`.
+fn program_found(program: &str) -> bool {
+    let path = Path::new(program);
+    if path.components().count() > 1 {
+        return path.is_file();
+    }
+    std::env::var_os("PATH").is_some_and(|dirs| {
+        std::env::split_paths(&dirs)
+            .any(|dir| dir.join(program).is_file() || dir.join(format!("{program}.exe")).is_file())
+    })
+}
+
 /// `doctor`'s checks of the installation and the data directory.
 pub fn doctor(setup: &Setup) -> Vec<Finding> {
     let inspection = inspect(setup);
@@ -1697,11 +1794,31 @@ pub fn doctor(setup: &Setup) -> Vec<Finding> {
                         "config.json has keys this version does not know: {}",
                         config.unknown.join(", ")
                     ),
-                    "check their spelling (known: daemon.idle)",
+                    "check their spelling (known: daemon.idle, summaries.enabled, \
+                     summaries.harness_command, summaries.monthly_budget_usd, summaries.since)",
                 ));
             }
         }
         Err(err) => findings.push(problem(err, "fix or delete config.json")),
+    }
+    if let Ok(config) = Config::load(&setup.data_dir) {
+        let program = config
+            .summaries
+            .harness_command
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        if !config.summaries.enabled {
+            findings.push(ok("summaries: off (raw turns are indexed)"));
+        } else if program_found(&program) {
+            findings.push(ok(format!("summaries: on, through {program}")));
+        } else {
+            findings.push(problem(
+                format!("summaries are on, but the harness {program} is not found"),
+                "install it, set summaries.harness_command in config.json, or run \
+                 `graphersal-memory summaries disable`",
+            ));
+        }
     }
     if let Err(err) = crate::registry::Registry::parse(
         &std::fs::read(setup.data_dir.join(crate::registry::REGISTRY_FILE)).unwrap_or_else(|_| {

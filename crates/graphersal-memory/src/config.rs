@@ -1,8 +1,15 @@
 //! The product's settings file in the data directory, `<data dir>/config.json`:
 //!
 //! ```json
-//! {"version": 1, "daemon": {"idle": "2h"}}
+//! {"version": 1, "daemon": {"idle": "2h"},
+//!  "summaries": {"enabled": false, "harness_command": "claude -p --model sonnet",
+//!                "monthly_budget_usd": 5}}
 //! ```
+//!
+//! `summaries` is the opt-in of session summaries (`crate::summaries`): off unless `enabled` is
+//! `true`; `harness_command` is the user's own harness run once per session; the budget caps the
+//! spend per calendar month (UTC); `since` (optional, a date such as `2026-11-01`) leaves older
+//! sessions without a summary.
 //!
 //! A missing file means the defaults; `install` writes one with the defaults when there is none,
 //! so its shape is visible. Precedence for every setting: the command-line flag, then the
@@ -21,13 +28,101 @@ pub const CONFIG_FILE: &str = "config.json";
 const FORMAT: u64 = 1;
 
 /// The keys this version knows, as dotted paths.
-const KNOWN: [&str; 3] = ["version", "daemon", "daemon.idle"];
+const KNOWN: [&str; 8] = [
+    "version",
+    "daemon",
+    "daemon.idle",
+    "summaries",
+    "summaries.enabled",
+    "summaries.harness_command",
+    "summaries.monthly_budget_usd",
+    "summaries.since",
+];
+
+/// The default harness command of the summaries.
+pub const DEFAULT_HARNESS_COMMAND: &str = "claude -p --model sonnet";
+
+/// The default monthly budget of the summaries (USD).
+pub const DEFAULT_MONTHLY_BUDGET_USD: f64 = 5.0;
+
+/// The session summaries settings (`summaries`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Summaries {
+    /// Whether the user agreed to summaries (default: no).
+    pub enabled: bool,
+    /// The harness command, split into the program and its arguments.
+    pub harness_command: Vec<String>,
+    /// The spend allowed per calendar month (UTC), in USD.
+    pub monthly_budget_usd: f64,
+    /// Sessions started before this date (`YYYY-MM-DD`) get no summary.
+    pub since: Option<String>,
+}
+
+impl Default for Summaries {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            harness_command: split_command(DEFAULT_HARNESS_COMMAND).unwrap_or_default(),
+            monthly_budget_usd: DEFAULT_MONTHLY_BUDGET_USD,
+            since: None,
+        }
+    }
+}
+
+/// Splits a command line into words: whitespace separates, single and double quotes group,
+/// a backslash escapes the next character outside single quotes.
+pub fn split_command(text: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('\''), c) => word.push(c),
+            (_, '\\') => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+                in_word = true;
+            }
+            (Some(_), c) => word.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                in_word = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            (None, c) => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err(format!("unclosed quote in '{text}'"));
+    }
+    if in_word {
+        words.push(word);
+    }
+    if words.is_empty() {
+        return Err("the command is empty".to_string());
+    }
+    Ok(words)
+}
 
 /// The product settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
     /// The daemon's idle time, when the file sets it.
     pub idle: Option<Duration>,
+    /// The session summaries settings.
+    pub summaries: Summaries,
     /// Keys this version does not know (dotted paths).
     pub unknown: Vec<String>,
 }
@@ -79,6 +174,9 @@ impl Config {
                 );
             }
         }
+        if let Some(summaries) = object.get("summaries") {
+            config.summaries = parse_summaries(summaries)?;
+        }
         let mut unknown = Vec::new();
         collect_unknown(&value, "", &mut unknown);
         config.unknown = unknown;
@@ -87,9 +185,82 @@ impl Config {
 
     /// The default settings file's text.
     pub fn default_text() -> String {
-        let value = json!({"version": FORMAT, "daemon": {"idle": "2h"}});
+        let value = json!({
+            "version": FORMAT,
+            "daemon": {"idle": "2h"},
+            "summaries": {"enabled": false, "harness_command": DEFAULT_HARNESS_COMMAND,
+                          "monthly_budget_usd": DEFAULT_MONTHLY_BUDGET_USD},
+        });
         format!("{}\n", crate::jsonedit::render(&value, Some("  "), 0))
     }
+}
+
+fn parse_summaries(value: &Value) -> Result<Summaries, String> {
+    let Some(object) = value.as_object() else {
+        return Err("'summaries' must be an object".to_string());
+    };
+    let mut out = Summaries::default();
+    if let Some(enabled) = object.get("enabled") {
+        out.enabled = enabled
+            .as_bool()
+            .ok_or("'summaries.enabled' must be true or false")?;
+    }
+    if let Some(command) = object.get("harness_command") {
+        let text = command
+            .as_str()
+            .ok_or("'summaries.harness_command' must be a string such as \"claude -p\"")?;
+        out.harness_command =
+            split_command(text).map_err(|err| format!("summaries.harness_command: {err}"))?;
+    }
+    if let Some(budget) = object.get("monthly_budget_usd") {
+        out.monthly_budget_usd = budget
+            .as_f64()
+            .filter(|usd| *usd >= 0.0 && usd.is_finite())
+            .ok_or("'summaries.monthly_budget_usd' must be a number of dollars, 0 or more")?;
+    }
+    if let Some(since) = object.get("since") {
+        let text = since
+            .as_str()
+            .filter(|text| is_date(text))
+            .ok_or("'summaries.since' must be a date such as \"2026-11-01\"")?;
+        out.since = Some(text.to_string());
+    }
+    Ok(out)
+}
+
+/// Whether `text` is a date `YYYY-MM-DD`.
+fn is_date(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == 10
+        && bytes.iter().enumerate().all(|(i, b)| match i {
+            4 | 7 => *b == b'-',
+            _ => b.is_ascii_digit(),
+        })
+}
+
+/// The text of the settings file `current` (`None`: none yet) with the summaries switched on or
+/// off (and, when given, the monthly budget), every other byte kept.
+pub fn with_summaries(
+    current: Option<&str>,
+    enabled: bool,
+    budget_usd: Option<f64>,
+) -> Result<String, String> {
+    let mut text = match current {
+        Some(text) => text.to_string(),
+        None => Config::default_text(),
+    };
+    Config::parse(text.as_bytes())?;
+    let mut set = |key: &str, value: &Value| -> Result<(), String> {
+        if let Some((new, _)) = crate::jsonedit::set_member(&text, &["summaries"], key, value)? {
+            text = new;
+        }
+        Ok(())
+    };
+    set("enabled", &json!(enabled))?;
+    if let Some(budget) = budget_usd {
+        set("monthly_budget_usd", &json!(budget))?;
+    }
+    Ok(text)
 }
 
 fn collect_unknown(value: &Value, prefix: &str, out: &mut Vec<String>) {
@@ -166,6 +337,59 @@ mod tests {
             vec!["daemon.idel".to_string(), "ui".to_string()]
         );
         assert_eq!(config.idle, None);
+    }
+
+    #[test]
+    fn summaries_are_off_by_default_and_parse() {
+        let config = Config::parse(Config::default_text().as_bytes()).unwrap();
+        assert!(!config.summaries.enabled);
+        assert_eq!(
+            config.summaries.harness_command,
+            vec!["claude", "-p", "--model", "sonnet"]
+        );
+        assert_eq!(config.summaries.monthly_budget_usd, 5.0);
+        let on = Config::parse(
+            br#"{"version": 1, "summaries": {"enabled": true, "harness_command": "/opt/my claude/bin/claude -p --model 'son net'", "monthly_budget_usd": 2.5, "since": "2026-11-01"}}"#,
+        )
+        .unwrap();
+        assert!(on.summaries.enabled);
+        assert_eq!(
+            on.summaries.harness_command,
+            vec!["/opt/my", "claude/bin/claude", "-p", "--model", "son net"]
+        );
+        assert_eq!(on.summaries.monthly_budget_usd, 2.5);
+        assert_eq!(on.summaries.since.as_deref(), Some("2026-11-01"));
+        assert!(on.unknown.is_empty(), "{:?}", on.unknown);
+        for bad in [
+            r#"{"version": 1, "summaries": {"enabled": "yes"}}"#,
+            r#"{"version": 1, "summaries": {"harness_command": ""}}"#,
+            r#"{"version": 1, "summaries": {"harness_command": "claude 'x"}}"#,
+            r#"{"version": 1, "summaries": {"monthly_budget_usd": -1}}"#,
+            r#"{"version": 1, "summaries": {"since": "last week"}}"#,
+            r#"{"version": 1, "summaries": []}"#,
+        ] {
+            assert!(Config::parse(bad.as_bytes()).is_err(), "{bad}");
+        }
+        assert_eq!(
+            split_command(r#""/a b/claude" -p "#).unwrap(),
+            vec!["/a b/claude", "-p"]
+        );
+    }
+
+    #[test]
+    fn switching_summaries_keeps_the_rest_of_the_file() {
+        let text = "{\"version\": 1, \"daemon\": {\"idle\": \"30m\"}, \"x\": 1}\n";
+        let on = with_summaries(Some(text), true, Some(3.0)).unwrap();
+        let config = Config::parse(on.as_bytes()).unwrap();
+        assert!(config.summaries.enabled);
+        assert_eq!(config.summaries.monthly_budget_usd, 3.0);
+        assert_eq!(config.idle, Some(Duration::from_secs(1800)));
+        assert!(on.contains("\"x\": 1"), "{on}");
+        let off = with_summaries(Some(&on), false, None).unwrap();
+        assert!(!Config::parse(off.as_bytes()).unwrap().summaries.enabled);
+        let fresh = with_summaries(None, true, None).unwrap();
+        assert!(Config::parse(fresh.as_bytes()).unwrap().summaries.enabled);
+        assert!(with_summaries(Some("{"), true, None).is_err());
     }
 
     #[test]

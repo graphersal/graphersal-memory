@@ -194,6 +194,18 @@
           "summarized_bytes": {
             "type": "integer",
             "minimum": 0
+          },
+          "harness": {
+            "type": "string",
+            "description": "the harness whose transcript this is (claude-code)"
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "the fingerprint of the transcript lines its turns were indexed from; empty while indexing"
+          },
+          "summarized": {
+            "type": "string",
+            "description": "the fingerprint of the transcript lines its summary was written from"
           }
         },
         "required": [
