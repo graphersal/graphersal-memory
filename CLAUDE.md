@@ -13,12 +13,37 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   until a second binary or a library user appears, with modules per area:
   - `src/main.rs`: the entry point (parse, run, exit code);
   - `src/cli.rs`: the clap command definitions and help text, plus parsing tests;
-  - `src/commands.rs`: running a command; today every command reports its planned stage and
-    exits with code 2;
-  - `src/engine.rs`: the pinned engine revision, and a test that exercises the engine crates.
-- Planned areas (one module each when they arrive): `store` (data dir, registry), `mcp`
-  (profiles, instructions), `daemon` + `shim`, `install/<harness>`, `sessions`, `bench`,
-  `export`/`import`.
+  - `src/commands.rs`: running a command (`run_cli`); `mcp --no-daemon` serves, every other
+    command reports its planned stage and exits with code 2;
+  - `src/engine.rs`: the pinned engine revision, and a test that exercises the engine crates;
+  - `src/store.rs`: the data directory (`--data-dir`, `GRAPHERSAL_MEMORY_DIR`, the platform's
+    per-user directory) and the default store `<data dir>/stores/default`, created on first use;
+  - `src/catalog.rs` + `src/catalog/`: the product catalog built into the binary: `schema.json`,
+    `queries.json` (name, description, parameters of each memory function) and one
+    `<name>.rhai` body per function (folder `memory`, `meta` `{"origin": "product", "catalog":
+    <fingerprint>}`); `apply` writes it to a store whose product queries carry another
+    fingerprint; `use_policy` builds the `use` access policy from the functions' inferred effects;
+  - `src/mcp.rs` + `src/mcp/{use,develop}.md`: the two profiles (configuration, instructions,
+    tool lists), the project of a session (`--project`, else the git root of the cwd), `serve`
+    (one store over stdio through `graphersal-serve`'s session thread and `graphersal-mcp`'s
+    `serve_lines`) and `ProjectBinding` (sets the `project` argument of the memory functions on
+    every `tools/call` and hides it in `tools/list`, on the JSON-RPC lines);
+  - `src/mcp_tests.rs`: MCP round trips over in-memory pipes with temporary data directories.
+- Planned areas (one module each when they arrive): `daemon` + `shim`, a store registry,
+  `install/<harness>`, `sessions`, `bench`, `export`/`import`.
+
+## Memory model
+
+- Labels `memory`, `session`, `turn`, `fact`; edges `relates_to`, `supersedes`, `about`,
+  `contains`, `edited` (`src/catalog/schema.json`, mode `open`; `emb` is a vector rule over
+  `embed_text` with the built-in `hash-ngram/1` embedder).
+- Project scoping: a vertex with a `project` property (the project key: the canonical root path)
+  is visible only from that project; one without it is global. Memory ids are
+  `memory:<slug>@<project>` (project) and `memory:<slug>` (global); `memory`, `forget` and
+  `links` look in the project first, then in the global memory.
+- A change to a body, a description, a parameter or the schema changes the fingerprint, so every
+  store gets the new catalog at its next start. Test a body change with the round trips in
+  `src/mcp_tests.rs`; descriptions stay short (they are paid on every agent turn).
 - `docs/`: the user-facing documentation (why, how it works, A/B method, privacy, harnesses,
   roadmap).
 - `ai/`: local working files, git-ignored, never published, never linked from published files.
@@ -38,8 +63,9 @@ CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and W
 
 - `graphersal` and `graphersal-mcp` are git dependencies pinned to one revision of graphersal
   `main` in the root `Cargo.toml`. During 0.x they become exact `=0.6.x` crates.io pins once
-  graphersal 0.6.0 is published. When you move the pin, update `engine_rev_short!` in
-  `src/engine.rs` (a test checks that they match).
+  graphersal 0.6.0 is published. Every engine crate (`graphersal`, `graphersal-mcp`,
+  `graphersal-serve`, `graphersal-session`) pins the same revision; when you move the pin, update
+  `engine_rev_short!` in `src/engine.rs` (a test checks that they match).
 - **Every engine gap goes to the graphersal repository**, as an issue or a branch there. Never
   work around it by copying engine code into this repository. graphersal-memory uses only the
   engine's public API, and it is the first external judge of that API.

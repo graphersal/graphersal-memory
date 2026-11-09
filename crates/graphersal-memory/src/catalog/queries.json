@@ -1,0 +1,277 @@
+[
+  {
+    "name": "memories",
+    "description": "Memories of this project and the global ones: all in list order, or the k nearest to text (English), the two best with their full body. kind filters (user|feedback|project|reference).",
+    "params": [
+      {
+        "name": "text",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      },
+      {
+        "name": "k",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "default": 10
+      },
+      {
+        "name": "kind",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "",
+            "user",
+            "feedback",
+            "project",
+            "reference"
+          ]
+        },
+        "default": ""
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  },
+  {
+    "name": "memory",
+    "description": "One memory in full (this project's first, else the global one): body, summary, links both ways, what it is about.",
+    "params": [
+      {
+        "name": "slug",
+        "schema": {
+          "type": "string",
+          "pattern": "^(memory:)?[a-z0-9-]+$"
+        }
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  },
+  {
+    "name": "remember",
+    "description": "Store or replace the memory <slug> of this project (scope \"global\": of every project). kind: user|feedback|project|reference; summary: one line; body: markdown; why/how_to_apply appended as **Why:**/**How to apply:**; title+hook: its index line; links: related memory slugs; about: vertex ids. Check memories(text) first to replace, not duplicate.",
+    "params": [
+      {
+        "name": "slug",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        }
+      },
+      {
+        "name": "kind",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "user",
+            "feedback",
+            "project",
+            "reference"
+          ]
+        }
+      },
+      {
+        "name": "summary",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      {
+        "name": "body",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      {
+        "name": "why",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      },
+      {
+        "name": "how_to_apply",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      },
+      {
+        "name": "title",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      },
+      {
+        "name": "hook",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      },
+      {
+        "name": "links",
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "default": []
+      },
+      {
+        "name": "about",
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "default": []
+      },
+      {
+        "name": "scope",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "project",
+            "global"
+          ]
+        },
+        "default": "project"
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  },
+  {
+    "name": "forget",
+    "description": "Remove the memory <slug> (this project's first, else the global one) and its edges.",
+    "params": [
+      {
+        "name": "slug",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        }
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  },
+  {
+    "name": "sessions",
+    "description": "Past sessions of this project. With text (English): the k facts from their summaries nearest to it, each a decision (with why), user correction, outcome or open thread, with date, session id and headline. Without text: the newest sessions. session(id) gives a whole summary.",
+    "params": [
+      {
+        "name": "text",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      },
+      {
+        "name": "k",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "default": 8
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  },
+  {
+    "name": "session",
+    "description": "One past session (id or uuid prefix): summary, dates, branches, files edited, what it is about; turns=true adds the turn list.",
+    "params": [
+      {
+        "name": "id",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      {
+        "name": "turns",
+        "schema": {
+          "type": "boolean"
+        },
+        "default": false
+      }
+    ]
+  },
+  {
+    "name": "recall",
+    "description": "Hybrid search (meaning + keywords) over this project's and the global memories, sessions, facts and turns. label: \"\" = all, or one label (memory, session, fact, turn). Write text in English.",
+    "params": [
+      {
+        "name": "text",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      {
+        "name": "k",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "default": 8
+      },
+      {
+        "name": "label",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  }
+]

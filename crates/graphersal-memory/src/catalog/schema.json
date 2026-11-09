@@ -1,0 +1,515 @@
+{
+  "$schema": "https://graphersal.dev/schema/v1",
+  "meta": {
+    "purpose": "graphersal-memory: memories, past sessions, their turns and facts",
+    "origin": "product"
+  },
+  "mode": "open",
+  "vertices": {
+    "memory": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "the readable name: a memory's slug, a session's English headline"
+          },
+          "summary": {
+            "type": "string",
+            "description": "one or two English sentences"
+          },
+          "body": {
+            "type": "string",
+            "description": "the full text (markdown)"
+          },
+          "project": {
+            "type": "string",
+            "description": "the project (repository root) this belongs to; absent = global, visible from every project"
+          },
+          "origin": {
+            "type": "string",
+            "description": "who owns it: curated (written through remember), sessions (indexed), import"
+          },
+          "source": {
+            "type": "string",
+            "description": "where it came from: 'user', 'derived', a file or a URL"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "defaultFunction": "now"
+          },
+          "embed_text": {
+            "type": "string",
+            "description": "the text emb is computed from"
+          },
+          "emb": {
+            "type": "array",
+            "format": "vector",
+            "element": "f32",
+            "metric": "cosine",
+            "embedder": "hash-ngram/1",
+            "from": "embed_text",
+            "description": "computed from embed_text by the vector rule (never written directly)"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "user",
+              "feedback",
+              "project",
+              "reference"
+            ]
+          },
+          "why": {
+            "type": "string",
+            "description": "the reason, parsed out of the body for search"
+          },
+          "how_to_apply": {
+            "type": "string",
+            "description": "when and how to apply it"
+          },
+          "title": {
+            "type": "string",
+            "description": "the short title of its index line"
+          },
+          "hook": {
+            "type": "string",
+            "description": "the one-line hook of its index line"
+          },
+          "index_order": {
+            "type": "integer",
+            "description": "position in the memory list"
+          },
+          "pinned": {
+            "type": "boolean",
+            "description": "always listed in the exported index"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "summary"
+        ]
+      }
+    },
+    "session": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "the readable name: a memory's slug, a session's English headline"
+          },
+          "summary": {
+            "type": "string",
+            "description": "one or two English sentences"
+          },
+          "body": {
+            "type": "string",
+            "description": "the full text (markdown)"
+          },
+          "project": {
+            "type": "string",
+            "description": "the project (repository root) this belongs to; absent = global, visible from every project"
+          },
+          "origin": {
+            "type": "string",
+            "description": "who owns it: curated (written through remember), sessions (indexed), import"
+          },
+          "source": {
+            "type": "string",
+            "description": "where it came from: 'user', 'derived', a file or a URL"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "defaultFunction": "now"
+          },
+          "embed_text": {
+            "type": "string",
+            "description": "the text emb is computed from"
+          },
+          "emb": {
+            "type": "array",
+            "format": "vector",
+            "element": "f32",
+            "metric": "cosine",
+            "embedder": "hash-ngram/1",
+            "from": "embed_text",
+            "description": "computed from embed_text by the vector rule (never written directly)"
+          },
+          "title": {
+            "type": "string",
+            "description": "the session title the harness generated (any language)"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "turns": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "files_edited": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "compact_summaries": {
+            "type": "string",
+            "description": "the harness's own compaction summaries, verbatim"
+          },
+          "source_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "summarized_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "name",
+          "started_at"
+        ]
+      }
+    },
+    "turn": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "the readable name: a memory's slug, a session's English headline"
+          },
+          "summary": {
+            "type": "string",
+            "description": "one or two English sentences"
+          },
+          "body": {
+            "type": "string",
+            "description": "the full text (markdown)"
+          },
+          "project": {
+            "type": "string",
+            "description": "the project (repository root) this belongs to; absent = global, visible from every project"
+          },
+          "origin": {
+            "type": "string",
+            "description": "who owns it: curated (written through remember), sessions (indexed), import"
+          },
+          "source": {
+            "type": "string",
+            "description": "where it came from: 'user', 'derived', a file or a URL"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "defaultFunction": "now"
+          },
+          "embed_text": {
+            "type": "string",
+            "description": "the text emb is computed from"
+          },
+          "emb": {
+            "type": "array",
+            "format": "vector",
+            "element": "f32",
+            "metric": "cosine",
+            "embedder": "hash-ngram/1",
+            "from": "embed_text",
+            "description": "computed from embed_text by the vector rule (never written directly)"
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user": {
+            "type": "string",
+            "description": "the user's prompt, verbatim (any language)"
+          },
+          "assistant": {
+            "type": "string",
+            "description": "the assistant's text replies until the next prompt, verbatim"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "tool names used in this turn"
+          }
+        },
+        "required": [
+          "n",
+          "at"
+        ]
+      }
+    },
+    "fact": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "the readable name: a memory's slug, a session's English headline"
+          },
+          "summary": {
+            "type": "string",
+            "description": "one or two English sentences"
+          },
+          "body": {
+            "type": "string",
+            "description": "the full text (markdown)"
+          },
+          "project": {
+            "type": "string",
+            "description": "the project (repository root) this belongs to; absent = global, visible from every project"
+          },
+          "origin": {
+            "type": "string",
+            "description": "who owns it: curated (written through remember), sessions (indexed), import"
+          },
+          "source": {
+            "type": "string",
+            "description": "where it came from: 'user', 'derived', a file or a URL"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "defaultFunction": "now"
+          },
+          "embed_text": {
+            "type": "string",
+            "description": "the text emb is computed from"
+          },
+          "emb": {
+            "type": "array",
+            "format": "vector",
+            "element": "f32",
+            "metric": "cosine",
+            "embedder": "hash-ngram/1",
+            "from": "embed_text",
+            "description": "computed from embed_text by the vector rule (never written directly)"
+          },
+          "fact_kind": {
+            "type": "string",
+            "enum": [
+              "decision",
+              "correction",
+              "outcome",
+              "open_thread"
+            ]
+          },
+          "why": {
+            "type": "string",
+            "description": "a decision's reason"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "when the session started"
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "summary",
+          "fact_kind"
+        ]
+      }
+    }
+  },
+  "edges": {
+    "relates_to": {
+      "connections": [
+        {
+          "from": "*",
+          "to": "*"
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "description": "memory -> a related memory",
+        "properties": {
+          "origin": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          }
+        }
+      }
+    },
+    "supersedes": {
+      "connections": [
+        {
+          "from": "*",
+          "to": "*"
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "description": "a newer memory or fact -> the one it replaces",
+        "properties": {
+          "origin": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          }
+        }
+      }
+    },
+    "about": {
+      "connections": [
+        {
+          "from": "*",
+          "to": "*"
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "description": "memory or session -> what it is about",
+        "properties": {
+          "origin": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          }
+        }
+      }
+    },
+    "contains": {
+      "connections": [
+        {
+          "from": "*",
+          "to": "*"
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "description": "session -> its turns and facts",
+        "properties": {
+          "origin": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          }
+        }
+      }
+    },
+    "edited": {
+      "connections": [
+        {
+          "from": "*",
+          "to": "*"
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "description": "session -> a file it edited",
+        "properties": {
+          "origin": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          }
+        }
+      }
+    }
+  }
+}

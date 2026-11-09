@@ -20,8 +20,11 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
-graphersal = { workspace = true }
+graphersal = { workspace = true, features = ["persist", "script", "gql"] }
 graphersal-mcp = { workspace = true }
+graphersal-serve = { workspace = true }
+graphersal-session = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

@@ -384,6 +384,21 @@ dependencies = [
  "clap",
  "graphersal",
  "graphersal-mcp",
+ "graphersal-serve",
+ "graphersal-session",
+ "serde_json",
+]
+
+[[package]]
+name = "graphersal-serve"
+version = "0.5.2"
+source = "git+https://github.com/graphersal/graphersal?rev=063be87d9ef8e4a4de7d095c166da20f99253495#063be87d9ef8e4a4de7d095c166da20f99253495"
+dependencies = [
+ "graphersal",
+ "graphersal-mcp",
+ "graphersal-session",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

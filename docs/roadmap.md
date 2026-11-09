@@ -5,8 +5,8 @@ graphersal-memory is built in stages, strictly in order. Each stage ships with t
 
 | Stage | What you get |
 |---|---|
-| **M0** (current) | This repository: what the product is, how it will work, how to measure it. The command set exists, but every command reports "not implemented yet". |
-| **M1** Memory core | A memory store with the memory tools (search, read, remember, forget, search past sessions), project and global memories, and the `use` and `develop` MCP profiles. One process serves one store over stdio, which is enough to try it by hand. |
+| **M0** (done) | This repository: what the product is, how it will work, how to measure it. The command set exists; commands of later stages report "not implemented yet". |
+| **M1** (done) Memory core | A memory store with the memory tools (search, read, remember, forget, search past sessions), project and global memories, and the `use` and `develop` MCP profiles. One process serves one store over stdio, which is enough to try it by hand (`graphersal-memory mcp --no-daemon`, see [Try the memory core](../README.md#try-the-memory-core)). |
 | **M2** Daemon | Several agent sessions share one memory at once. A small background daemon starts on demand and stops after two idle hours, with no ports and no setup. Upgrades and crashes are handled without your help. |
 | **M3** One-command install (Claude Code) | `graphersal-memory install` registers the MCP server, adds the hooks, imports your existing memory files and rules, and writes the managed rule block. `uninstall` reverts exactly that, and `status` and `doctor` tell you what is going on. |
 | **M4** Past sessions | Your finished Claude Code sessions are indexed in the background: raw turns, and opt-in summaries with decisions, corrections, outcomes and open threads, with a cost estimate and a monthly budget cap. |
