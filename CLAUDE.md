@@ -13,8 +13,23 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   until a second binary or a library user appears, with modules per area:
   - `src/main.rs`: the entry point (parse, run, exit code);
   - `src/cli.rs`: the clap command definitions and help text, plus parsing tests;
-  - `src/commands.rs`: running a command (`run_cli`); `mcp --no-daemon` serves, every other
-    command reports its planned stage and exits with code 2;
+  - `src/commands.rs`: running a command (`run_cli`): `mcp` runs the shim (`--no-daemon`:
+    serves in this process), `daemon` runs (`--foreground`) or starts the daemon, `status`
+    reports the daemon; every other command reports its planned stage and exits with code 2;
+  - `src/ipc.rs`: the run directory (`--run-dir`, `GRAPHERSAL_MEMORY_RUN_DIR`, `<data dir>/run`
+    for an explicit data directory, the platform's default), its files (`daemon.sock`,
+    `daemon.pid`, `daemon.start.lock`, `daemon.log`), the socket types per platform (std on
+    Unix, `uds_windows` on Windows), `LockFile` (`fd-lock`);
+  - `src/protocol.rs`: the shim <-> daemon handshake and control lines, refusal codes, version
+    order (the protocol is internal; bump `PROTOCOL` on an incompatible change);
+  - `src/shim.rs`: `connect_or_start` (start lock, stale socket only after a failed connect AND a
+    free `daemon.pid`, detached spawn, timeout naming the log), the handshake with retries on
+    `restarting`/`stopping`, then a byte relay; `control` (status/stop);
+  - `src/daemon.rs`: the daemon: pid lock, socket, one thread per connection, routing by the
+    handshake to a `StoreRuntime` (opened on first use) and its profile, idle exit, drain/restart
+    for a newer shim, clean shutdown (socket first, then the stores);
+  - `src/registry.rs`: `registry.json` (project -> store; everything goes to `default` until
+    isolation, M7);
   - `src/engine.rs`: the pinned engine revision, and a test that exercises the engine crates;
   - `src/store.rs`: the data directory (`--data-dir`, `GRAPHERSAL_MEMORY_DIR`, the platform's
     per-user directory) and the default store `<data dir>/stores/default`, created on first use;
@@ -24,13 +39,19 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     <fingerprint>}`); `apply` writes it to a store whose product queries carry another
     fingerprint; `use_policy` builds the `use` access policy from the functions' inferred effects;
   - `src/mcp.rs` + `src/mcp/{use,develop}.md`: the two profiles (configuration, instructions,
-    tool lists), the project of a session (`--project`, else the git root of the cwd), `serve`
-    (one store over stdio through `graphersal-serve`'s session thread and `graphersal-mcp`'s
-    `serve_lines`) and `ProjectBinding` (sets the `project` argument of the memory functions on
+    tool lists), the project of a session (`--project`, else the git root of the cwd),
+    `StoreRuntime` (one open store: `graphersal-serve`'s session thread, one `Context` per
+    profile over it sharing one `Mcp` endpoint, the job ticker, `serve` of one connection through
+    `graphersal-mcp`'s `serve_lines`, `close`), `serve` (`--no-daemon`) and `ProjectBinding` (sets the `project` argument of the memory functions on
     every `tools/call` and hides it in `tools/list`, on the JSON-RPC lines);
   - `src/mcp_tests.rs`: MCP round trips over in-memory pipes with temporary data directories.
-- Planned areas (one module each when they arrive): `daemon` + `shim`, a store registry,
-  `install/<harness>`, `sessions`, `bench`, `export`/`import`.
+  - `tests/daemon_tests.rs`: the real binary as shims and daemon (Unix only): shared daemon,
+    parallel calls, idle exit, stale socket, killed daemon, start race, handshake errors, upgrade
+    and drain, `daemon`/`status`, permissions. Each test has its own temporary data/run/home
+    directories (`GRAPHERSAL_MEMORY_DIR`, `GRAPHERSAL_MEMORY_RUN_DIR`, short
+    `GRAPHERSAL_MEMORY_IDLE`) and stops (or kills) every daemon it started.
+- Planned areas (one module each when they arrive): `install/<harness>`, `sessions`, `bench`,
+  `export`/`import`.
 
 ## Memory model
 
@@ -76,7 +97,8 @@ CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and W
    (`[workspace.lints.clippy]`). Every failure becomes an error with a message that says what to
    do. Exit codes: `0` ok, `1` the command failed, `2` invalid invocation or not implemented yet.
 2. **Tests never touch real user data.** Every test uses temporary `HOME`, harness configuration
-   and data directories. It NEVER reads or writes the real `~/.claude`, the user's stores or
+   and data directories; a test that starts a daemon uses its own run directory and stops the
+   daemon at its end (the daemon is detached: no test harness kills it for you). It NEVER reads or writes the real `~/.claude`, the user's stores or
    transcripts, or a running daemon or MCP server of the user. Tests make no network calls and
    call no model; LLM-dependent paths are tested with a fake harness binary.
 3. **The user's live configuration is never changed by a benchmark**, and install only writes

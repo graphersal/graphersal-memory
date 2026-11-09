@@ -1,9 +1,10 @@
 # How it works
 
-> Pre-release: this page describes the target design. Implemented so far (M1): the store in the
-> per-user data directory, project and global memories, the two profiles with their access policy,
-> and one store served over stdio in one process (`mcp --no-daemon`). The daemon, the shim, the
-> socket and the handshake are not; see the [status table](../README.md#status).
+> Pre-release: this page describes the target design. Implemented so far (M1, M2): the store in
+> the per-user data directory, project and global memories, the two profiles with their access
+> policy, the daemon with the shim, the socket, the handshake, start on demand, idle exit, upgrade
+> and crash recovery. Not yet: the `ui` command, isolated project stores, background indexing; see
+> the [status table](../README.md#status).
 
 ## Processes
 
@@ -30,21 +31,65 @@ browser ──http───> ui (graphersal-memory ui; develop)        ──soc
   does not keep the daemon alive.
 
 Several agent sessions, in several terminals or harnesses, can use the memory at the same time.
-They all talk to one daemon, which is the single writer of each store.
+They all talk to one daemon, which is the single writer of each store. Calls of different sessions
+run one after another on the store's session thread (memory-sized queries take milliseconds);
+calls of one session may overlap and are answered in any order.
+
+### The run directory
+
+The daemon's files live in a per-user run directory: macOS
+`~/Library/Application Support/graphersal-memory/run`, Linux `$XDG_RUNTIME_DIR/graphersal-memory`
+(else `~/.local/state/graphersal-memory/run`), Windows `%LOCALAPPDATA%\graphersal-memory\run`.
+`--run-dir DIR` or `GRAPHERSAL_MEMORY_RUN_DIR` moves it; a data directory chosen with `--data-dir`
+or `GRAPHERSAL_MEMORY_DIR` gets `<data dir>/run`, so each data directory has a daemon of its own.
+
+| File | What it is |
+|---|---|
+| `daemon.sock` | the socket |
+| `daemon.pid` | locked by the running daemon for its whole life; the OS releases the lock when the process ends, also on a crash |
+| `daemon.start.lock` | locked by the shim that starts a daemon |
+| `daemon.log` | the daemon's log (`daemon.log.1`: the previous one, kept once it passes 1 MiB) |
+
+### Start, idle exit, crashes and upgrades
+
+- **Start on demand.** A shim that cannot connect takes the start lock, tries again, and if nothing
+  answers and no process holds `daemon.pid`, removes a leftover socket file and starts
+  `graphersal-memory daemon --foreground` detached (its own process group on Unix, a detached
+  process on Windows). A shim that started at the same moment waits for the lock and then finds
+  the socket. A shim gives up after 30 seconds with an error naming the daemon's log.
+- **Idle exit.** With no connection for the idle time (2 hours; `daemon --foreground --idle 30m`,
+  or `GRAPHERSAL_MEMORY_IDLE`, which a daemon started by a shim inherits), the daemon removes its
+  socket, closes every store cleanly and exits.
+- **Crashes.** A socket file is treated as stale only when connecting fails and no process holds
+  `daemon.pid`. If the daemon dies, open sessions see their MCP server end with an error naming the
+  log (restarting the MCP server in the harness reconnects); the next session starts a new daemon,
+  and the store recovers at its next open.
+- **Upgrades.** When a shim meets an older daemon: with no other session open, the daemon exits
+  and the shim starts the new binary; with sessions open, it serves the new shim too and exits
+  when its last session closes, so nothing waits on an upgrade.
+- `graphersal-memory daemon` (without `--foreground`) starts the daemon detached, or reports the
+  one that runs; `graphersal-memory status` shows whether it runs (process id, version, uptime,
+  connections, open stores).
 
 ## Socket, trust and the handshake
 
 - On every platform, the shim and the daemon talk over a Unix domain socket (`AF_UNIX`, also
   available on Windows 10 1803 and later). Windows named pipes are the fallback if `AF_UNIX`
   proves unreliable there.
-- The trust boundary is your OS user. The socket file is readable only by you, in a directory
-  only you can open. Any process of your user can connect, which is no more than it could already
+- The trust boundary is your OS user. On Unix the socket file is readable only by you (`0600`), in
+  a directory only you can open (`0700`). On Windows the run directory is inside your own
+  `%LOCALAPPDATA%`. Any process of your user can connect, which is no more than it could already
   do with the store files. There is no token to manage.
-- The handshake is one JSON line from the shim. It carries the protocol version, the profile
-  (`use` or `develop`), the project and the harness. The daemon answers with its version and the
-  store it routed the connection to. After that, the connection carries plain MCP stdio framing.
-- Upgrades: when a new binary meets an older running daemon, the daemon is asked to drain and
-  restart, and the shim reconnects to the new one.
+- The handshake is one JSON line from the shim:
+  `{"shim_version", "protocol": 1, "profile": "use"|"develop", "project": {"root", "name"},
+  "harness": {"name", "version"}, "data_dir"}`. The daemon answers `{"ok": true,
+  "daemon_version", "store"}`, or `{"ok": false, "daemon_version", "error": {"code", "message"}}`
+  with the codes `bad_handshake`, `protocol`, `unknown_profile`, `data_dir` (the shim works on
+  another data directory), `store` (the store cannot be opened), and `restarting` or `stopping`
+  (the shim tries again). After that, the connection carries plain MCP stdio framing in both
+  directions, and the shim only relays bytes.
+- A connection may instead start with a control line, `{"protocol": 1, "control": "status"}` (or
+  `"stop"`), which gets one answer.
 
 ## Stores
 
@@ -52,13 +97,18 @@ They all talk to one daemon, which is the single writer of each store.
   Linux `$XDG_DATA_HOME/graphersal-memory`, Windows `%LOCALAPPDATA%\graphersal-memory`), not inside
   your repository.
 - **One shared store by default.** Every memory carries its project, and search defaults to the
-  current project plus your global memory: preferences and cross-project rules.
+  current project plus your global memory: preferences and cross-project rules. The global
+  memories live in the same store, without a project.
+- **The store registry** (`registry.json` in the data directory) says which store serves which
+  project: `{"version": 1, "default": "default", "projects": {}}`. Today every project goes to
+  the default store; the registry is where isolated projects will be listed.
 - **Isolated projects** (planned): a project can get a store of its own, for example for a client
   under NDA, for handing a project to a team, or for an experiment. Your global memory is copied
   into it one way. Every MCP connection goes to exactly one store, and nothing references across
   stores.
 - Background work (backups, checkpoints, session indexing, summaries, imports) runs off the thread
-  that answers the agent, so a long job never makes a memory lookup wait.
+  that answers the agent, so a long job never makes a memory lookup wait. Today the daemon ticks
+  each store's scheduled jobs and runs them on worker threads of their own.
 
 ## Profiles: the two MCP servers
 
@@ -68,8 +118,7 @@ They all talk to one daemon, which is the single writer of each store.
 | `develop` | off | the above plus schema, saved queries, indexes, health, benchmark | for improving the memory's structure; enable it when you need it, disable it so it costs no context |
 
 The daemon chooses the profile per connection, from the handshake. A client cannot raise its own
-profile from inside MCP. (Until the daemon arrives, `mcp --no-daemon --profile use|develop` picks
-it.)
+profile from inside MCP.
 
 How `use` is enforced today: the server offers only the memory functions as tools, and any other
 tool call is refused. The queries run under an engine access policy built at start from what the
