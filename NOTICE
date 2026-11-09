@@ -1,0 +1,11 @@
+graphersal-memory
+Copyright 2026 Aleksandr Dederer
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+graphersal-memory is built on Graphersal (https://github.com/graphersal/graphersal), licensed
+under the Apache License, Version 2.0.
+
+Claude, Claude Code, Codex, Cursor and opencode are names of their respective owners, used here
+only to describe compatibility. graphersal-memory is not affiliated with, endorsed by or sponsored
+by any of them.
