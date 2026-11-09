@@ -32,8 +32,25 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/client.rs`: a small MCP client; `connect` opens a `use` connection to the daemon (the
     product's own calls go through the daemon, the single writer);
   - `src/hook.rs`: `hook session-start|session-end`: time-boxed import of the session project's
-    changed memory files, one status line at session start, always exit 0;
-  - `src/config.rs`: `<data dir>/config.json` (`daemon.idle`); flag > env > file > default;
+    changed memory files, then one `index_sessions` control line to the daemon (`run_with`'s
+    `Enqueue`; start: its transcript is `active`, end: `ended`), one status line at session
+    start, always exit 0; `GRAPHERSAL_MEMORY_HOOK=off` makes it do nothing;
+  - `src/config.rs`: `<data dir>/config.json` (`daemon.idle`, `summaries.enabled|harness_command|
+    monthly_budget_usd|since`, `with_summaries` edits the switch in place); flag > env > file >
+    default;
+  - `src/transcript.rs`: the Claude Code transcript parser (turns, title, times, branches, edited
+    files, compaction summaries; sidechains and generated records left out; unknown records,
+    bad lines and a partial last line skipped; fingerprint of the complete lines);
+  - `src/sessions.rs`: the session indexing: `scan` (top-level `*.jsonl` only), finished =
+    unchanged for `IDLE` (30 min) or `ended`, state `<data dir>/sessions/claude-code.json`,
+    `Writer` (the daemon: the project's store; tests: `tests::Direct`), `run` (index in batches of
+    40 turns, then summaries), `estimate`, `plan`, the control lines `index_sessions` /
+    `sessions_status`;
+  - `src/summaries.rs`: the opt-in summaries: the prompt and JSON schema (ported from the
+    prototype), `harness_args` (`claude` gets `--output-format json --json-schema ... --tools ""
+    --strict-mcp-config --no-session-persistence`), `run_harness` (prompt on stdin, timeout,
+    `GRAPHERSAL_MEMORY_HOOK=off`), `parse_answer`, `Spend` (`<data dir>/sessions/spend.json`),
+    `Summarizer` (exists only when enabled; budget check before each call), `facts`, `render`;
   - `src/projects.rs`: `<data dir>/projects.json`: each project's git remote (credentials removed),
     recorded by the daemon when a project first connects (for re-mapping moved repositories later);
   - `src/fsutil.rs`: atomic writes and the FNV-1a fingerprint;
@@ -78,7 +95,10 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     temporary home (environment cleared, Unix only), the settings file's idle time, and the
     installed `claude` binary reading the registration (`claude mcp get`, its HOME pointed at
     the temporary home; skipped when `claude` is missing).
-- Planned areas (one module each when they arrive): `sessions`, `bench`, `export`, other
+  - `tests/sessions_tests.rs`: the real binary's hooks, `import --sessions` and `summaries` on a
+    temporary home with fixture transcripts (their time set a day back) and a fake `claude`
+    shell script that records its calls; asserts zero calls without consent.
+- Planned areas (one module each when they arrive): `bench`, `export`, other
   harnesses (`install.rs` is Claude Code only; split it per harness when the second arrives).
 
 ## Memory model
@@ -90,6 +110,16 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   is visible only from that project; one without it is global. Memory ids are
   `memory:<slug>@<project>` (project) and `memory:<slug>` (global); `memory`, `forget` and
   `links` look in the project first, then in the global memory.
+- Sessions: `session:<transcript name>` (with `fingerprint` of its indexed lines, `summarized` =
+  the fingerprint its summary came from, `harness`), `turn:<session>:<n>`, `fact:<session>:<kind>:<i>`
+  (`fact_kind` decision | correction | outcome | open_thread), all with the session's `project`;
+  `session -contains-> turn|fact`. They are written only by the internal catalog functions
+  (`src/catalog/internal.json`: `indexed_sessions`, `index_session`, `index_turns`,
+  `set_summary`), which the daemon runs on the store's session thread (`catalog::call`); they
+  are never tools of the `use` server (its tool list is `FUNCTIONS`).
+- **No LLM call without consent**: summaries run only when `summaries.enabled` is true, only
+  through the user's harness command, never from a hook; tests use a fake harness script and
+  assert zero calls when disabled.
 - A change to a body, a description, a parameter or the schema changes the fingerprint, so every
   store gets the new catalog at its next start. Test a body change with the round trips in
   `src/mcp_tests.rs`; descriptions stay short (they are paid on every agent turn).

@@ -1,8 +1,8 @@
 # Supported harnesses
 
 > Pre-release: Claude Code is supported by `install`, `uninstall`, `status`, `doctor` and
-> `import` (stage M3); the indexing of its past sessions follows in M4. The other harnesses are
-> targets, listed with what each one needs.
+> `import` (stage M3) and the indexing of its past sessions with opt-in summaries (stage M4). The
+> other harnesses are targets, listed with what each one needs.
 
 Every harness below supports MCP, so the memory tools work the same way everywhere. What differs is
 how graphersal-memory is installed into the harness, where the harness keeps its rules and
@@ -10,7 +10,7 @@ transcripts, and whether it has hooks.
 
 | Harness | Status | MCP registration | Rules exported to | Past sessions from | Hooks |
 |---|---|---|---|---|---|
-| Claude Code | install, import, hooks, rule block (M3); sessions planned (M4) | a member of `mcpServers` in `~/.claude.json` (user scope), edited in place with a backup | a marked block in `~/.claude/CLAUDE.md` | local transcripts (`~/.claude/projects/`) | SessionStart / SessionEnd |
+| Claude Code | install, import, hooks, rule block (M3); past sessions, opt-in summaries (M4) | a member of `mcpServers` in `~/.claude.json` (user scope), edited in place with a backup | a marked block in `~/.claude/CLAUDE.md` | local transcripts (`~/.claude/projects/`) | SessionStart / SessionEnd |
 | opencode | planned (M7) | its MCP config | `AGENTS.md` (to be checked) | its local store (format to be checked) | to be checked |
 | OpenAI Codex CLI | planned (M7) | its MCP config | `AGENTS.md` (to be checked) | its local store (format to be checked) | to be checked |
 | Cursor | planned (M7) | its MCP config | Cursor rules (to be checked) | its local store (format to be checked) | to be checked |
@@ -66,7 +66,11 @@ When the data or run directory was chosen explicitly (`--data-dir`, `GRAPHERSAL_
   tools to use.
 - `hook session-end` does the same import and prints nothing.
 - Both stop after 15 seconds, exit with code 0 on every error (a note on stderr), and skip the
-  import when another import is running. The indexing of finished sessions joins them in M4.
+  import when another import is running.
+- Both then queue the indexing of finished sessions in the daemon (one control line, answered at
+  once): `session-start` marks its own transcript as still being written, `session-end` marks it
+  as finished. The indexing and the opt-in summaries run in the daemon, never in the hook. With
+  `GRAPHERSAL_MEMORY_HOOK=off` (set for the summaries' own `claude -p` runs) a hook does nothing.
 
 ### The import of the file memory
 
