@@ -8,8 +8,9 @@ graph on your machine, searched through MCP instead of loaded on every turn.**
 > indexing of past sessions (with opt-in summaries) and the built-in A/B work so far.** This
 > README describes the product we are building, and the [status table](#status) says what
 > exists. Today you build the binary with Rust and run `graphersal-memory install`
-> ([try it](#try-it)); release binaries are still to come, and every command that is not built
-> yet says which stage delivers it. Star or watch the repository if you want to follow along.
+> ([try it](#try-it)); release binaries and the one-line installers are built and arrive with the
+> first published release, and every command that is not built yet says which stage delivers it.
+> Star or watch the repository if you want to follow along.
 
 ## The problem
 
@@ -68,8 +69,10 @@ agent > We dropped macOS from the CI test matrix on 2 October. macOS runners cos
 
 ## Install in one line
 
-> *The binaries and install scripts arrive in stage M6, so the two one-liners below do not work
-> yet. The `cargo install` line works today.*
+> *The two one-liners work once the first release is published (the release workflow and the
+> installers exist; the repository is not public yet, and GitHub serves release files of a
+> private repository to signed-in members only). The `cargo install` line works today for
+> anyone with access to the repository.*
 
 macOS and Linux:
 
@@ -82,6 +85,17 @@ Windows (PowerShell):
 ```powershell
 irm https://github.com/graphersal/graphersal-memory/releases/latest/download/install.ps1 | iex
 ```
+
+The installers pick the archive of your platform (macOS arm64 and x86_64, Linux x86_64 and
+aarch64 as static binaries, Windows x86_64), check it against the release's `SHA256SUMS`, and put
+the binary into `~/.local/bin` (Windows: `%LOCALAPPDATA%\Programs\graphersal-memory`). They change
+nothing else, not even your `PATH` (they tell you when it lacks the directory). A given version or
+directory: `... | sh -s -- --version v0.1.0 --dir /usr/local/bin`; on Windows
+`& ([scriptblock]::Create((irm <url of install.ps1>))) -Version v0.1.0 -Dir C:\Tools`. Rather check
+first? Download the archive from the [releases](https://github.com/graphersal/graphersal-memory/releases),
+compare it with `SHA256SUMS` (and, for a public release, its build provenance:
+`gh attestation verify <archive> -R graphersal/graphersal-memory`), and put `graphersal-memory` on
+your `PATH` yourself.
 
 With Rust installed, on any platform:
 
@@ -246,7 +260,7 @@ Details: [docs/harnesses.md](docs/harnesses.md).
 | Import of `CLAUDE.md` rules, export of rules kept in the graph (`export`), the model download | planned |
 | Indexing past sessions (`import --sessions`, the hooks), opt-in summaries and facts through your own harness (`summaries estimate`, `status`, `enable`, `disable`), cost estimate and monthly budget cap | available (M4; tested with a fake harness, no model was called in the tests) |
 | Built-in A/B (`bench`, `bench questions`): arms no memory / file memory / graphersal-memory, sandboxed, questions from raw transcripts, judge, report, cost guard, dry run | available (M5; Claude Code; tested with a fake harness, and one small real run). The arm with your whole current setup is planned |
-| Release binaries and one-line installers | planned (M6) |
+| Release binaries (macOS arm64/x86_64, Linux x86_64/aarch64 static, Windows x86_64), `install.sh` / `install.ps1` with checksum verification, `SHA256SUMS`, build provenance | built (M6: the release workflow builds and smoke-tests every platform; the installers are tested against a local copy of a release); available once the first release is published |
 | Other harnesses, browser UI, desktop app | planned (M7) |
 
 ### Try it

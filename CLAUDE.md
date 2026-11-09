@@ -9,6 +9,7 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
 
 ## Layout
 
+- `install.sh`, `install.ps1`: the one-line installers attached to every release (see Releases).
 - `crates/graphersal-memory/`: the single binary crate (`graphersal-memory`). There is one crate
   until a second binary or a library user appears, with modules per area:
   - `src/main.rs`: the entry point (parse, run, exit code);
@@ -164,6 +165,26 @@ cargo run -p graphersal-memory -- --help
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and Windows.
+
+## Releases
+
+- `.github/workflows/release.yml`: on a pushed tag `v<version>` (it must equal the workspace
+  version), or `workflow_dispatch` (input `dry_run`, default true: build, smoke-test, checksum,
+  installer tests, nothing published). It builds `graphersal-memory` with the `dist` profile for
+  linux-x86_64 / linux-aarch64 (static musl), macos-arm64, macos-x86_64 (cross-compiled on the
+  arm64 runner, smoke-tested through Rosetta 2) and windows-x86_64; smoke-tests each (`--version`,
+  `--help`, an MCP session of `mcp --no-daemon` over stdin on a temporary data directory); packs
+  `graphersal-memory-v<version>-<platform>.tar.gz` (Windows `.zip`) with LICENSE, NOTICE,
+  README.md; writes `SHA256SUMS` (archives + installers); runs both installers against the files
+  served like a release by a local HTTP server; and for a real release adds build provenance
+  attestations (public repository only) and creates a DRAFT GitHub Release. Never auto-publish.
+- `install.sh` (POSIX sh, shellcheck-clean; macOS/Linux) and `install.ps1` (Windows PowerShell
+  5.1 and 7): find the archive and its checksum in the release's `SHA256SUMS`, verify, install into
+  `~/.local/bin` / `%LOCALAPPDATA%\Programs\graphersal-memory` (`--dir`/`-Dir`), print the next
+  step. `--version`/`-Version`, `--base-url`/`-BaseUrl` (tests, mirrors) and the matching
+  `GRAPHERSAL_MEMORY_*` environment variables. They change nothing but the binary.
+- The crate stays `publish = false`; `cargo install --git` is the source path. While the repository
+  is private, release files need a signed-in member, so the one-liners work once it is public.
 
 ## Engine dependency
 
