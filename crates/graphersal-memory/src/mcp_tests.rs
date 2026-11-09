@@ -386,3 +386,38 @@ fn the_develop_profile_adds_the_structure_tools() {
     assert!(schema.contains("memory"), "{schema}");
     client.close();
 }
+
+#[test]
+fn a_session_of_another_project_is_not_readable_by_id_or_prefix() {
+    let data = TempDir::new("sessbind");
+    let mut develop = Client::start(data.path(), ProfileKind::Develop, "/work/a");
+    for (id, project, name) in [
+        ("session:aaaa1111", "/work/a", "Session of project a"),
+        ("session:aaaa2222", "/work/b", "Session of project b"),
+    ] {
+        develop.ok(
+            "run_saved_query",
+            json!({"name": "index_session", "params": {"id": id, "p": {
+                "name": name, "project": project, "started_at": "2026-11-01T10:00:00Z"}}}),
+        );
+    }
+    develop.close();
+
+    let mut a = Client::start(data.path(), ProfileKind::Use, "/work/a");
+    let own = a.ok("session", json!({"id": "session:aaaa1111"}));
+    assert!(own.contains("Session of project a"), "{own}");
+    // The other project's session: neither by id, nor by prefix, nor with a faked project.
+    for arguments in [
+        json!({"id": "session:aaaa2222"}),
+        json!({"id": "aaaa2222"}),
+        json!({"id": "aaaa2222", "project": "/work/b"}),
+    ] {
+        let read = a.ok("session", arguments.clone());
+        assert!(!read.contains("project b"), "{arguments}: {read}");
+        assert!(read.contains("no unique session"), "{arguments}: {read}");
+    }
+    // A prefix shared by both sessions resolves to the own one.
+    let prefixed = a.ok("session", json!({"id": "aaaa"}));
+    assert!(prefixed.contains("Session of project a"), "{prefixed}");
+    a.close();
+}

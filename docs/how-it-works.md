@@ -178,10 +178,10 @@ tool list is what keeps a `use` client to the memory functions.
 
 The memory functions are saved queries kept in the store (folder `memory`, marked as the
 product's). When graphersal-memory is upgraded, it replaces them and the schema with its own
-version, so edit copies under another name. Each memory function that reads or writes memories
-takes the project as a parameter. The server sets it on every call to the connection's project and
-hides it from the tool list, so an agent cannot read another project's memories by passing a
-different one.
+version, so edit copies under another name. Every memory function (also `session`, which reads
+one past session by id) takes the project as a parameter. The server sets it on every call to the
+connection's project and hides it from the tool list, so an agent cannot read another project's
+memories or sessions by passing a different one, by id or by an id prefix.
 
 ## The engine
 

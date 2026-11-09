@@ -220,7 +220,7 @@
   },
   {
     "name": "session",
-    "description": "One past session (id or uuid prefix): summary, dates, branches, files edited, what it is about; turns=true adds the turn list.",
+    "description": "One past session of this project (id or uuid prefix): summary, dates, branches, files edited, what it is about; turns=true adds the turn list.",
     "params": [
       {
         "name": "id",
@@ -235,6 +235,13 @@
           "type": "boolean"
         },
         "default": false
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
       }
     ]
   },
