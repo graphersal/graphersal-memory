@@ -14,8 +14,29 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/main.rs`: the entry point (parse, run, exit code);
   - `src/cli.rs`: the clap command definitions and help text, plus parsing tests;
   - `src/commands.rs`: running a command (`run_cli`): `mcp` runs the shim (`--no-daemon`:
-    serves in this process), `daemon` runs (`--foreground`) or starts the daemon, `status`
-    reports the daemon; every other command reports its planned stage and exits with code 2;
+    serves in this process), `daemon` runs (`--foreground`) or starts the daemon, `install`,
+    `uninstall`, `status`, `doctor`, `import` and the hidden `hook` work on Claude Code (`Setup`
+    from the environment); `ui`, `bench`, `export` report their planned stage and exit with code 2;
+  - `src/install.rs`: Claude Code's paths (`ClaudePaths`: `~/.claude.json`, `~/.claude/` or
+    `$CLAUDE_CONFIG_DIR`), the plan and apply of `install` (MCP members, hook groups, the managed
+    rule block `RULE_BLOCK` with its fingerprinted begin line), the state and backups in
+    `<data dir>/install/`, `uninstall` (restore an untouched file from its backup, else remove our
+    parts structurally), `inspect`/`status_lines`/`doctor`. The develop server is off by not being
+    registered (Claude Code has no global disabled state);
+  - `src/jsonedit.rs`: minimal-change JSON text edits (insert/remove one member or element, keep
+    every other byte), used for the harness's files; `claude mcp add` is not used because it
+    rewrites the whole file;
+  - `src/import.rs`: the Claude Code file-memory import (parse `MEMORY.md` + memory files, resolve
+    the project from transcripts or by decoding the directory name, plan new/changed by
+    fingerprint in `<data dir>/import/claude-code.json`, write through `remember`, the import lock);
+  - `src/client.rs`: a small MCP client; `connect` opens a `use` connection to the daemon (the
+    product's own calls go through the daemon, the single writer);
+  - `src/hook.rs`: `hook session-start|session-end`: time-boxed import of the session project's
+    changed memory files, one status line at session start, always exit 0;
+  - `src/config.rs`: `<data dir>/config.json` (`daemon.idle`); flag > env > file > default;
+  - `src/projects.rs`: `<data dir>/projects.json`: each project's git remote (credentials removed),
+    recorded by the daemon when a project first connects (for re-mapping moved repositories later);
+  - `src/fsutil.rs`: atomic writes and the FNV-1a fingerprint;
   - `src/ipc.rs`: the run directory (`--run-dir`, `GRAPHERSAL_MEMORY_RUN_DIR`, `<data dir>/run`
     for an explicit data directory, the platform's default), its files (`daemon.sock`,
     `daemon.pid`, `daemon.start.lock`, `daemon.log`), the socket types per platform (std on
@@ -45,13 +66,20 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `graphersal-mcp`'s `serve_lines`, `close`), `serve` (`--no-daemon`) and `ProjectBinding` (sets the `project` argument of the memory functions on
     every `tools/call` and hides it in `tools/list`, on the JSON-RPC lines);
   - `src/mcp_tests.rs`: MCP round trips over in-memory pipes with temporary data directories.
+  - `src/install_tests.rs`: install/uninstall/import/status/doctor/hooks on temporary homes with
+    the store served in the test process (byte-identical round trips, idempotence, dry run,
+    conflicts, structural uninstall, develop on/off, import of a fixture memory directory).
   - `tests/daemon_tests.rs`: the real binary as shims and daemon (Unix only): shared daemon,
     parallel calls, idle exit, stale socket, killed daemon, start race, handshake errors, upgrade
     and drain, `daemon`/`status`, permissions. Each test has its own temporary data/run/home
     directories (`GRAPHERSAL_MEMORY_DIR`, `GRAPHERSAL_MEMORY_RUN_DIR`, short
     `GRAPHERSAL_MEMORY_IDLE`) and stops (or kills) every daemon it started.
-- Planned areas (one module each when they arrive): `install/<harness>`, `sessions`, `bench`,
-  `export`/`import`.
+  - `tests/install_tests.rs`: the real binary's install/status/doctor/hook/uninstall/purge on a
+    temporary home (environment cleared, Unix only), the settings file's idle time, and the
+    installed `claude` binary reading the registration (`claude mcp get`, its HOME pointed at
+    the temporary home; skipped when `claude` is missing).
+- Planned areas (one module each when they arrive): `sessions`, `bench`, `export`, other
+  harnesses (`install.rs` is Claude Code only; split it per harness when the second arrives).
 
 ## Memory model
 
@@ -103,7 +131,9 @@ CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and W
    call no model; LLM-dependent paths are tested with a fake harness binary.
 3. **The user's live configuration is never changed by a benchmark**, and install only writes
    managed, marked parts. `uninstall` must restore the configuration byte for byte, and a test
-   proves it.
+   proves it (`install_tests.rs`, both of them). Tests never write under the real `~/.claude`:
+   an in-process test builds its `Setup` from a temporary home (`install_tests::setup_in`) and
+   never calls `run_cli` for install/status (that reads the real environment).
 4. **Nothing is claimed as working before it works.** The README status table and the
    command messages say "planned" until a stage lands with tests.
 5. **Numbers in docs come from a measurement**, with its source, its sample size and its caveats.

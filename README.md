@@ -4,11 +4,12 @@
 graph on your machine, searched through MCP instead of loaded on every turn.**
 
 > [!WARNING]
-> **Pre-release. The memory core and the shared daemon work so far.** This README describes the
-> product we are building, and the [status table](#status) says what exists. Today you can register
-> the memory in your harness by hand ([try it](#try-the-memory-core)); the one-command install and
-> session indexing are still to come, and every command that is not built yet says which stage
-> delivers it. Star or watch the repository if you want to follow along.
+> **Pre-release. The memory core, the shared daemon and the one-command install for Claude Code
+> work so far.** This README describes the product we are building, and the [status table](#status)
+> says what exists. Today you build the binary with Rust and run `graphersal-memory install`
+> ([try it](#try-it)); release binaries and session indexing are still to come, and every command
+> that is not built yet says which stage delivers it. Star or watch the repository if you want to
+> follow along.
 
 ## The problem
 
@@ -67,7 +68,8 @@ agent > We dropped macOS from the CI test matrix on 2 October. macOS runners cos
 
 ## Install in one line
 
-> *Target commands. They do not work yet: binaries and install scripts arrive in stage M6.*
+> *The binaries and install scripts arrive in stage M6, so the two one-liners below do not work
+> yet. The `cargo install` line works today.*
 
 macOS and Linux:
 
@@ -95,30 +97,43 @@ graphersal-memory install
 
 ### What `install` changes, and how `uninstall` reverts it
 
-`graphersal-memory install` is a short wizard that shows you every step first. For Claude Code it
-will:
+`graphersal-memory install` is a short wizard that shows you every step first and asks before it
+changes anything (`--dry-run` only shows the plan, `--yes` skips the question). For Claude Code it:
 
-1. **Register the MCP server(s)** in Claude Code: `use` is on, and `develop` stays off until you
-   enable it. It uses `claude mcp add` when available. Otherwise it edits the JSON config carefully
-   and keeps a backup.
-2. **Add two hooks.** At session start, a quick sync and background indexing of finished sessions.
-   At session end, an export. Neither blocks your session.
-3. **Import your existing memory**: memory files, `MEMORY.md`, and rules from `CLAUDE.md`. It reads
-   them and does not delete them.
-4. **Write the managed rule block**, a clearly marked section in your instruction file, telling the
-   agent where its memory lives.
-5. **Optionally download a better embedding model** (potion-multilingual-128M). Without it, a
-   built-in embedder works with no download.
-6. **Print a report**: what was imported, what was changed, where the backups are.
+1. **Registers the MCP server** `graphersal-memory` (the `use` tools) at user scope in
+   `~/.claude.json`. The `develop` server stays off: Claude Code cannot switch a user-scope server
+   off, so it is simply not registered until you run `install --enable-develop`
+   (`uninstall --disable-develop` removes it again).
+2. **Adds two hooks** to `~/.claude/settings.json`. At session start and at session end, the
+   memory files of the current project that are new or changed are imported, and the session
+   start adds one status line to the agent's context. Neither blocks your session: each stops
+   after 15 seconds and never fails. (Indexing of finished sessions joins the hooks in stage M4.)
+3. **Imports your existing file memory**: `MEMORY.md` and the memory files of every project under
+   `~/.claude/projects/`, with their kind, title, order and `[[links]]`, into the project they
+   belong to. It reads them and does not change or delete them, and running it again updates
+   instead of duplicating. Rules in `CLAUDE.md` files are not imported yet.
+4. **Writes the managed rule block**, a clearly marked section in `~/.claude/CLAUDE.md`, telling the
+   agent that its memory lives in graphersal-memory and how to use the tools. If you edit inside
+   the block, install and uninstall report a conflict and leave your edit alone.
+5. **The better embedding model** (potion-multilingual-128M) is planned: `--with-model` says so
+   today, and the built-in embedder works with no download.
+6. **Prints a report**: what was imported, which files changed, where the backups are.
+
+The JSON files are edited in place: only our entries are inserted, the rest of each file keeps its
+bytes, and every file is backed up into the data directory before its first change. (`claude mcp
+add` is not used, because it rewrites the whole file.)
 
 `graphersal-memory uninstall` removes exactly what `install` added: the MCP entries, the hooks and
-the marked block. Anything you wrote yourself stays as it is. The acceptance test for this is
-byte-for-byte: install, then uninstall, on a temporary home directory must leave the configuration
-identical. `status` and `doctor` show what is installed and how to fix what isn't working.
+the marked block. A file nobody changed since install gets its original bytes back (or is deleted
+again if install created it); in a file Claude Code rewrote since, only our entries are removed.
+Anything you wrote yourself stays as it is. The acceptance test for this is byte-for-byte:
+install, then uninstall, on a temporary home directory leaves the configuration identical.
+Your memories stay in the data directory; `uninstall --purge` deletes them too (after asking).
+`status` shows what is installed, and `doctor` checks it and says how to fix what isn't working.
 
 No ports, no tokens, no system service. The harness starts `graphersal-memory mcp`, which starts a
-small background daemon on demand. The daemon exits after two idle hours (configurable). See
-[How it works](docs/how-it-works.md).
+small background daemon on demand. The daemon exits after two idle hours (configurable in
+`config.json` in the data directory). See [How it works](docs/how-it-works.md).
 
 ## Does it help? Measure it
 
@@ -190,7 +205,7 @@ Details: [docs/privacy.md](docs/privacy.md).
 
 | Harness | Status |
 |---|---|
-| Claude Code | first target (planned, stage M3) |
+| Claude Code | install, uninstall, import of the file memory, hooks, rule block (M3); session indexing planned (M4) |
 | opencode | planned (M7) |
 | OpenAI Codex CLI | planned (M7) |
 | Cursor | planned (M7) |
@@ -202,44 +217,55 @@ Details: [docs/harnesses.md](docs/harnesses.md).
 
 | Feature | Status |
 |---|---|
-| Command-line skeleton (`--help`, command set) | available (commands of later stages report "not implemented yet") |
+| Command-line skeleton (`--help`, command set) | available (commands of later stages report "not implemented yet": `ui`, `bench`, `export`) |
 | Memory core: store, memory tools, project and global memories, `use`/`develop` profiles, MCP over stdio | available (M1) |
 | Shared daemon + stdio shim, several sessions at once (`mcp`, `daemon`, the daemon part of `status`) | available (M2; Linux and macOS tested, Windows builds but is untested) |
-| One-command install / uninstall for Claude Code, import, rule export | planned (M3) |
+| One-command install / uninstall for Claude Code, `status`, `doctor`, import of the file memory (`import`), the managed rule block, the session hooks, `config.json` | available (M3; Linux and macOS tested, Windows builds and its unit tests run) |
+| Import of `CLAUDE.md` rules, export of rules kept in the graph (`export`), the model download | planned |
 | Indexing past sessions, opt-in summaries and facts | planned (M4) |
 | Built-in A/B (`bench`) | planned (M5) |
 | Release binaries and one-line installers | planned (M6) |
 | Other harnesses, browser UI, desktop app | planned (M7) |
 
-### Try the memory core
+### Try it
 
-Until `install` (M3) arrives, you register the memory by hand. Build it with Rust (`cargo install
---locked --git https://github.com/graphersal/graphersal-memory graphersal-memory`), then register
-it in Claude Code:
+Build the binary with Rust (`cargo install --locked --git
+https://github.com/graphersal/graphersal-memory graphersal-memory`), then set it up for Claude
+Code:
 
 ```sh
-claude mcp add graphersal-memory -- graphersal-memory mcp
+graphersal-memory install --dry-run   # the plan, nothing changes
+graphersal-memory install             # shows the plan again and asks
+graphersal-memory status              # what is installed, whether the daemon runs
 ```
+
+Restart your Claude Code sessions afterwards. Details:
 
 - Every agent session starts its own `graphersal-memory mcp`. The first one starts a background
   daemon that owns the store; every session talks to it over a local socket, so several sessions
   share one memory at once and see each other's writes. The daemon exits after two hours without
-  a session (`GRAPHERSAL_MEMORY_IDLE=30m` changes that), and the next session starts it again.
-  `graphersal-memory status` shows whether it runs; its log is `daemon.log` in the run directory.
+  a session (`"daemon": {"idle": "30m"}` in `config.json`, or `GRAPHERSAL_MEMORY_IDLE=30m`), and the
+  next session starts it again. Its log is `daemon.log` in the run directory.
 - The store is created on first use in your per-user data directory (macOS
   `~/Library/Application Support/graphersal-memory`, Linux `~/.local/share/graphersal-memory`,
   Windows `%LOCALAPPDATA%\graphersal-memory`). `--data-dir DIR` or the environment variable
   `GRAPHERSAL_MEMORY_DIR` puts it elsewhere, for example to try it on a throwaway store (such a
-  data directory gets a daemon of its own).
+  data directory gets a daemon of its own; `install` with it registers the server for that
+  directory).
 - The project is the git repository root of the directory the harness starts it in (or that
   directory); `--project ROOT` sets it. Memories are stored for the project unless the agent
-  saves them as global, and searches see the project's memories plus the global ones.
+  saves them as global, and searches see the project's memories plus the global ones. The project's
+  git remote is recorded too, so that a later version can follow a moved repository.
 - `--profile use` (the default) offers the memory tools: `memories`, `memory`, `remember`,
   `forget`, `sessions`, `session`, `recall`. `--profile develop` adds schema, query, GQL and
-  saved-query tools.
+  saved-query tools (`install --enable-develop` registers it as `graphersal-memory-develop`).
 - `mcp --no-daemon` serves the store inside that one process instead (one session at a time: a
   second session fails to open the store, and so does a daemon while it runs).
+- `graphersal-memory import` imports new and changed memory files at any time (the hooks do it for
+  the current project).
 - Past sessions are not indexed yet (M4), so `sessions` finds nothing until then.
+- To register it by hand instead: `claude mcp add -s user graphersal-memory -- graphersal-memory
+  mcp`.
 
 The roadmap in user-facing words: [docs/roadmap.md](docs/roadmap.md). Why this exists:
 [docs/why.md](docs/why.md).
