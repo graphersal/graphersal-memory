@@ -82,11 +82,14 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     free `daemon.pid`, detached spawn, timeout naming the log), the handshake with retries on
     `restarting`/`stopping`, then a byte relay; `control` (status/stop);
   - `src/daemon.rs`: the daemon: pid lock, socket, one thread per connection, routing by the
-    handshake to a `StoreRuntime` (opened on first use) and its profile, idle exit, drain/restart
-    for a newer shim, clean shutdown (socket first, then the stores);
+    handshake to a `StoreRuntime` (opened on first use) and its profile, idle exit (no exit while
+    the indexer or a store's scheduled-job runs work), drain/restart for a newer shim, clean
+    shutdown (socket first, then the stores; the process exit afterwards only ends the blocked
+    accept loop);
   - `src/registry.rs`: `registry.json` (project -> store; everything goes to `default` until
     isolation, M7);
-  - `src/engine.rs`: the pinned engine revision, and a test that exercises the engine crates;
+  - `src/engine.rs`: the pinned engine version (`engine_version!`, shown by `--version`), and
+    tests that exercise the engine crates and check the pin;
   - `src/store.rs`: the data directory (`--data-dir`, `GRAPHERSAL_MEMORY_DIR`, the platform's
     per-user directory) and the default store `<data dir>/stores/default`, created on first use;
   - `src/catalog.rs` + `src/catalog/`: the product catalog built into the binary: `schema.json`,
@@ -97,9 +100,12 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/mcp.rs` + `src/mcp/{use,develop}.md`: the two profiles (configuration, instructions,
     tool lists), the project of a session (`--project`, else the git root of the cwd),
     `StoreRuntime` (one open store: `graphersal-serve`'s session thread, one `Context` per
-    profile over it sharing one `Mcp` endpoint, the job ticker, `serve` of one connection through
-    `graphersal-mcp`'s `serve_lines`, `close`), `serve` (`--no-daemon`) and `ProjectBinding` (sets the `project` argument of the memory functions on
-    every `tools/call` and hides it in `tools/list`, on the JSON-RPC lines);
+    profile over it sharing one `Mcp` endpoint, the job ticker (`JobTicker`, stopped by `close`,
+    which then waits for `background_runs` to reach 0 before it closes the store), `serve` of one
+    connection through `graphersal-mcp`'s `serve_lines` with the connection's project bound by
+    the engine (`Profile::with_bound_params`: `project` is hidden in `tools/list`, set on every
+    call of a saved query that declares it, left out of the answer's `call:` line), `close`),
+    and `serve` (`--no-daemon`);
   - `src/mcp_tests.rs`: MCP round trips over in-memory pipes with temporary data directories.
   - `src/install_tests.rs`: install/uninstall/import/status/doctor/hooks on temporary homes with
     the store served in the test process (byte-identical round trips, idempotence, dry run,
@@ -161,11 +167,10 @@ CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and W
 
 ## Engine dependency
 
-- `graphersal` and `graphersal-mcp` are git dependencies pinned to one revision of graphersal
-  `main` in the root `Cargo.toml`. During 0.x they become exact `=0.6.x` crates.io pins once
-  graphersal 0.6.0 is published. Every engine crate (`graphersal`, `graphersal-mcp`,
-  `graphersal-serve`, `graphersal-session`) pins the same revision; when you move the pin, update
-  `engine_rev_short!` in `src/engine.rs` (a test checks that they match).
+- The engine crates (`graphersal`, `graphersal-mcp`, `graphersal-serve`, `graphersal-session`)
+  are exact crates.io pins (`=0.6.0`) in the root `Cargo.toml`, all the same version (the MCP and
+  serving crates make no stability promise during 0.x). When you move the pin, update
+  `engine_version!` in `src/engine.rs` (a test checks it against `Cargo.toml` and `Cargo.lock`).
 - **Every engine gap goes to the graphersal repository**, as an issue or a branch there. Never
   work around it by copying engine code into this repository. graphersal-memory uses only the
   engine's public API, and it is the first external judge of that API.

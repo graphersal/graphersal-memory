@@ -43,12 +43,15 @@ pub const FUNCTIONS: [&str; 7] = [
     "memories", "memory", "remember", "forget", "sessions", "session", "recall",
 ];
 
-/// The functions whose `project` parameter the MCP layer binds to the connection's project.
+/// The functions that declare the `project` parameter, which each MCP connection binds to its
+/// project (`graphersal_mcp::Profile::with_bound_params` binds it for every saved query that
+/// declares it; a test keeps this list and the declarations in step).
+#[cfg(test)]
 pub const PROJECT_BOUND: [&str; 7] = [
     "memories", "memory", "remember", "forget", "sessions", "session", "recall",
 ];
 
-/// The name of the parameter bound to the connection's project.
+/// The name of the parameter bound to the connection's project (`crate::mcp`).
 pub const PROJECT_PARAM: &str = "project";
 
 /// The body of the memory function `name`.

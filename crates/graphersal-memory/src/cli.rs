@@ -462,10 +462,7 @@ mod tests {
         let err = parse(&["--version"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
         assert!(LONG_VERSION.starts_with(env!("CARGO_PKG_VERSION")));
-        assert!(LONG_VERSION.contains(concat!(
-            "graphersal ",
-            crate::engine::engine_version!()
-        )));
+        assert!(LONG_VERSION.contains(concat!("graphersal ", crate::engine::engine_version!())));
     }
 
     #[test]
