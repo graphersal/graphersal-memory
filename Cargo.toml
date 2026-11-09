@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/graphersal-memory"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/graphersal/graphersal-memory"
+homepage = "https://github.com/graphersal/graphersal-memory"
+authors = ["Aleksandr Dederer"]
+
+[workspace.dependencies]
+# Command-line parsing of the product CLI (many subcommands with help text).
+clap = { version = "4.5", features = ["derive"] }
+# The graph engine and its MCP endpoint. A git revision of graphersal `main` during development;
+# exact `=0.6.x` crates.io pins once graphersal 0.6.0 is published.
+graphersal = { git = "https://github.com/graphersal/graphersal", rev = "063be87d9ef8e4a4de7d095c166da20f99253495" }
+graphersal-mcp = { git = "https://github.com/graphersal/graphersal", rev = "063be87d9ef8e4a4de7d095c166da20f99253495" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

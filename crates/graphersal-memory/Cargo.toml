@@ -1,0 +1,27 @@
+[package]
+name = "graphersal-memory"
+description = "Local graph memory for AI coding agents: rules, decisions and past sessions, searchable through MCP."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+keywords = ["mcp", "memory", "agents", "graph", "claude"]
+categories = ["command-line-utilities", "development-tools"]
+# Not published before the first release (stage M6).
+publish = false
+
+[[bin]]
+name = "graphersal-memory"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+graphersal = { workspace = true }
+graphersal-mcp = { workspace = true }
+
+[lints]
+workspace = true
