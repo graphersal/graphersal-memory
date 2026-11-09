@@ -8,7 +8,11 @@
 //!   "daemon_version", "store"}`, then the connection carries plain MCP stdio framing
 //!   (newline-delimited JSON-RPC) in both directions until either side closes it;
 //! - or a control request: `{"protocol": 1, "control": "status"|"stop"}` -> one answer, then
-//!   the daemon closes the connection.
+//!   the daemon closes the connection. `{"protocol": 1, "control": "index_sessions",
+//!   "projects_dir", "ended": [..], "active": [..]}` queues a session indexing run (answer `{"ok":
+//!   true, "run": n}`), `{"protocol": 1, "control": "sessions_status"}` reports it (`running`,
+//!   `requested`, `completed`, `report`); see `crate::sessions`. An older daemon refuses them as
+//!   unknown control requests, which the callers report and survive.
 //!
 //! A refusal is `{"ok": false, "daemon_version", "error": {"code", "message"}}`; the codes are
 //! the [`Refusal`] variants. `restarting` and `stopping` are retried by the shim (the daemon

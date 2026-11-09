@@ -1,18 +1,18 @@
-//! Running a command. In this pre-release `install`, `uninstall`, `status`, `doctor` and
-//! `import` (Claude Code), `mcp` (the shim, or `--no-daemon`), `daemon` and the hidden `hook`
-//! work; every other command reports which stage delivers it.
+//! Running a command. In this pre-release `install`, `uninstall`, `status`, `doctor`, `import`
+//! (also `--sessions`) and `summaries` (Claude Code), `mcp` (the shim, or `--no-daemon`),
+//! `daemon` and the hidden `hook` work; every other command reports which stage delivers it.
 
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::cli::{Cli, Command, Harness, Profile};
+use crate::cli::{Cli, Command, Harness, Profile, SummariesAction};
 use crate::config::{self, Config};
 use crate::daemon::{self, DaemonOptions};
 use crate::import::{self, Caller, ImportState};
 use crate::install::{self, ClaudePaths, InstallOptions, Setup, UninstallOptions};
 use crate::shim::{self, DaemonLocation, ShimOptions};
-use crate::{client, hook, ipc, mcp, protocol, store};
+use crate::{client, hook, ipc, mcp, protocol, sessions, store, summaries};
 
 /// How long the product's own memory calls (import) wait for one answer.
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -34,6 +34,7 @@ pub fn planned_stage(command: &Command) -> (&'static str, &'static str) {
             ("M3", "one-click install for Claude Code")
         }
         Command::Import { .. } => ("M3", "import of the file memory"),
+        Command::Summaries { .. } => ("M4", "sessions and facts"),
         Command::Export { .. } => (
             "M7",
             "the export of rules kept in the graph into the harness's instruction files",
@@ -58,6 +59,7 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::Ui => "ui",
         Command::Bench { .. } => "bench",
         Command::Import { .. } => "import",
+        Command::Summaries { .. } => "summaries",
         Command::Export { .. } => "export",
         Command::Hook { .. } => "hook",
     }
@@ -107,6 +109,7 @@ pub fn run_cli(
             yes,
             with_model,
             enable_develop,
+            summaries,
         } => {
             if *harness != Harness::ClaudeCode {
                 let _ = writeln!(stderr, "{}", harness_not_implemented(name, *harness));
@@ -117,6 +120,7 @@ pub fn run_cli(
                 yes: *yes,
                 with_model: *with_model,
                 enable_develop: *enable_develop,
+                summaries: *summaries,
             };
             setup(cli).and_then(|setup| {
                 let mut connect = daemon_connector(&setup);
@@ -151,9 +155,19 @@ pub fn run_cli(
             })
         }
         Command::Doctor => setup(cli).map(|setup| doctor(&setup, &mut stdout)),
-        Command::Import { dry_run } => setup(cli).and_then(|setup| {
+        Command::Import {
+            dry_run,
+            sessions: true,
+        } => setup(cli).and_then(|setup| import_sessions(&setup, *dry_run, &mut stdout)),
+        Command::Import {
+            dry_run,
+            sessions: false,
+        } => setup(cli).and_then(|setup| {
             let mut connect = daemon_connector(&setup);
             run_import(&setup, *dry_run, &mut connect, &mut stdout)
+        }),
+        Command::Summaries { action } => setup(cli).and_then(|setup| {
+            run_summaries(&setup, action, &mut BufReader::new(stdin), &mut stdout)
         }),
         Command::Hook { event } => return run_hook(cli, *event, stdin, &mut stdout, stderr),
         Command::Mcp {
@@ -316,6 +330,202 @@ pub fn run_import(
     })
 }
 
+/// Where the daemon of `setup` is.
+fn setup_location(setup: &Setup) -> DaemonLocation {
+    DaemonLocation {
+        data_dir: setup.data_dir.clone(),
+        run_dir: setup.run_dir.clone(),
+        exe: setup.exe.clone(),
+        start_timeout: shim::START_TIMEOUT,
+    }
+}
+
+/// `import --sessions`: queues the indexing of every finished session in the daemon (starting
+/// it) and shows the progress until the run is done.
+pub fn import_sessions(setup: &Setup, dry_run: bool, out: &mut dyn Write) -> Result<u8, String> {
+    let request = sessions::Request::new(&setup.paths.projects);
+    let (found, active, todo, unchanged) = sessions::plan(&request, &setup.data_dir)?;
+    let _ = writeln!(
+        out,
+        "{found} session transcript{} under {}: {todo} new or changed, {unchanged} unchanged, \
+         {active} still being written (indexed once unchanged for {} minutes)",
+        if found == 1 { "" } else { "s" },
+        setup.paths.projects.display(),
+        sessions::IDLE.as_secs() / 60
+    );
+    let settings = Config::load(&setup.data_dir)?;
+    let _ = writeln!(
+        out,
+        "summaries: {}",
+        if settings.summaries.enabled {
+            "on (through your harness, within the monthly budget)"
+        } else {
+            "off (raw turns only; `graphersal-memory summaries estimate` shows what they would \
+             cost)"
+        }
+    );
+    if dry_run {
+        let _ = writeln!(out, "Dry run: nothing was indexed.");
+        return Ok(0);
+    }
+    let answer = shim::request(&setup_location(setup), &request.to_control())?;
+    let Some(run) = answer["run"].as_u64() else {
+        return Err(format!(
+            "the daemon did not take the request: {}",
+            answer["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown answer")
+        ));
+    };
+    let mut shown = String::new();
+    loop {
+        let status = shim::request_running(
+            &setup.run_dir,
+            &serde_json::json!({"protocol": protocol::PROTOCOL, "control": sessions::CONTROL_STATUS}),
+        )?
+        .ok_or("the daemon stopped while indexing; see its log")?;
+        let report = &status["report"];
+        let line = format!(
+            "  {}: {}/{} ({} indexed, {} unchanged, {} summarized)",
+            report["phase"].as_str().unwrap_or("queued"),
+            report["done"],
+            report["total"],
+            report["indexed"],
+            report["unchanged"],
+            report["summarized"]
+        );
+        if line != shown {
+            let _ = writeln!(out, "{line}");
+            let _ = out.flush();
+            shown = line;
+        }
+        if status["completed"].as_u64().unwrap_or(0) >= run {
+            for problem in report["problems"].as_array().into_iter().flatten() {
+                let _ = writeln!(out, "  problem: {}", problem.as_str().unwrap_or_default());
+            }
+            let _ = writeln!(
+                out,
+                "Done: {} sessions indexed ({} turns), {} unchanged, {} summarized.",
+                report["indexed"], report["turns"], report["unchanged"], report["summarized"]
+            );
+            let failed = report["problems"].as_array().is_some_and(|p| {
+                p.iter().any(|p| {
+                    !p.as_str()
+                        .unwrap_or_default()
+                        .contains("monthly budget is reached")
+                })
+            });
+            return Ok(if failed { EXIT_FAILED } else { 0 });
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// One estimate line.
+pub fn estimate_line(estimate: &sessions::Estimate) -> String {
+    format!(
+        "{} finished session{}, {} without a summary{}: about ${:.2} at list price \
+         (an estimate: ~4 characters per token, $3/$15 per million input/output tokens, plus \
+         the harness's own prompt; your harness reports the real cost)",
+        estimate.sessions,
+        if estimate.sessions == 1 { "" } else { "s" },
+        estimate.pending,
+        if estimate.too_short > 0 {
+            format!(" ({} more too short to summarize)", estimate.too_short)
+        } else {
+            String::new()
+        },
+        estimate.usd
+    )
+}
+
+/// `summaries estimate|status|enable|disable`.
+fn run_summaries(
+    setup: &Setup,
+    action: &SummariesAction,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn Write,
+) -> Result<u8, String> {
+    let settings = Config::load(&setup.data_dir)?;
+    let estimate = || {
+        sessions::estimate(
+            &setup.paths.projects,
+            &setup.data_dir,
+            sessions::IDLE,
+            settings.summaries.since.as_deref(),
+        )
+    };
+    let command = settings.summaries.harness_command.join(" ");
+    match action {
+        SummariesAction::Estimate => {
+            let _ = writeln!(out, "{}", estimate_line(&estimate()?));
+            let _ = writeln!(
+                out,
+                "Summaries run through `{command}` with a monthly budget of ${:.2}; nothing was \
+                 sent anywhere.",
+                settings.summaries.monthly_budget_usd
+            );
+        }
+        SummariesAction::Status => {
+            let spend = summaries::Spend::load(&setup.data_dir)?;
+            let month = summaries::this_month();
+            let state = sessions::State::load(&setup.data_dir)?;
+            let _ = writeln!(
+                out,
+                "summaries: {}\nthis month ({month}): ${:.2} spent of ${:.2}, {} summaries\n\
+                 sessions: {} indexed, {} with a summary of their current version",
+                if settings.summaries.enabled {
+                    format!("on, through `{command}`")
+                } else {
+                    "off".to_string()
+                },
+                spend.usd(&month),
+                settings.summaries.monthly_budget_usd,
+                spend.calls(&month),
+                state.indexed(),
+                state.summarized()
+            );
+        }
+        SummariesAction::Enable { budget, yes } => {
+            let _ = writeln!(out, "{}", estimate_line(&estimate()?));
+            let cap = budget.unwrap_or(settings.summaries.monthly_budget_usd);
+            let _ = writeln!(
+                out,
+                "Each finished session is sent once (again when it grows) to `{command}`: its \
+                 title, times, branches, edited file paths and the text of every prompt and \
+                 reply, never tool output. At most ${cap:.2} per month; above it only raw turns \
+                 are indexed."
+            );
+            if !yes && !crate::install::confirm("Switch summaries on?", input, out) {
+                let _ = writeln!(out, "Summaries stay off.");
+                return Ok(1);
+            }
+            write_summaries(setup, true, *budget)?;
+            let _ = writeln!(
+                out,
+                "Summaries are on. They run in the background after the next session (or now: \
+                 `graphersal-memory import --sessions`)."
+            );
+        }
+        SummariesAction::Disable => {
+            write_summaries(setup, false, None)?;
+            let _ = writeln!(out, "Summaries are off; raw turns are still indexed.");
+        }
+    }
+    Ok(0)
+}
+
+/// Switches the summaries in the settings file.
+pub fn write_summaries(setup: &Setup, enabled: bool, budget: Option<f64>) -> Result<(), String> {
+    let path = config::path(&setup.data_dir);
+    let current = crate::fsutil::read_optional(&path)?
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    let text = config::with_summaries(current.as_deref(), enabled, budget)?;
+    std::fs::create_dir_all(&setup.data_dir)
+        .map_err(|err| format!("cannot create {}: {err}", setup.data_dir.display()))?;
+    crate::fsutil::write_atomic(&path, text.as_bytes())
+}
+
 /// `doctor`: every check with its fix; exit code 1 when a problem was found.
 fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
     let findings = install::doctor(setup);
@@ -352,14 +562,31 @@ fn run_hook(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> u8 {
+    // The summaries' own harness runs: nothing to do.
+    if std::env::var(summaries::HOOK_ENV).is_ok_and(|v| v == "off") {
+        return 0;
+    }
     match setup(cli) {
         Ok(setup) => {
             let connect = daemon_connector(&setup);
-            hook::run(
+            let location = setup_location(&setup);
+            let enqueue: hook::Enqueue = Box::new(move |request: sessions::Request| {
+                let answer = shim::request(&location, &request.to_control())?;
+                if answer["ok"] == serde_json::Value::Bool(true) {
+                    Ok(())
+                } else {
+                    Err(answer["error"]["message"]
+                        .as_str()
+                        .unwrap_or("refused")
+                        .to_string())
+                }
+            });
+            hook::run_with(
                 event,
                 Ok(setup.paths.clone()),
                 setup.data_dir.clone(),
                 Box::new(connect),
+                Some(enqueue),
                 stdin,
                 stdout,
                 stderr,
@@ -535,8 +762,29 @@ pub fn status_text(
         }
         Err(err) => format!("settings: {err}"),
     };
+    let sessions = match (sessions::State::load(data_dir), Config::load(data_dir)) {
+        (Ok(state), Ok(config)) => {
+            let spend = summaries::Spend::load(data_dir)
+                .map(|spend| spend.usd(&summaries::this_month()))
+                .unwrap_or(0.0);
+            format!(
+                "sessions: {} indexed, {} summarized; summaries {}",
+                state.indexed(),
+                state.summarized(),
+                if config.summaries.enabled {
+                    format!(
+                        "on (${spend:.2} of ${:.2} spent this month)",
+                        config.summaries.monthly_budget_usd
+                    )
+                } else {
+                    "off".to_string()
+                }
+            )
+        }
+        (Err(err), _) | (_, Err(err)) => format!("sessions: {err}"),
+    };
     let mut text = format!(
-        "{daemon}\ndata directory: {}\n{settings}\n",
+        "{daemon}\ndata directory: {}\n{settings}\n{sessions}\n",
         data_dir.display()
     );
     match setup {

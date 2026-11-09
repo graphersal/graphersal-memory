@@ -684,3 +684,63 @@ fn purge_refuses_a_directory_that_is_not_ours() {
     assert!(err.contains("does not look like"), "{err}");
     assert!(data.path().join("precious.txt").exists());
 }
+
+#[test]
+fn install_asks_for_summaries_and_keeps_them_off_by_default() {
+    let summaries_on = |data: &Path| crate::config::Config::load(data).unwrap().summaries.enabled;
+    // --yes alone: off, and said so.
+    let home = TempDir::new("sum-home");
+    let data = TempDir::new("sum-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Index past sessions"), "{out}");
+    assert!(out.contains("summaries: off unless you agree"), "{out}");
+    assert!(
+        out.contains("summaries: off (raw turns are indexed"),
+        "{out}"
+    );
+    assert!(
+        out.contains("past sessions: indexed at the next session start"),
+        "{out}"
+    );
+    assert!(!summaries_on(data.path()));
+    // --yes --summaries: on without a question.
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            yes: true,
+            summaries: true,
+            ..InstallOptions::default()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(summaries_on(data.path()), "{out}");
+    memory.close();
+
+    // Asked: "y" to proceed, then "y" to summaries; an empty answer is no.
+    for (answers, expected) in [(&b"y\ny\n"[..], true), (&b"y\n\n"[..], false)] {
+        let home = TempDir::new("ask-home");
+        let data = TempDir::new("ask-data");
+        let setup = setup_in(home.path(), data.path());
+        let memory = Memory::open(data.path());
+        let mut connect = memory.connector();
+        let mut out = Vec::new();
+        let mut input = answers;
+        let code = install::install(
+            &setup,
+            &InstallOptions::default(),
+            &mut connect,
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("Summarize finished sessions"), "{out}");
+        assert_eq!(summaries_on(data.path()), expected, "{out}");
+        memory.close();
+    }
+}

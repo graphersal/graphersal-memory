@@ -11,6 +11,12 @@
 //! it: with no other connection open it exits at once (the shim starts the new binary), else it
 //! drains (serves on and exits when its last connection closes). On exit it removes the socket
 //! first, then closes every store cleanly.
+//!
+//! Session indexing (`crate::sessions`): the control request `index_sessions` (from the hooks,
+//! `install` and `import --sessions`) queues a run and is answered at once; one indexer thread
+//! runs the queued requests (merged while one runs), writing through each project's store in
+//! small session-thread jobs, and `sessions_status` reports its progress. The daemon does not
+//! exit idle while the indexer works.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -26,6 +32,7 @@ use crate::ipc::{self, LockFile, Stream};
 use crate::mcp::{self, StoreRuntime};
 use crate::protocol::{self, Handshake, Opening, Refusal};
 use crate::registry::Registry;
+use crate::sessions;
 
 /// The environment variable that sets the idle time when `--idle` is not given.
 pub const IDLE_ENV: &str = "GRAPHERSAL_MEMORY_IDLE";
@@ -135,6 +142,21 @@ struct State {
     draining: bool,
 }
 
+/// The session indexer's bookkeeping.
+#[derive(Default)]
+struct Indexer {
+    /// Whether the indexer thread runs.
+    running: bool,
+    /// The request waiting for the next run (merged requests).
+    pending: Option<sessions::Request>,
+    /// Requests received (each answer names its number).
+    requested: u64,
+    /// The last request a finished run covered.
+    completed: u64,
+    /// The report of the current (or last) run.
+    report: serde_json::Value,
+}
+
 /// The running daemon.
 struct Daemon {
     options: DaemonOptions,
@@ -150,6 +172,7 @@ struct Daemon {
     started_at: SystemTime,
     started: Instant,
     shutting_down: AtomicBool,
+    indexer: Mutex<Indexer>,
 }
 
 /// Runs the daemon in this process until it exits (idle, stop, upgrade): the process ends
@@ -222,6 +245,7 @@ pub fn run(options: DaemonOptions) -> Result<(), String> {
         started_at: SystemTime::now(),
         started: Instant::now(),
         shutting_down: AtomicBool::new(false),
+        indexer: Mutex::new(Indexer::default()),
     });
     log(&format!(
         "daemon {} (protocol {}) listening on {}, data {}, idle exit after {}s",
@@ -283,14 +307,112 @@ impl Daemon {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn lock_indexer(&self) -> MutexGuard<'_, Indexer> {
+        self.indexer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Queues an indexing request; starts the indexer thread when none runs. Returns the
+    /// request's number.
+    fn queue_indexing(self: &Arc<Self>, request: sessions::Request) -> Result<u64, String> {
+        let mut indexer = self.lock_indexer();
+        indexer.requested += 1;
+        let number = indexer.requested;
+        match &mut indexer.pending {
+            Some(pending) => pending.merge(request),
+            None => indexer.pending = Some(request),
+        }
+        if !indexer.running {
+            indexer.running = true;
+            let daemon = self.clone();
+            let spawned = std::thread::Builder::new()
+                .name("sessions".into())
+                .spawn(move || daemon.index_loop());
+            if let Err(err) = spawned {
+                indexer.running = false;
+                return Err(format!("cannot start the session indexer: {err}"));
+            }
+        }
+        Ok(number)
+    }
+
+    /// The indexer thread: runs queued requests until none is left.
+    fn index_loop(&self) {
+        loop {
+            let (request, covers) = {
+                let mut indexer = self.lock_indexer();
+                match indexer.pending.take() {
+                    Some(request) => (request, indexer.requested),
+                    None => {
+                        indexer.running = false;
+                        drop(indexer);
+                        // The idle time counts from the end of the work.
+                        self.lock_state().last_change = Instant::now();
+                        return;
+                    }
+                }
+            };
+            let (mut summarizer, problem) =
+                crate::summaries::Summarizer::new(&self.options.data_dir);
+            if let Some(problem) = problem {
+                log(&format!(
+                    "session summaries are off for this run: {problem}"
+                ));
+            }
+            let mut writer = StoreWriter { daemon: self };
+            let report = sessions::run(
+                &request,
+                &self.options.data_dir,
+                &mut writer,
+                summarizer.as_mut(),
+                &mut |report| self.lock_indexer().report = report.to_json(),
+                &|| self.shutting_down.load(Ordering::SeqCst),
+            );
+            log(&format!(
+                "sessions: {} found, {} indexed ({} turns), {} unchanged, {} still running, {} \
+                 summarized{}{}",
+                report.found,
+                report.indexed,
+                report.turns,
+                report.unchanged,
+                report.active,
+                report.summarized,
+                if report.budget_reached {
+                    ", monthly summary budget reached"
+                } else {
+                    ""
+                },
+                if report.problems.is_empty() {
+                    String::new()
+                } else {
+                    format!("; problems: {}", report.problems.join(" | "))
+                }
+            ));
+            let mut indexer = self.lock_indexer();
+            indexer.report = report.to_json();
+            indexer.completed = covers;
+        }
+    }
+
+    fn sessions_status(&self) -> serde_json::Value {
+        let indexer = self.lock_indexer();
+        json!({
+            "ok": true, "running": indexer.running, "requested": indexer.requested,
+            "completed": indexer.completed, "report": indexer.report,
+        })
+    }
+
     /// Exits after the idle time without a connection.
     fn watch_idle(&self) {
         let tick = (self.options.idle / 4).clamp(Duration::from_millis(50), Duration::from_secs(5));
         loop {
             std::thread::sleep(tick);
+            let indexing = self.lock_indexer().running;
             let idle = {
                 let mut state = self.lock_state();
                 let idle = !state.stopping
+                    && !indexing
                     && state.connections == 0
                     && state.last_change.elapsed() >= self.options.idle;
                 if idle {
@@ -400,7 +522,7 @@ impl Daemon {
     }
 
     /// Serves one accepted connection.
-    fn handle(&self, stream: Stream) {
+    fn handle(self: &Arc<Self>, stream: Stream) {
         let mut writer = match stream.try_clone() {
             Ok(writer) => writer,
             Err(err) => {
@@ -441,6 +563,16 @@ impl Daemon {
             Ok(Opening::Control(control)) => {
                 match control.as_str() {
                     "status" => answer(self.status().to_string()),
+                    sessions::CONTROL_INDEX => {
+                        let request = serde_json::from_slice(&line)
+                            .map_err(|err| err.to_string())
+                            .and_then(|value| sessions::Request::from_control(&value));
+                        match request.and_then(|request| self.queue_indexing(request)) {
+                            Ok(run) => answer(json!({"ok": true, "run": run}).to_string()),
+                            Err(err) => answer(protocol::refusal(Refusal::BadHandshake, &err)),
+                        }
+                    }
+                    sessions::CONTROL_STATUS => answer(self.sessions_status().to_string()),
                     "stop" => {
                         answer(
                             json!({"ok": true, "daemon_version": self.options.version}).to_string(),
@@ -449,7 +581,10 @@ impl Daemon {
                     }
                     other => answer(protocol::refusal(
                         Refusal::BadHandshake,
-                        &format!("unknown control request '{other}' (expected status or stop)"),
+                        &format!(
+                            "unknown control request '{other}' (expected status, stop, \
+                             index_sessions or sessions_status)"
+                        ),
                     )),
                 }
                 return;
@@ -559,6 +694,26 @@ impl Daemon {
         }
         state.connections += 1;
         Some(Registered(self))
+    }
+}
+
+/// The indexing's writes: each project's store, its catalog function run on the store's session
+/// thread (one short job per call).
+struct StoreWriter<'a> {
+    daemon: &'a Daemon,
+}
+
+impl sessions::Writer for StoreWriter<'_> {
+    fn call(
+        &mut self,
+        project: &str,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        if self.daemon.shutting_down.load(Ordering::SeqCst) {
+            return Err("the daemon is stopping".to_string());
+        }
+        self.daemon.store_for(project)?.call(name, args)
     }
 }
 

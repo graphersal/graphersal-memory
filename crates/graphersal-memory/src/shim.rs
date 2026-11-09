@@ -223,6 +223,23 @@ fn exchange(
     Ok((value, reader))
 }
 
+/// A request line (a JSON object with `control`, see `crate::protocol`) to the daemon, which
+/// is started when none runs; its one-line answer.
+pub fn request(location: &DaemonLocation, line: &Value) -> Result<Value, String> {
+    let stream = connect_or_start(location)?;
+    let (answer, _) = exchange(&stream, &line.to_string(), location.start_timeout)?;
+    Ok(answer)
+}
+
+/// A request line to the running daemon; `None` when none answers (nothing is started).
+pub fn request_running(run_dir: &Path, line: &Value) -> Result<Option<Value>, String> {
+    let Ok(stream) = ipc::connect(run_dir) else {
+        return Ok(None);
+    };
+    let (answer, _) = exchange(&stream, &line.to_string(), START_TIMEOUT)?;
+    Ok(Some(answer))
+}
+
 /// A control request (`status`, `stop`) to the running daemon; `None` when none answers.
 pub fn control(run_dir: &Path, request: &str) -> Result<Option<Value>, String> {
     let Ok(stream) = ipc::connect(run_dir) else {

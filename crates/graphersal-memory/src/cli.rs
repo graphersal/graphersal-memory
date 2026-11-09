@@ -28,9 +28,9 @@ const LONG_VERSION: &str = concat!(
         graphersal-memory keeps your agent's rules, decisions, past sessions and facts in a local \
         graph database and lets the agent search them through MCP, instead of loading a growing \
         memory file on every turn. Everything stays on your machine.\n\n\
-        PRE-RELEASE: `install`, `uninstall`, `status`, `doctor` and `import` (for Claude Code), \
-        `mcp` (the stdio server a harness starts; it shares one background daemon with every \
-        other session) and `daemon` work. Every other command says which stage delivers it; \
+        PRE-RELEASE: `install`, `uninstall`, `status`, `doctor`, `import` and `summaries` (for \
+        Claude Code), `mcp` (the stdio server a harness starts; it shares one background daemon \
+        with every other session) and `daemon` work. Every other command says which stage delivers it; \
         the plan is in docs/roadmap.md.",
     after_help = "Start with `graphersal-memory install`. \
         Docs: https://github.com/graphersal/graphersal-memory",
@@ -54,7 +54,7 @@ pub struct Cli {
 }
 
 /// The product's commands.
-#[derive(Debug, Subcommand, PartialEq, Eq)]
+#[derive(Debug, Subcommand, PartialEq)]
 pub enum Command {
     /// Set up graph memory for an agent harness: MCP servers, hooks, import of the existing
     /// memory, the managed rule block.
@@ -75,6 +75,10 @@ pub enum Command {
         /// Also register the develop MCP server (structure tools; off by default).
         #[arg(long)]
         enable_develop: bool,
+        /// Switch session summaries on without asking (they run through your own harness and
+        /// cost model usage; off by default, also with --yes).
+        #[arg(long)]
+        summaries: bool,
     },
     /// Remove exactly what `install` added; your own settings stay untouched.
     Uninstall {
@@ -133,11 +137,21 @@ pub enum Command {
         dry_run: bool,
     },
     /// Import the harness's file memory (MEMORY.md and the memory files; new and changed files
-    /// only).
+    /// only), or with --sessions its past sessions.
     Import {
         /// Show what would be imported without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Index the finished past sessions instead (in the daemon, with progress; summaries
+        /// only when switched on).
+        #[arg(long)]
+        sessions: bool,
+    },
+    /// Session summaries through your own harness: estimate, status, enable, disable.
+    Summaries {
+        /// What to do.
+        #[command(subcommand)]
+        action: SummariesAction,
     },
     /// Export rules from the graph into the harness's instruction files (managed block only).
     Export {
@@ -155,6 +169,36 @@ pub enum Command {
         #[arg(value_enum)]
         event: crate::hook::HookEvent,
     },
+}
+
+/// What `summaries` does.
+#[derive(Debug, Subcommand, PartialEq)]
+pub enum SummariesAction {
+    /// Estimate the cost of summarizing the sessions without a summary (calls no model).
+    Estimate,
+    /// Show whether summaries are on, the month's spend and the sessions waiting.
+    Status,
+    /// Switch summaries on (shows the estimate and asks unless --yes).
+    Enable {
+        /// The monthly budget in USD (default: the settings file's, else 5).
+        #[arg(long, value_name = "USD", value_parser = parse_budget)]
+        budget: Option<f64>,
+        /// Do not ask.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Switch summaries off (raw turns are still indexed).
+    Disable,
+}
+
+/// Parses `--budget`.
+fn parse_budget(text: &str) -> Result<f64, String> {
+    text.trim()
+        .trim_start_matches('$')
+        .parse::<f64>()
+        .ok()
+        .filter(|usd| usd.is_finite() && *usd >= 0.0)
+        .ok_or_else(|| format!("'{text}' is not an amount of dollars (example: 5)"))
 }
 
 /// Parses `--idle`.
@@ -226,7 +270,8 @@ mod tests {
                 dry_run: false,
                 yes: false,
                 with_model: false,
-                enable_develop: false
+                enable_develop: false,
+                summaries: false
             }
         );
         assert_eq!(
@@ -355,7 +400,8 @@ mod tests {
                 dry_run: false,
                 yes: true,
                 with_model: true,
-                enable_develop: true
+                enable_develop: true,
+                summaries: false
             }
         );
         assert_eq!(
@@ -382,6 +428,42 @@ mod tests {
         );
         let help = Cli::command().render_long_help().to_string();
         assert!(!help.contains("\n  hook"), "the hook command is hidden");
+    }
+
+    #[test]
+    fn session_and_summary_options_parse() {
+        assert_eq!(
+            parse(&["import", "--sessions"]).unwrap().command,
+            Command::Import {
+                dry_run: false,
+                sessions: true
+            }
+        );
+        assert_eq!(
+            parse(&["summaries", "enable", "--budget", "$2.5", "-y"])
+                .unwrap()
+                .command,
+            Command::Summaries {
+                action: SummariesAction::Enable {
+                    budget: Some(2.5),
+                    yes: true
+                }
+            }
+        );
+        for action in ["estimate", "status", "disable"] {
+            assert!(parse(&["summaries", action]).is_ok(), "{action}");
+        }
+        assert!(parse(&["summaries"]).is_err());
+        assert_eq!(
+            parse(&["summaries", "enable", "--budget=-1"])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::ValueValidation
+        );
+        match parse(&["install", "--yes", "--summaries"]).unwrap().command {
+            Command::Install { summaries, yes, .. } => assert!(summaries && yes),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

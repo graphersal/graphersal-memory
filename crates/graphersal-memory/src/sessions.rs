@@ -1,0 +1,1318 @@
+//! Indexing of past Claude Code sessions: every finished transcript
+//! (`<claude config>/projects/<project>/<session>.jsonl`, parsed by `crate::transcript`) becomes
+//! a `session` vertex with its `turn`s, and, when the user opted in, an English summary split into
+//! `fact`s (`crate::summaries`).
+//!
+//! - **Finished**: a transcript unchanged for [`IDLE`] (30 minutes), or one a `SessionEnd` hook
+//!   named; a transcript the current session writes (`active`) is left alone. A session that
+//!   grows later (a resumed session) gets a new fingerprint and is indexed again.
+//! - **Idempotent**: the session vertex carries the fingerprint of the transcript lines its turns
+//!   came from (set by the last batch, so a run that stopped half-way is redone), and
+//!   `<data dir>/sessions/claude-code.json` remembers each file's size, time and fingerprint, so
+//!   an unchanged file is not even read again.
+//! - **Small units**: a session is written as one call for its properties and calls of at most
+//!   [`BATCH_TURNS`] turns ([`BATCH_CHARS`] characters), each a short job on the store's session
+//!   thread, so an agent's memory call never waits long behind the indexing. The daemon runs
+//!   this on a thread of its own (`crate::daemon`); writes go through [`Writer`].
+//! - **Project**: the transcript's working directory, mapped to the project key as a session
+//!   started there would be (its git root); else the project directory's name, decoded like the
+//!   file-memory import does. Every vertex carries the project, so sessions are scoped like
+//!   memories.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+
+use crate::fsutil;
+use crate::summaries::{self, Refused, Summarizer};
+use crate::transcript::{self, CAP, Transcript, clip};
+
+/// The harness these transcripts come from.
+pub const HARNESS: &str = "claude-code";
+
+/// A transcript unchanged for this long counts as finished.
+pub const IDLE: Duration = Duration::from_secs(30 * 60);
+
+/// The most turns written by one call.
+pub const BATCH_TURNS: usize = 40;
+
+/// The most characters of turn text written by one call.
+pub const BATCH_CHARS: usize = 200_000;
+
+/// How often a summary of one transcript version is tried before it waits for the session to
+/// change.
+const SUMMARY_ATTEMPTS: u64 = 2;
+
+/// The state file's format version.
+const FORMAT: u64 = 1;
+
+/// The writes and reads of the indexing, by project (the daemon routes each to the project's
+/// store; tests call a session directly).
+pub trait Writer {
+    /// Runs the catalog function `name` for `project`'s store.
+    fn call(&mut self, project: &str, name: &str, args: Value) -> Result<Value, String>;
+}
+
+/// What one indexing run is asked to do.
+#[derive(Debug, Clone, Default)]
+pub struct Request {
+    /// The harness's projects directory (`~/.claude/projects`).
+    pub projects_dir: PathBuf,
+    /// Transcripts known to be finished (a `SessionEnd` named them).
+    pub ended: BTreeSet<PathBuf>,
+    /// Transcripts being written by a running session.
+    pub active: BTreeSet<PathBuf>,
+    /// A transcript unchanged for this long counts as finished.
+    pub idle: Duration,
+}
+
+/// The control request that asks the daemon to index (`crate::protocol`).
+pub const CONTROL_INDEX: &str = "index_sessions";
+
+/// The control request that reports the indexing's progress.
+pub const CONTROL_STATUS: &str = "sessions_status";
+
+impl Request {
+    /// A request for the transcripts under `projects_dir`, with the default idle time.
+    pub fn new(projects_dir: &Path) -> Self {
+        Self {
+            projects_dir: projects_dir.to_path_buf(),
+            idle: IDLE,
+            ..Self::default()
+        }
+    }
+
+    /// The request as the daemon's control line.
+    pub fn to_control(&self) -> Value {
+        let paths = |set: &BTreeSet<PathBuf>| -> Vec<String> {
+            set.iter().map(|p| p.display().to_string()).collect()
+        };
+        json!({
+            "protocol": crate::protocol::PROTOCOL, "control": CONTROL_INDEX,
+            "projects_dir": self.projects_dir.display().to_string(),
+            "ended": paths(&self.ended), "active": paths(&self.active),
+        })
+    }
+
+    /// The request of a control line (the idle time is always [`IDLE`]).
+    pub fn from_control(line: &Value) -> Result<Self, String> {
+        let dir = line["projects_dir"]
+            .as_str()
+            .filter(|dir| Path::new(dir).is_absolute())
+            .ok_or("index_sessions needs an absolute projects_dir")?;
+        let paths = |key: &str| -> BTreeSet<PathBuf> {
+            line[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(PathBuf::from)
+                .collect()
+        };
+        Ok(Self {
+            projects_dir: PathBuf::from(dir),
+            ended: paths("ended"),
+            active: paths("active"),
+            idle: IDLE,
+        })
+    }
+
+    /// Adds a later request to this one (a run not started yet does both).
+    pub fn merge(&mut self, later: Request) {
+        self.projects_dir = later.projects_dir;
+        self.ended.extend(later.ended);
+        self.active.extend(later.active);
+        for ended in &self.ended {
+            self.active.remove(ended);
+        }
+    }
+}
+
+/// What the indexing would do now, from the state alone (nothing is parsed or written):
+/// transcripts found, still being written, new or changed, unchanged.
+pub fn plan(request: &Request, data_dir: &Path) -> Result<(usize, usize, usize, usize), String> {
+    let state = State::load(data_dir)?;
+    let now = SystemTime::now();
+    let (mut found, mut active, mut todo, mut unchanged) = (0, 0, 0, 0);
+    for file in scan(&request.projects_dir) {
+        found += 1;
+        let Some((size, modified)) = stamp(&file) else {
+            continue;
+        };
+        if !finished(request, &file, modified, now) {
+            active += 1;
+            continue;
+        }
+        let entry = state.entry(&file).cloned().unwrap_or(Value::Null);
+        if entry["size"].as_u64() == Some(size) && entry["mtime"].as_u64() == Some(modified) {
+            unchanged += 1;
+        } else {
+            todo += 1;
+        }
+    }
+    Ok((found, active, todo, unchanged))
+}
+
+/// What a run did so far.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Report {
+    /// `scan`, `index`, `summarize` or `done`.
+    pub phase: String,
+    /// Transcripts found.
+    pub found: usize,
+    /// Transcripts still being written (left for later).
+    pub active: usize,
+    /// Transcripts of the current phase handled.
+    pub done: usize,
+    /// Transcripts the current phase handles.
+    pub total: usize,
+    /// Sessions written (new or grown).
+    pub indexed: usize,
+    /// Sessions unchanged since their last indexing.
+    pub unchanged: usize,
+    /// Transcripts without a single turn.
+    pub empty: usize,
+    /// Turns written.
+    pub turns: usize,
+    /// Summaries made.
+    pub summarized: usize,
+    /// Facts written.
+    pub facts: usize,
+    /// Sessions still waiting for a summary (budget, failures, a stopped run).
+    pub summaries_pending: usize,
+    /// Whether the monthly budget stopped the summaries.
+    pub budget_reached: bool,
+    /// What failed, one line each.
+    pub problems: Vec<String>,
+}
+
+impl Report {
+    /// The report as JSON (the daemon's `sessions_status`).
+    pub fn to_json(&self) -> Value {
+        json!({
+            "phase": self.phase, "found": self.found, "active": self.active,
+            "done": self.done, "total": self.total, "indexed": self.indexed,
+            "unchanged": self.unchanged, "empty": self.empty, "turns": self.turns,
+            "summarized": self.summarized, "facts": self.facts,
+            "summaries_pending": self.summaries_pending, "budget_reached": self.budget_reached,
+            "problems": self.problems,
+        })
+    }
+}
+
+/// The transcripts under `projects_dir`: `<dir>/<session>.jsonl` (the sub-agents' transcripts
+/// in `<dir>/<session>/subagents/` are not taken), sorted.
+pub fn scan(projects_dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(dirs) = std::fs::read_dir(projects_dir) else {
+        return out;
+    };
+    for dir in dirs.filter_map(Result::ok).map(|e| e.path()) {
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        out.extend(
+            files
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "jsonl")),
+        );
+    }
+    out.sort();
+    out
+}
+
+/// The indexing state of every transcript (`<data dir>/sessions/claude-code.json`).
+#[derive(Debug, Clone, Default)]
+pub struct State {
+    files: BTreeMap<String, Value>,
+}
+
+impl State {
+    fn path(data_dir: &Path) -> PathBuf {
+        data_dir.join("sessions").join(format!("{HARNESS}.json"))
+    }
+
+    /// Reads the state of `data_dir` (empty when there is none).
+    pub fn load(data_dir: &Path) -> Result<Self, String> {
+        let path = Self::path(data_dir);
+        let Some(bytes) = fsutil::read_optional(&path)? else {
+            return Ok(Self::default());
+        };
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|err| format!("{} is invalid: {err}", path.display()))?;
+        if value["version"].as_u64() != Some(FORMAT) {
+            return Err(format!("{}: unsupported version", path.display()));
+        }
+        Ok(Self {
+            files: value["files"]
+                .as_object()
+                .map(|files| files.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default(),
+        })
+    }
+
+    /// Writes the state.
+    pub fn save(&self, data_dir: &Path) -> Result<(), String> {
+        let path = Self::path(data_dir);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+        }
+        let files: serde_json::Map<String, Value> = self.files.clone().into_iter().collect();
+        let value = json!({"version": FORMAT, "files": files});
+        fsutil::write_atomic(
+            &path,
+            format!("{}\n", crate::jsonedit::render(&value, Some("  "), 0)).as_bytes(),
+        )
+    }
+
+    /// The entry of `file`.
+    pub fn entry(&self, file: &Path) -> Option<&Value> {
+        self.files.get(&file.display().to_string())
+    }
+
+    fn entry_mut(&mut self, file: &Path) -> &mut Value {
+        self.files
+            .entry(file.display().to_string())
+            .or_insert_with(|| json!({}))
+    }
+
+    /// How many transcripts the state lists as indexed (with turns).
+    pub fn indexed(&self) -> usize {
+        self.files
+            .values()
+            .filter(|e| e["fingerprint"].is_string() && e["empty"] != true)
+            .count()
+    }
+
+    /// How many indexed sessions have a summary of their current version.
+    pub fn summarized(&self) -> usize {
+        self.files
+            .values()
+            .filter(|e| e["fingerprint"].is_string() && e["summarized"] == e["fingerprint"])
+            .count()
+    }
+}
+
+/// A file's size and modification time (seconds since the epoch).
+fn stamp(file: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(file).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    Some((meta.len(), modified))
+}
+
+/// Whether `file` (modified at `modified`) is finished for `request`.
+fn finished(request: &Request, file: &Path, modified: u64, now: SystemTime) -> bool {
+    if request.active.contains(file) {
+        return false;
+    }
+    if request.ended.contains(file) {
+        return true;
+    }
+    let now = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    now.saturating_sub(modified) >= request.idle.as_secs()
+}
+
+/// The project key of a session: its working directory's (git root), else the harness project
+/// directory's decoded name; `None` when neither names a directory.
+pub fn project_of(transcript: &Transcript, file: &Path) -> Option<String> {
+    if let Some(cwd) = &transcript.cwd {
+        let dir = Path::new(cwd);
+        return Some(if dir.is_dir() {
+            crate::mcp::project_key(None, dir)
+        } else {
+            // The directory is gone: keep its path, the key it had.
+            cwd.clone()
+        });
+    }
+    let dir = crate::import::resolve_project_dir(file.parent()?)?;
+    Some(crate::mcp::project_key(None, &dir))
+}
+
+/// The session's id in the graph: `session:<transcript file name>`.
+pub fn session_id(file: &Path) -> String {
+    let stem = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    format!("session:{stem}")
+}
+
+/// One parsed transcript with what the indexing derives from it.
+struct Parsed {
+    transcript: Transcript,
+    id: String,
+    uuid: String,
+    project: String,
+    files: Vec<String>,
+    title: String,
+    started_at: String,
+    source: String,
+}
+
+fn parse_file(file: &Path, modified: u64) -> Result<Option<Parsed>, String> {
+    let bytes =
+        std::fs::read(file).map_err(|err| format!("cannot read {}: {err}", file.display()))?;
+    let uuid = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let transcript = transcript::parse(&bytes, &uuid);
+    if transcript.turns.is_empty() {
+        return Ok(None);
+    }
+    let project = project_of(&transcript, file).ok_or_else(|| {
+        format!(
+            "{}: the session's project directory is not known (no working directory recorded)",
+            file.display()
+        )
+    })?;
+    let files = transcript
+        .files
+        .iter()
+        .filter_map(|path| transcript::relative_file(path, &project))
+        .collect();
+    let title = if transcript.title.is_empty() {
+        format!("Session {}", uuid.chars().take(8).collect::<String>())
+    } else {
+        transcript.title.clone()
+    };
+    let started_at = if transcript.started_at.is_empty() {
+        crate::daemon::utc_timestamp(modified)
+    } else {
+        transcript.started_at.clone()
+    };
+    Ok(Some(Parsed {
+        id: session_id(file),
+        source: format!(
+            "transcript:{}",
+            file.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        ),
+        transcript,
+        uuid,
+        project,
+        files,
+        title,
+        started_at,
+    }))
+}
+
+impl Parsed {
+    fn session_properties(&self) -> Value {
+        let t = &self.transcript;
+        let summary = format!("Session '{}' ({} turns).", self.title, t.turns.len());
+        let mut p = json!({
+            "name": self.title, "title": self.title, "summary": summary,
+            "embed_text": format!("{}: {summary}", self.title),
+            "turns": t.turns.len(), "started_at": self.started_at,
+            "ended_at": if t.ended_at.is_empty() { &self.started_at } else { &t.ended_at },
+            "branches": t.branches, "files_edited": self.files, "source": self.source,
+            "source_bytes": t.bytes, "visibility": "private", "origin": "sessions",
+            "harness": HARNESS, "project": self.project,
+        });
+        if !t.compact.is_empty() {
+            p["compact_summaries"] = json!(clip(&t.compact.join("\n\n---\n\n"), CAP));
+        }
+        p
+    }
+
+    fn turn_rows(&self) -> Vec<(usize, Value)> {
+        self.transcript
+            .turns
+            .iter()
+            .map(|turn| {
+                let name = format!("{} #{}", self.title, turn.n);
+                let user = clip(&turn.user, CAP);
+                let assistant = clip(&turn.assistant, CAP);
+                let size = user.len() + assistant.len();
+                let row = json!({
+                    "id": format!("turn:{}:{}", self.uuid, turn.n),
+                    "p": {
+                        "name": name, "n": turn.n,
+                        "at": if turn.at.is_empty() { &self.started_at } else { &turn.at },
+                        "user": user, "assistant": assistant, "tools": turn.tools,
+                        "summary": clip(&turn.user, 300),
+                        "embed_text": format!("{name}: {}", clip(&turn.user, 500)),
+                        "source": self.source, "visibility": "private", "origin": "sessions",
+                        "project": self.project,
+                    },
+                });
+                (size, row)
+            })
+            .collect()
+    }
+
+    fn fact_rows(&self, output: &Value) -> Vec<Value> {
+        summaries::facts(output)
+            .into_iter()
+            .map(|(kind, i, text, why)| {
+                let mut embed = format!("{kind}: {}", clip(&text, 600));
+                if !why.is_empty() {
+                    embed.push_str(&format!(" Why: {}", clip(&why, 400)));
+                }
+                let mut p = json!({
+                    "name": clip(&text, 80), "summary": clip(&text, 1500), "fact_kind": kind,
+                    "n": i, "at": self.started_at, "source": self.source,
+                    "visibility": "private", "origin": "sessions", "project": self.project,
+                    "embed_text": embed,
+                });
+                if !why.is_empty() {
+                    p["why"] = json!(clip(&why, 1500));
+                }
+                json!({"id": format!("fact:{}:{kind}:{i}", self.uuid), "p": p})
+            })
+            .collect()
+    }
+}
+
+/// Writes one session: its properties, then its turns in batches (the last one sets the
+/// fingerprint). Returns the turns written.
+fn write_session(writer: &mut dyn Writer, parsed: &Parsed) -> Result<usize, String> {
+    writer.call(
+        &parsed.project,
+        "index_session",
+        json!({"id": parsed.id, "p": parsed.session_properties()}),
+    )?;
+    let rows = parsed.turn_rows();
+    let total = rows.len();
+    let mut batch = Vec::new();
+    let mut size = 0;
+    for (i, (row_size, row)) in rows.into_iter().enumerate() {
+        batch.push(row);
+        size += row_size;
+        let last = i + 1 == total;
+        if last || batch.len() >= BATCH_TURNS || size >= BATCH_CHARS {
+            let fingerprint = if last {
+                parsed.transcript.fingerprint.clone()
+            } else {
+                String::new()
+            };
+            writer.call(
+                &parsed.project,
+                "index_turns",
+                json!({"id": parsed.id, "rows": std::mem::take(&mut batch),
+                       "fingerprint": fingerprint}),
+            )?;
+            size = 0;
+        }
+    }
+    Ok(total)
+}
+
+/// What the graph knows of each session of a project: id -> (fingerprint, summarized).
+type Known = BTreeMap<String, (String, String)>;
+
+fn known_of(
+    writer: &mut dyn Writer,
+    cache: &mut BTreeMap<String, Known>,
+    project: &str,
+) -> Result<Known, String> {
+    if let Some(known) = cache.get(project) {
+        return Ok(known.clone());
+    }
+    let rows = writer.call(project, "indexed_sessions", json!({}))?;
+    let mut known = Known::new();
+    for row in rows.as_array().into_iter().flatten() {
+        if let Some(id) = row["id"].as_str() {
+            known.insert(
+                id.to_string(),
+                (
+                    row["fingerprint"].as_str().unwrap_or_default().to_string(),
+                    row["summarized"].as_str().unwrap_or_default().to_string(),
+                ),
+            );
+        }
+    }
+    cache.insert(project.to_string(), known.clone());
+    Ok(known)
+}
+
+/// Runs one indexing pass: every finished transcript that is new or changed is written, then,
+/// with a summarizer (the user opted in), the sessions without a summary of their current
+/// version are summarized within the budget. `progress` sees the report after every unit;
+/// `stop` ends the run between units.
+pub fn run(
+    request: &Request,
+    data_dir: &Path,
+    writer: &mut dyn Writer,
+    summarizer: Option<&mut Summarizer>,
+    progress: &mut dyn FnMut(&Report),
+    stop: &dyn Fn() -> bool,
+) -> Report {
+    let mut report = Report {
+        phase: "scan".into(),
+        ..Report::default()
+    };
+    let mut state = match State::load(data_dir) {
+        Ok(state) => state,
+        Err(err) => {
+            report.problems.push(err);
+            report.phase = "done".into();
+            return report;
+        }
+    };
+    let now = SystemTime::now();
+    let mut todo = Vec::new();
+    for file in scan(&request.projects_dir) {
+        report.found += 1;
+        let Some((size, modified)) = stamp(&file) else {
+            continue;
+        };
+        if !finished(request, &file, modified, now) {
+            report.active += 1;
+            continue;
+        }
+        todo.push((file, size, modified));
+    }
+    report.phase = "index".into();
+    report.total = todo.len();
+    progress(&report);
+    let mut cache: BTreeMap<String, Known> = BTreeMap::new();
+    let mut to_summarize = Vec::new();
+    for (file, size, modified) in todo {
+        if stop() {
+            break;
+        }
+        report.done += 1;
+        let entry = state.entry(&file).cloned().unwrap_or(Value::Null);
+        let same_file =
+            entry["size"].as_u64() == Some(size) && entry["mtime"].as_u64() == Some(modified);
+        if same_file && entry["empty"] == true {
+            report.empty += 1;
+            continue;
+        }
+        if same_file && entry["fingerprint"].is_string() {
+            report.unchanged += 1;
+            if entry["summarized"] != entry["fingerprint"] {
+                to_summarize.push(file);
+            }
+            continue;
+        }
+        match index_one(&file, size, modified, writer, &mut cache, &mut state) {
+            Ok(Indexed::Empty) => report.empty += 1,
+            Ok(Indexed::Unchanged { summarized }) => {
+                report.unchanged += 1;
+                if !summarized {
+                    to_summarize.push(file.clone());
+                }
+            }
+            Ok(Indexed::Written { turns }) => {
+                report.indexed += 1;
+                report.turns += turns;
+                to_summarize.push(file.clone());
+            }
+            Err(err) => report.problems.push(err),
+        }
+        if let Err(err) = state.save(data_dir) {
+            report.problems.push(err);
+        }
+        progress(&report);
+    }
+    report.summaries_pending = to_summarize.len();
+    if let Some(summarizer) = summarizer {
+        report.phase = "summarize".into();
+        report.done = 0;
+        report.total = to_summarize.len();
+        progress(&report);
+        for file in to_summarize {
+            if stop() {
+                break;
+            }
+            report.done += 1;
+            match summarize_one(&file, writer, summarizer, &mut state) {
+                Ok(Summarized::Done { facts }) => {
+                    report.summarized += 1;
+                    report.facts += facts;
+                    report.summaries_pending -= 1;
+                }
+                Ok(Summarized::Skipped) => report.summaries_pending -= 1,
+                Ok(Summarized::Waiting) => {}
+                Err(Refused::Budget { spent, cap }) => {
+                    report.budget_reached = true;
+                    report.problems.push(format!(
+                        "the summaries' monthly budget is reached (${spent:.2} of ${cap:.2} \
+                         spent); raw turns are still indexed, summaries continue next month"
+                    ));
+                    break;
+                }
+                Err(Refused::Failed(err)) => report.problems.push(err),
+            }
+            if let Err(err) = state.save(data_dir) {
+                report.problems.push(err);
+            }
+            progress(&report);
+        }
+    }
+    report.phase = "done".into();
+    progress(&report);
+    report
+}
+
+enum Indexed {
+    Empty,
+    Unchanged { summarized: bool },
+    Written { turns: usize },
+}
+
+fn index_one(
+    file: &Path,
+    size: u64,
+    modified: u64,
+    writer: &mut dyn Writer,
+    cache: &mut BTreeMap<String, Known>,
+    state: &mut State,
+) -> Result<Indexed, String> {
+    let Some(parsed) = parse_file(file, modified)? else {
+        *state.entry_mut(file) = json!({"size": size, "mtime": modified, "empty": true});
+        return Ok(Indexed::Empty);
+    };
+    let known = known_of(writer, cache, &parsed.project)?;
+    let fingerprint = parsed.transcript.fingerprint.clone();
+    let (stored, summarized) = known.get(&parsed.id).cloned().unwrap_or_default();
+    let outcome = if stored == fingerprint {
+        Indexed::Unchanged {
+            summarized: summarized == fingerprint,
+        }
+    } else {
+        Indexed::Written {
+            turns: write_session(writer, &parsed)?,
+        }
+    };
+    let previous = state.entry(file).cloned().unwrap_or(Value::Null);
+    let summary_of = if summarized == fingerprint {
+        json!(fingerprint)
+    } else {
+        previous["summarized"].clone()
+    };
+    *state.entry_mut(file) = json!({
+        "size": size, "mtime": modified, "fingerprint": fingerprint,
+        "session": parsed.id, "project": parsed.project,
+        "turns": parsed.transcript.turns.len(), "started_at": parsed.started_at,
+        "prompt_chars": summaries::prompt(&parsed.transcript, &parsed.files, &parsed.project)
+            .chars().count(),
+        "summarized": summary_of,
+        "indexed_at": crate::daemon::now_utc(),
+    });
+    Ok(outcome)
+}
+
+enum Summarized {
+    Done {
+        facts: usize,
+    },
+    /// Not worth a summary (too short, before `since`).
+    Skipped,
+    /// Tried too often for this version; waits for the session to change.
+    Waiting,
+}
+
+fn summarize_one(
+    file: &Path,
+    writer: &mut dyn Writer,
+    summarizer: &mut Summarizer,
+    state: &mut State,
+) -> Result<Summarized, Refused> {
+    let entry = state.entry(file).cloned().unwrap_or(Value::Null);
+    let Some(fingerprint) = entry["fingerprint"].as_str().map(str::to_string) else {
+        return Ok(Summarized::Waiting);
+    };
+    if entry["summarized"] == json!(fingerprint) {
+        return Ok(Summarized::Skipped);
+    }
+    if let Some(since) = summarizer.since()
+        && entry["started_at"].as_str().unwrap_or_default() < since
+    {
+        return Ok(Summarized::Skipped);
+    }
+    let attempts = if entry["attempted"] == json!(fingerprint) {
+        entry["attempts"].as_u64().unwrap_or(0)
+    } else {
+        0
+    };
+    if attempts >= SUMMARY_ATTEMPTS {
+        return Ok(Summarized::Waiting);
+    }
+    let Some((_, modified)) = stamp(file) else {
+        return Ok(Summarized::Waiting);
+    };
+    let parsed = match parse_file(file, modified) {
+        Ok(Some(parsed)) if parsed.transcript.fingerprint == fingerprint => parsed,
+        // Changed since its indexing: the next run indexes it again first.
+        Ok(_) => return Ok(Summarized::Waiting),
+        Err(err) => return Err(Refused::Failed(err)),
+    };
+    let condensed = summaries::condensed(&parsed.transcript, &parsed.files, usize::MAX);
+    if condensed.chars().count() < summaries::MIN_CHARS {
+        let slot = state.entry_mut(file);
+        slot["summarized"] = json!(fingerprint);
+        slot["summary"] = json!("too short");
+        return Ok(Summarized::Skipped);
+    }
+    let prompt = summaries::prompt(&parsed.transcript, &parsed.files, &parsed.project);
+    let summary = match summarizer.summarize(&prompt) {
+        Ok(summary) => summary,
+        Err(Refused::Failed(err)) => {
+            let slot = state.entry_mut(file);
+            slot["attempted"] = json!(fingerprint);
+            slot["attempts"] = json!(attempts + 1);
+            return Err(Refused::Failed(format!(
+                "{}: the summary failed: {err}",
+                file.display()
+            )));
+        }
+        Err(other) => return Err(other),
+    };
+    let output = &summary.output;
+    let headline = clip(output["headline"].as_str().unwrap_or_default().trim(), 200);
+    let text = clip(output["summary"].as_str().unwrap_or_default().trim(), 600);
+    let facts = parsed.fact_rows(output);
+    let count = facts.len();
+    let p = json!({
+        "name": headline, "summary": text, "body": summaries::render(output),
+        "embed_text": format!("{headline}: {text}"), "summarized": fingerprint,
+        "summarized_bytes": parsed.transcript.bytes,
+    });
+    writer
+        .call(
+            &parsed.project,
+            "set_summary",
+            json!({"id": parsed.id, "p": p, "facts": facts}),
+        )
+        .map_err(Refused::Failed)?;
+    let slot = state.entry_mut(file);
+    slot["summarized"] = json!(fingerprint);
+    slot["summary"] = json!("done");
+    if let Some(cost) = summary.cost_usd {
+        slot["summary_cost_usd"] = json!(cost);
+    }
+    Ok(Summarized::Done { facts: count })
+}
+
+/// What a summaries run would cost: sessions finished and indexed or waiting, how many lack a
+/// summary, and the estimate of summarizing them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Estimate {
+    /// Finished sessions with turns.
+    pub sessions: usize,
+    /// Of them, without a summary of their current version (and not before `since`).
+    pub pending: usize,
+    /// Of them, too short for a summary.
+    pub too_short: usize,
+    /// The estimated list-price cost of the pending ones, USD.
+    pub usd: f64,
+}
+
+/// Estimates the summaries of every finished transcript under `projects_dir` (read only: the
+/// state of `data_dir` and the transcripts; nothing is written, no model is called).
+pub fn estimate(
+    projects_dir: &Path,
+    data_dir: &Path,
+    idle: Duration,
+    since: Option<&str>,
+) -> Result<Estimate, String> {
+    let state = State::load(data_dir)?;
+    let request = Request {
+        projects_dir: projects_dir.to_path_buf(),
+        idle,
+        ..Request::default()
+    };
+    let now = SystemTime::now();
+    let mut out = Estimate::default();
+    for file in scan(projects_dir) {
+        let Some((size, modified)) = stamp(&file) else {
+            continue;
+        };
+        if !finished(&request, &file, modified, now) {
+            continue;
+        }
+        let entry = state.entry(&file).cloned().unwrap_or(Value::Null);
+        let same =
+            entry["size"].as_u64() == Some(size) && entry["mtime"].as_u64() == Some(modified);
+        let (chars, started, summarized) = if same && entry["fingerprint"].is_string() {
+            (
+                entry["prompt_chars"].as_u64().unwrap_or(0) as usize,
+                entry["started_at"].as_str().unwrap_or_default().to_string(),
+                entry["summarized"] == entry["fingerprint"],
+            )
+        } else if same && entry["empty"] == true {
+            continue;
+        } else {
+            match parse_file(&file, modified) {
+                Ok(Some(parsed)) => (
+                    summaries::prompt(&parsed.transcript, &parsed.files, &parsed.project)
+                        .chars()
+                        .count(),
+                    parsed.started_at.clone(),
+                    false,
+                ),
+                Ok(None) | Err(_) => continue,
+            }
+        };
+        out.sessions += 1;
+        if summarized || since.is_some_and(|since| started.as_str() < since) {
+            continue;
+        }
+        // The prompt is the instructions (~1.6k characters) plus the condensed transcript.
+        if chars < summaries::MIN_CHARS + 1_600 {
+            out.too_short += 1;
+            continue;
+        }
+        out.pending += 1;
+        out.usd += summaries::estimate_usd(chars);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use graphersal_session::Session;
+
+    /// The store in this process: a session with the catalog, the project ignored.
+    pub(crate) struct Direct {
+        pub session: Session,
+        pub calls: Vec<String>,
+    }
+
+    impl Direct {
+        pub fn new() -> Self {
+            let mut session = Session::new();
+            crate::catalog::apply(&mut session).unwrap();
+            Self {
+                session,
+                calls: Vec::new(),
+            }
+        }
+
+        pub fn query(&mut self, script: &str) -> Value {
+            let answer: Value = serde_json::from_str(&self.session.execute(
+                script,
+                &graphersal_session::RunOptions {
+                    no_limit: true,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+            assert_eq!(answer["ok"], true, "{script}: {answer}");
+            answer["execution"]["results"].clone()
+        }
+    }
+
+    impl Writer for Direct {
+        fn call(&mut self, _project: &str, name: &str, args: Value) -> Result<Value, String> {
+            self.calls.push(name.to_string());
+            crate::catalog::call(&mut self.session, name, &args)
+        }
+    }
+
+    /// A projects directory with one project (a git root) and the fixture transcript.
+    fn setup(tmp: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let work = crate::mcp::canonical(tmp).join("work");
+        std::fs::create_dir_all(work.join(".git")).unwrap();
+        let projects = tmp.join("projects");
+        let dir = projects.join(crate::import::claude_slug(&work.display().to_string()));
+        std::fs::create_dir_all(dir.join("abc").join("subagents")).unwrap();
+        let text =
+            crate::transcript::tests::fixture().replace("/w/app", &work.display().to_string());
+        let file = dir.join("abc.jsonl");
+        std::fs::write(&file, text).unwrap();
+        // A sub-agent transcript and a stray file are never indexed.
+        std::fs::write(
+            dir.join("abc").join("subagents").join("agent-1.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"content\":\"x\"}}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        (projects, work, file)
+    }
+
+    fn request(projects: &Path) -> Request {
+        Request {
+            projects_dir: projects.to_path_buf(),
+            idle: Duration::ZERO,
+            ..Request::default()
+        }
+    }
+
+    fn index(request: &Request, data: &Path, writer: &mut Direct) -> Report {
+        run(request, data, writer, None, &mut |_| {}, &|| false)
+    }
+
+    #[test]
+    fn sessions_are_indexed_once_and_again_when_they_grow() {
+        let tmp = crate::mcp_tests::TempDir::new("sess");
+        let data = crate::mcp_tests::TempDir::new("sess-data");
+        let (projects, work, file) = setup(tmp.path());
+        let mut store = Direct::new();
+        let first = index(&request(&projects), data.path(), &mut store);
+        assert_eq!(first.problems, Vec::<String>::new());
+        assert_eq!((first.found, first.indexed, first.turns), (1, 1, 3));
+        let project = work.display().to_string();
+        let session = store.query(
+            "g.v(\"session:abc\").project(\"name\", \"project\", \"turns\", \"fingerprint\", \"files\", \"harness\")\
+             .by(\"name\").by(\"project\").by(\"turns\").by(\"fingerprint\").by(\"files_edited\").by(\"harness\").next()",
+        );
+        assert_eq!(session[0]["name"], "Parser cache");
+        assert_eq!(session[0]["project"], project);
+        assert_eq!(session[0]["turns"], 3);
+        assert_eq!(session[0]["files"], json!(["src/parse.rs"]));
+        assert_eq!(session[0]["harness"], "claude-code");
+        let turns = store.query("g.v(\"session:abc\").out(\"contains\").has_label(\"turn\").has(\"project\").count().next()");
+        assert_eq!(turns, json!([3]));
+        let turn = store.query("g.v(\"turn:abc:0\").values(\"tools\").next()");
+        assert_eq!(turn, json!(["Edit", "Bash"]));
+
+        // Unchanged: nothing is read or written again.
+        store.calls.clear();
+        let second = index(&request(&projects), data.path(), &mut store);
+        assert_eq!((second.indexed, second.unchanged), (0, 1));
+        assert!(store.calls.is_empty(), "{:?}", store.calls);
+
+        // The state is lost: the graph's fingerprint still prevents a rewrite.
+        std::fs::remove_file(State::path(data.path())).unwrap();
+        store.calls.clear();
+        let third = index(&request(&projects), data.path(), &mut store);
+        assert_eq!((third.indexed, third.unchanged), (0, 1));
+        assert_eq!(store.calls, vec!["indexed_sessions"]);
+
+        // A resumed session grows: indexed again, with the new turn.
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str(&format!(
+            "{}\n",
+            json!({"type": "user", "timestamp": "2026-01-03T09:00:00.000Z",
+                   "message": {"content": "One more thing."}})
+        ));
+        std::fs::write(&file, text).unwrap();
+        let grown = index(&request(&projects), data.path(), &mut store);
+        assert_eq!((grown.indexed, grown.turns), (1, 4), "{grown:?}");
+        assert_eq!(
+            store.query("g.v(\"session:abc\").out(\"contains\").count().next()"),
+            json!([4])
+        );
+        assert_eq!(
+            store.query("g.v(\"session:abc\").values(\"turns\").next()"),
+            json!([4])
+        );
+    }
+
+    #[test]
+    fn running_sessions_wait_and_ended_ones_do_not() {
+        let tmp = crate::mcp_tests::TempDir::new("sess-act");
+        let data = crate::mcp_tests::TempDir::new("sess-act-data");
+        let (projects, _, file) = setup(tmp.path());
+        let mut store = Direct::new();
+        let mut waiting = request(&projects);
+        waiting.idle = Duration::from_secs(3600);
+        let report = index(&waiting, data.path(), &mut store);
+        assert_eq!((report.active, report.indexed), (1, 0));
+        let mut ended = waiting.clone();
+        ended.ended.insert(file.clone());
+        assert_eq!(index(&ended, data.path(), &mut store).indexed, 1);
+        let mut active = request(&projects);
+        active.active.insert(file.clone());
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(index(&active, data.path(), &mut store).active, 1);
+    }
+
+    #[test]
+    fn many_turns_are_written_in_small_batches() {
+        let tmp = crate::mcp_tests::TempDir::new("sess-batch");
+        let data = crate::mcp_tests::TempDir::new("sess-batch-data");
+        let (projects, _, file) = setup(tmp.path());
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        for i in 0..90 {
+            text.push_str(&format!(
+                "{}\n",
+                json!({"type": "user", "timestamp": "2026-01-03T09:00:00.000Z",
+                       "message": {"content": format!("prompt {i}")}})
+            ));
+        }
+        std::fs::write(&file, text).unwrap();
+        let mut store = Direct::new();
+        let report = index(&request(&projects), data.path(), &mut store);
+        assert_eq!(report.turns, 93);
+        let batches = store.calls.iter().filter(|c| *c == "index_turns").count();
+        assert_eq!(batches, 3, "{:?}", store.calls);
+    }
+
+    #[test]
+    fn empty_and_unreadable_transcripts_are_reported_not_fatal() {
+        let tmp = crate::mcp_tests::TempDir::new("sess-empty");
+        let data = crate::mcp_tests::TempDir::new("sess-empty-data");
+        let (projects, _, file) = setup(tmp.path());
+        std::fs::write(&file, "{\"type\":\"mode\"}\nnot json\n{\"partial\": ").unwrap();
+        let mut store = Direct::new();
+        let report = index(&request(&projects), data.path(), &mut store);
+        assert_eq!((report.empty, report.indexed), (1, 0));
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        // A transcript without a working directory in an undecodable project directory.
+        let odd = projects.join("-nowhere-at-all");
+        std::fs::create_dir_all(&odd).unwrap();
+        std::fs::write(
+            odd.join("x.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+        let report = index(&request(&projects), data.path(), &mut store);
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        assert!(report.problems[0].contains("project directory is not known"));
+    }
+
+    /// A fake `claude`: records its arguments and prompt, answers a canned summary with a cost.
+    #[cfg(unix)]
+    pub(crate) fn fake_harness(dir: &Path, cost: f64) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = dir.join("calls.log");
+        let answer = json!({"type": "result", "is_error": false, "total_cost_usd": cost,
+            "structured_output": {"headline": "Added a parser cache",
+                "summary": "The user asked for a cache in the parser; it was added and tested.",
+                "decisions": [{"decision": "Cache parsed files by path in an LRU map",
+                               "why": "repeated parses dominated the profile"}],
+                "corrections": ["Keep the cache small"], "outcomes": ["Tests pass"],
+                "open_threads": ["Measure the hit rate"]}});
+        let script = bin.join("claude");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'CALL %s\\n' \"$*\" >> '{log}'\nprintf 'HOOK %s\\n' \"$GRAPHERSAL_MEMORY_HOOK\" >> '{log}'\ncat >> '{log}'\nprintf '\\nEND\\n' >> '{log}'\ncat <<'JSON'\n{answer}\nJSON\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (script, log)
+    }
+
+    /// The settings file with summaries switched on (or off) for the fake harness.
+    #[cfg(unix)]
+    fn summaries_config(data: &Path, enabled: bool, harness: &Path, budget: f64) {
+        std::fs::write(
+            crate::config::path(data),
+            json!({"version": 1, "summaries": {"enabled": enabled,
+                "harness_command": format!("'{}' -p --model sonnet", harness.display()),
+                "monthly_budget_usd": budget}})
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Makes the fixture long enough for a summary.
+    #[cfg(unix)]
+    fn lengthen(file: &Path) {
+        let mut text = std::fs::read_to_string(file).unwrap();
+        text.push_str(&format!(
+            "{}\n",
+            json!({"type": "user", "timestamp": "2026-01-03T09:00:00.000Z",
+                   "message": {"content": "Explain the cache design in detail. ".repeat(60)}})
+        ));
+        std::fs::write(file, text).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn with_summaries(request: &Request, data: &Path, store: &mut Direct) -> Report {
+        let (summarizer, err) = Summarizer::new(data);
+        assert_eq!(err, None);
+        let mut summarizer = summarizer;
+        run(
+            request,
+            data,
+            store,
+            summarizer.as_mut(),
+            &mut |_| {},
+            &|| false,
+        )
+    }
+
+    #[cfg(unix)]
+    fn calls(log: &Path) -> usize {
+        std::fs::read_to_string(log)
+            .map(|text| text.lines().filter(|l| l.starts_with("CALL ")).count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn without_consent_the_harness_is_never_called() {
+        let tmp = crate::mcp_tests::TempDir::new("sum-off");
+        let data = crate::mcp_tests::TempDir::new("sum-off-data");
+        let (projects, _, file) = setup(tmp.path());
+        lengthen(&file);
+        let (harness, log) = fake_harness(tmp.path(), 0.1);
+        let mut store = Direct::new();
+        // No settings file, then a settings file naming the harness but not enabled.
+        assert!(Summarizer::new(data.path()).0.is_none());
+        let report = with_summaries(&request(&projects), data.path(), &mut store);
+        assert_eq!(report.indexed, 1);
+        summaries_config(data.path(), false, &harness, 100.0);
+        assert!(Summarizer::new(data.path()).0.is_none());
+        std::fs::remove_file(State::path(data.path())).unwrap();
+        with_summaries(&request(&projects), data.path(), &mut store);
+        assert_eq!(calls(&log), 0);
+        assert!(!log.exists());
+        assert_eq!(
+            store.query("g.v().has_label(\"fact\").count().next()"),
+            json!([0])
+        );
+        // A broken settings file sends nothing either.
+        std::fs::write(crate::config::path(data.path()), "{").unwrap();
+        let (none, err) = Summarizer::new(data.path());
+        assert!(none.is_none() && err.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_consent_summaries_become_facts_that_sessions_finds() {
+        let tmp = crate::mcp_tests::TempDir::new("sum-on");
+        let data = crate::mcp_tests::TempDir::new("sum-on-data");
+        let (projects, work, file) = setup(tmp.path());
+        lengthen(&file);
+        let (harness, log) = fake_harness(tmp.path(), 0.12);
+        summaries_config(data.path(), true, &harness, 5.0);
+        let mut store = Direct::new();
+        let report = with_summaries(&request(&projects), data.path(), &mut store);
+        assert_eq!(report.problems, Vec::<String>::new());
+        assert_eq!((report.indexed, report.summarized, report.facts), (1, 1, 4));
+        assert_eq!(report.summaries_pending, 0);
+        let recorded = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(calls(&log), 1);
+        assert!(
+            recorded.contains("CALL -p --model sonnet --output-format json --json-schema"),
+            "{recorded}"
+        );
+        assert!(
+            recorded.contains("--strict-mcp-config --no-session-persistence"),
+            "{recorded}"
+        );
+        assert!(recorded.contains("HOOK off"), "{recorded}");
+        assert!(
+            recorded.contains("USER: Add a cache to the parser."),
+            "{recorded}"
+        );
+        assert!(
+            !recorded.contains("test output"),
+            "tool results are never sent"
+        );
+
+        let session = store.query(
+            "g.v(\"session:abc\").project(\"name\", \"body\").by(\"name\").by(\"body\").next()",
+        );
+        assert_eq!(session[0]["name"], "Added a parser cache");
+        assert!(
+            session[0]["body"]
+                .as_str()
+                .unwrap()
+                .contains("**Decisions:**")
+        );
+        let project = work.display().to_string();
+        let found = crate::catalog::call(
+            &mut store.session,
+            "sessions",
+            &json!({"text": "why an LRU cache for parsed files", "k": 2, "project": project}),
+        )
+        .unwrap();
+        assert_eq!(found[0]["kind"], "decision", "{found}");
+        assert_eq!(found[0]["fact"], "Cache parsed files by path in an LRU map");
+        assert_eq!(found[0]["why"], "repeated parses dominated the profile");
+        assert_eq!(found[0]["session"], "session:abc");
+        assert_eq!(found[0]["headline"], "Added a parser cache");
+        // Another project does not see them.
+        let other = crate::catalog::call(
+            &mut store.session,
+            "sessions",
+            &json!({"text": "LRU cache", "k": 2, "project": "/elsewhere"}),
+        )
+        .unwrap();
+        assert_eq!(other, json!([]));
+        let spend = summaries::Spend::load(data.path()).unwrap();
+        assert!((spend.usd(&summaries::this_month()) - 0.12).abs() < 1e-9);
+
+        // Done once: a second run calls nothing; a re-index of a grown session keeps the
+        // summary until the new one replaces it.
+        let again = with_summaries(&request(&projects), data.path(), &mut store);
+        assert_eq!(again.summarized, 0);
+        assert_eq!(calls(&log), 1);
+        lengthen(&file);
+        let mut store_calls = Direct {
+            session: store.session,
+            calls: Vec::new(),
+        };
+        let grown = run(
+            &request(&projects),
+            data.path(),
+            &mut store_calls,
+            None,
+            &mut |_| {},
+            &|| false,
+        );
+        assert_eq!(grown.indexed, 1);
+        let name = store_calls.query("g.v(\"session:abc\").values(\"name\").next()");
+        assert_eq!(name, json!(["Added a parser cache"]));
+        assert_eq!(grown.summaries_pending, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_monthly_budget_stops_the_calls() {
+        let tmp = crate::mcp_tests::TempDir::new("sum-cap");
+        let data = crate::mcp_tests::TempDir::new("sum-cap-data");
+        let (projects, _, file) = setup(tmp.path());
+        lengthen(&file);
+        let second = file.with_file_name("def.jsonl");
+        std::fs::copy(&file, &second).unwrap();
+        let (harness, log) = fake_harness(tmp.path(), 0.25);
+        summaries_config(data.path(), true, &harness, 0.3);
+        let mut store = Direct::new();
+        let report = with_summaries(&request(&projects), data.path(), &mut store);
+        assert_eq!(
+            report.indexed, 2,
+            "raw turns are indexed whatever the budget"
+        );
+        assert_eq!(report.summarized, 1);
+        assert!(report.budget_reached);
+        assert_eq!(report.summaries_pending, 1);
+        assert_eq!(calls(&log), 1);
+        // The next run in the same month calls nothing.
+        let again = with_summaries(&request(&projects), data.path(), &mut store);
+        assert!(again.budget_reached);
+        assert_eq!(calls(&log), 1);
+        // A budget of 0 never calls.
+        summaries_config(data.path(), true, &harness, 0.0);
+        std::fs::remove_file(data.path().join("sessions").join("spend.json")).unwrap();
+        let zero = with_summaries(&request(&projects), data.path(), &mut store);
+        assert!(zero.budget_reached);
+        assert_eq!(calls(&log), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_estimate_counts_pending_sessions_without_calling_anything() {
+        let tmp = crate::mcp_tests::TempDir::new("sum-est");
+        let data = crate::mcp_tests::TempDir::new("sum-est-data");
+        let (projects, _, file) = setup(tmp.path());
+        lengthen(&file);
+        let estimate = estimate(&projects, data.path(), Duration::ZERO, None).unwrap();
+        assert_eq!((estimate.sessions, estimate.pending), (1, 1));
+        assert!(estimate.usd > 0.0 && estimate.usd < 1.0, "{estimate:?}");
+        let later = estimate_since(&projects, data.path(), "2027-01-01");
+        assert_eq!(later.pending, 0);
+    }
+
+    #[cfg(unix)]
+    fn estimate_since(projects: &Path, data: &Path, since: &str) -> Estimate {
+        estimate(projects, data, Duration::ZERO, Some(since)).unwrap()
+    }
+}
