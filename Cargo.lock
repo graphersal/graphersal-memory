@@ -339,8 +339,9 @@ dependencies = [
 
 [[package]]
 name = "graphersal"
-version = "0.5.2"
-source = "git+https://github.com/graphersal/graphersal?rev=063be87d9ef8e4a4de7d095c166da20f99253495#063be87d9ef8e4a4de7d095c166da20f99253495"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17cf08f0a36898e47259cf1f8b315767b388040dbd521f4bc1d8cff0526f99b"
 dependencies = [
  "bitmask-enum",
  "compact_str",
@@ -373,8 +374,9 @@ dependencies = [
 
 [[package]]
 name = "graphersal-mcp"
-version = "0.5.2"
-source = "git+https://github.com/graphersal/graphersal?rev=063be87d9ef8e4a4de7d095c166da20f99253495#063be87d9ef8e4a4de7d095c166da20f99253495"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6627026618329188dbcabe808c97d9a55a18a3dd0fce4f1ad320624bff9bbf29"
 dependencies = [
  "graphersal",
  "graphersal-session",
@@ -399,8 +401,9 @@ dependencies = [
 
 [[package]]
 name = "graphersal-serve"
-version = "0.5.2"
-source = "git+https://github.com/graphersal/graphersal?rev=063be87d9ef8e4a4de7d095c166da20f99253495#063be87d9ef8e4a4de7d095c166da20f99253495"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "559344dfa5b570711668b7351918ab2daccde326d14984dc64eb899ffb1b2b84"
 dependencies = [
  "graphersal",
  "graphersal-mcp",
@@ -411,8 +414,9 @@ dependencies = [
 
 [[package]]
 name = "graphersal-session"
-version = "0.5.2"
-source = "git+https://github.com/graphersal/graphersal?rev=063be87d9ef8e4a4de7d095c166da20f99253495#063be87d9ef8e4a4de7d095c166da20f99253495"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "231dede2adcce39cbf5781296847cc2cf9348bd87e7807d8abc29d4ab003ae03"
 dependencies = [
  "graphersal",
  "serde",

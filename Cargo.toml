@@ -14,14 +14,14 @@ authors = ["Aleksandr Dederer"]
 [workspace.dependencies]
 # Command-line parsing of the product CLI (many subcommands with help text).
 clap = { version = "4.5", features = ["derive"] }
-# The graph engine and its MCP endpoint. A git revision of graphersal `main` during development;
-# exact `=0.6.x` crates.io pins once graphersal 0.6.0 is published.
-graphersal = { git = "https://github.com/graphersal/graphersal", rev = "063be87d9ef8e4a4de7d095c166da20f99253495" }
-graphersal-mcp = { git = "https://github.com/graphersal/graphersal", rev = "063be87d9ef8e4a4de7d095c166da20f99253495" }
+# The graph engine and its MCP endpoint: exact crates.io pins (the engine's MCP and serving
+# crates make no stability promise during 0.x, so every engine crate pins the same exact version).
+graphersal = "=0.6.0"
+graphersal-mcp = "=0.6.0"
 # The session the MCP tools run on (its presets, its store attachment).
-graphersal-session = { git = "https://github.com/graphersal/graphersal", rev = "063be87d9ef8e4a4de7d095c166da20f99253495" }
+graphersal-session = "=0.6.0"
 # The hosted graph runtime: the session thread, its job queue and the MCP host glue (`mcp`).
-graphersal-serve = { git = "https://github.com/graphersal/graphersal", rev = "063be87d9ef8e4a4de7d095c166da20f99253495", features = ["mcp"] }
+graphersal-serve = { version = "=0.6.0", features = ["mcp"] }
 # JSON-RPC messages of the MCP stream (the project binding) and the product catalog; already in
 # the tree through the engine crates.
 serde_json = "1.0"

@@ -219,6 +219,7 @@ impl StoreRuntime {
     /// session thread (`graphersal_serve::start_job_ticker`).
     pub fn start_jobs(&self) -> Result<(), String> {
         graphersal_serve::start_job_ticker(&self.using, None)
+            .map(drop)
             .map_err(|err| format!("cannot start the scheduled jobs of {}: {err}", self.name))
     }
 
@@ -255,7 +256,7 @@ impl StoreRuntime {
         let name = name.to_string();
         self.using
             .call(move |session| catalog::call(session, &name, &args))
-            .map_err(|err| format!("the memory store {}: {}", self.name, err.message()))?
+            .map_err(|err| format!("the memory store {}: {err}", self.name))?
     }
 
     /// Closes the store: the session lets go of it, then the store is shut down (WAL synced,
@@ -264,7 +265,7 @@ impl StoreRuntime {
         let released = self
             .using
             .call(|session| *session = Session::new())
-            .map_err(|err| format!("cannot close the memory store: {}", err.message()));
+            .map_err(|err| format!("cannot close the memory store: {err}"));
         let shut = self
             .store
             .shutdown()
