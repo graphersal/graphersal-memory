@@ -1,18 +1,19 @@
 //! Running a command. In this pre-release `install`, `uninstall`, `status`, `doctor`, `import`
-//! (also `--sessions`) and `summaries` (Claude Code), `mcp` (the shim, or `--no-daemon`),
-//! `daemon` and the hidden `hook` work; every other command reports which stage delivers it.
+//! (also `--sessions`), `summaries` and `bench` (Claude Code), `mcp` (the shim, or
+//! `--no-daemon`), `daemon` and the hidden `hook` work; every other command reports which stage
+//! delivers it.
 
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::cli::{Cli, Command, Harness, Profile, SummariesAction};
+use crate::cli::{BenchAction, BenchArm, Cli, Command, Harness, Profile, SummariesAction};
 use crate::config::{self, Config};
 use crate::daemon::{self, DaemonOptions};
 use crate::import::{self, Caller, ImportState};
 use crate::install::{self, ClaudePaths, InstallOptions, Setup, UninstallOptions};
 use crate::shim::{self, DaemonLocation, ShimOptions};
-use crate::{client, hook, ipc, mcp, protocol, sessions, store, summaries};
+use crate::{bench, client, hook, ipc, mcp, protocol, sessions, store, summaries};
 
 /// How long the product's own memory calls (import) wait for one answer.
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -190,7 +191,54 @@ pub fn run_cli(
             version_as,
         } => run_daemon(cli, *idle, *foreground, version_as.as_deref(), stdout).map(|()| 0),
         Command::Status => status(cli, stdout).map(|()| 0),
-        command @ (Command::Ui | Command::Bench { .. } | Command::Export { .. }) => {
+        Command::Bench {
+            action,
+            arms,
+            questions,
+            repeats,
+            budget,
+            project: project_flag,
+            claude_dir,
+            dry_run,
+            yes,
+        } => {
+            let request = match action {
+                Some(BenchAction::Questions {
+                    questions,
+                    review,
+                    budget,
+                    project,
+                    claude_dir,
+                    dry_run,
+                    yes,
+                }) => BenchRequest {
+                    questions_only: true,
+                    review: *review,
+                    arms: Vec::new(),
+                    questions: *questions,
+                    repeats: 1,
+                    budget: *budget,
+                    project: project.clone(),
+                    claude_dir: claude_dir.clone(),
+                    dry_run: *dry_run,
+                    yes: *yes,
+                },
+                None => BenchRequest {
+                    questions_only: false,
+                    review: false,
+                    arms: arms.clone(),
+                    questions: *questions,
+                    repeats: *repeats,
+                    budget: *budget,
+                    project: project_flag.clone(),
+                    claude_dir: claude_dir.clone(),
+                    dry_run: *dry_run,
+                    yes: *yes,
+                },
+            };
+            run_bench(cli, &request, &mut BufReader::new(stdin), &mut stdout)
+        }
+        command @ (Command::Ui | Command::Export { .. }) => {
             return run(command, stderr);
         }
     };
@@ -599,6 +647,95 @@ fn run_hook(
     }
 }
 
+/// A `bench` or `bench questions` invocation.
+#[derive(Debug, Clone)]
+pub struct BenchRequest {
+    /// `bench questions`.
+    pub questions_only: bool,
+    /// `bench questions --review`.
+    pub review: bool,
+    /// The arms.
+    pub arms: Vec<BenchArm>,
+    /// Questions to generate.
+    pub questions: u32,
+    /// Repeats.
+    pub repeats: u32,
+    /// The budget, USD.
+    pub budget: f64,
+    /// `--project`.
+    pub project: Option<PathBuf>,
+    /// `--claude-dir`.
+    pub claude_dir: Option<PathBuf>,
+    /// `--dry-run`.
+    pub dry_run: bool,
+    /// `--yes`.
+    pub yes: bool,
+}
+
+/// The bench options of `request` on this machine: the data directory, the sources (Claude
+/// Code's directory, or `--claude-dir`), this binary, the harness command of the settings.
+pub fn bench_options(
+    data_dir: &Path,
+    claude: ClaudePaths,
+    exe: PathBuf,
+    project: String,
+    request: &BenchRequest,
+) -> Result<bench::Options, String> {
+    let settings = Config::load(data_dir)?;
+    Ok(bench::Options {
+        arms: request.arms.clone(),
+        questions: request.questions as usize,
+        repeats: request.repeats,
+        budget_usd: request.budget,
+        dry_run: request.dry_run,
+        yes: request.yes,
+        project,
+        claude,
+        data_dir: data_dir.to_path_buf(),
+        exe,
+        harness_command: settings.summaries.harness_command,
+    })
+}
+
+/// `bench` and `bench questions`.
+fn run_bench(
+    cli: &Cli,
+    request: &BenchRequest,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn Write,
+) -> Result<u8, String> {
+    let (data_dir, _) = dirs(cli)?;
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let claude = match &request.claude_dir {
+        Some(dir) => {
+            let dir = absolute(dir);
+            ClaudePaths::resolve(&|name: &str| {
+                (name == "CLAUDE_CONFIG_DIR").then(|| dir.display().to_string())
+            })?
+        }
+        None => ClaudePaths::resolve(&env)?,
+    };
+    let exe =
+        std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
+    let options = bench_options(
+        &data_dir,
+        claude,
+        mcp::canonical(&exe),
+        project(request.project.as_deref())?,
+        request,
+    )?;
+    let mut harness: Box<dyn bench::Harness> = if request.dry_run {
+        Box::new(bench::DryRun::default())
+    } else {
+        Box::new(bench::Process)
+    };
+    if request.questions_only {
+        bench::questions_command(&options, request.review, harness.as_mut(), input, out)
+    } else {
+        bench::run(&options, harness.as_mut(), input, out)
+    }
+}
+
 /// The data directory (flag, environment, platform) and the run directory of `cli`.
 fn dirs(cli: &Cli) -> Result<(PathBuf, PathBuf), String> {
     let env = |name: &str| std::env::var(name).ok();
@@ -815,7 +952,7 @@ mod tests {
 
     #[test]
     fn every_command_reports_its_stage_and_exits_2() {
-        for (name, stage) in [("ui", "M7"), ("bench", "M5"), ("export", "M7")] {
+        for (name, stage) in [("ui", "M7"), ("export", "M7")] {
             let cli = Cli::try_parse_from(["graphersal-memory", name]).unwrap();
             let mut err = Vec::new();
             assert_eq!(run(&cli.command, &mut err), 2);

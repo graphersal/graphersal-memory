@@ -28,8 +28,8 @@ const LONG_VERSION: &str = concat!(
         graphersal-memory keeps your agent's rules, decisions, past sessions and facts in a local \
         graph database and lets the agent search them through MCP, instead of loading a growing \
         memory file on every turn. Everything stays on your machine.\n\n\
-        PRE-RELEASE: `install`, `uninstall`, `status`, `doctor`, `import` and `summaries` (for \
-        Claude Code), `mcp` (the stdio server a harness starts; it shares one background daemon \
+        PRE-RELEASE: `install`, `uninstall`, `status`, `doctor`, `import`, `summaries` and \
+        `bench` (for Claude Code), `mcp` (the stdio server a harness starts; it shares one background daemon \
         with every other session) and `daemon` work. Every other command says which stage delivers it; \
         the plan is in docs/roadmap.md.",
     after_help = "Start with `graphersal-memory install`. \
@@ -130,11 +130,40 @@ pub enum Command {
     },
     /// Open the memory in the browser (develop mode); runs while this terminal runs.
     Ui,
-    /// Measure whether the memory helps: the built-in A/B on your own data.
+    /// Measure whether the memory helps: the built-in A/B on your own data (Claude Code).
+    #[command(args_conflicts_with_subcommands = true)]
     Bench {
-        /// Plan the run and estimate its cost without calling any model.
+        /// `questions`: generate or review the question set only.
+        #[command(subcommand)]
+        action: Option<BenchAction>,
+        /// The arms to compare, comma-separated: none (no memory), files (your file memory),
+        /// graph (graphersal-memory on a copy of your store).
+        #[arg(long, value_enum, value_delimiter = ',', default_values_t = [BenchArm::None, BenchArm::Files, BenchArm::Graph])]
+        arms: Vec<BenchArm>,
+        /// How many questions to generate when the project has no question set yet.
+        #[arg(long, value_name = "N", default_value_t = 12, value_parser = clap::value_parser!(u32).range(1..=60))]
+        questions: u32,
+        /// How often every question is answered per arm (the spread between runs).
+        #[arg(long, value_name = "R", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=10))]
+        repeats: u32,
+        /// The most this run may spend, USD at list price: a run whose estimate is higher is
+        /// refused, and the run stops when its real spend reaches it.
+        #[arg(long, value_name = "USD", default_value_t = 3.0, value_parser = parse_budget)]
+        budget: f64,
+        /// The project to measure (default: the git repository root of the current directory).
+        #[arg(long, value_name = "ROOT")]
+        project: Option<PathBuf>,
+        /// Read the memory files, instruction files and transcripts from this Claude Code
+        /// configuration directory instead of your own (the harness keeps its own).
+        #[arg(long, value_name = "DIR")]
+        claude_dir: Option<PathBuf>,
+        /// Plan the run and build the sandboxes, with a fake harness that calls no model and
+        /// spends nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Do not ask: accept the estimate and an unconfirmed question set.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Import the harness's file memory (MEMORY.md and the memory files; new and changed files
     /// only), or with --sessions its past sessions.
@@ -169,6 +198,63 @@ pub enum Command {
         #[arg(value_enum)]
         event: crate::hook::HookEvent,
     },
+}
+
+/// What `bench questions` does.
+#[derive(Debug, Subcommand, PartialEq)]
+pub enum BenchAction {
+    /// Generate a new question set from your raw transcripts (asks before spending), or with
+    /// --review show the current one and confirm it.
+    Questions {
+        /// How many questions to generate.
+        #[arg(long, value_name = "N", default_value_t = 12, value_parser = clap::value_parser!(u32).range(1..=60))]
+        questions: u32,
+        /// Show the current question set with its references and sources, and confirm it
+        /// (edit the file first to fix or drop questions).
+        #[arg(long)]
+        review: bool,
+        /// The most the generation may spend, USD at list price.
+        #[arg(long, value_name = "USD", default_value_t = 3.0, value_parser = parse_budget)]
+        budget: f64,
+        /// The project (default: the git repository root of the current directory).
+        #[arg(long, value_name = "ROOT")]
+        project: Option<PathBuf>,
+        /// Read the transcripts from this Claude Code configuration directory instead of yours.
+        #[arg(long, value_name = "DIR")]
+        claude_dir: Option<PathBuf>,
+        /// Generate with a fake harness (no model, no spend) and keep the result out of the
+        /// project's question set.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+}
+
+/// One arm of the A/B.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub enum BenchArm {
+    /// No memory at all.
+    None,
+    /// Your file memory as it is: CLAUDE.md files, MEMORY.md and the memory files.
+    Files,
+    /// graphersal-memory's `use` tools on a copy of your store.
+    Graph,
+    /// Your current MCP setup copied (planned: not built yet).
+    Current,
+}
+
+impl BenchArm {
+    /// The arm's name in reports.
+    pub fn name(self) -> &'static str {
+        match self {
+            BenchArm::None => "none",
+            BenchArm::Files => "files",
+            BenchArm::Graph => "graph",
+            BenchArm::Current => "current",
+        }
+    }
 }
 
 /// What `summaries` does.
@@ -310,7 +396,17 @@ mod tests {
         );
         assert_eq!(
             parse(&["bench", "--dry-run"]).unwrap().command,
-            Command::Bench { dry_run: true }
+            Command::Bench {
+                action: None,
+                arms: vec![BenchArm::None, BenchArm::Files, BenchArm::Graph],
+                questions: 12,
+                repeats: 1,
+                budget: 3.0,
+                project: None,
+                claude_dir: None,
+                dry_run: true,
+                yes: false
+            }
         );
     }
 
@@ -464,6 +560,52 @@ mod tests {
             Command::Install { summaries, yes, .. } => assert!(summaries && yes),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn bench_options_parse() {
+        match parse(&[
+            "bench",
+            "--arms",
+            "files,graph",
+            "--questions",
+            "6",
+            "--repeats",
+            "2",
+            "--budget",
+            "$4",
+            "--yes",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Bench {
+                arms,
+                questions,
+                repeats,
+                budget,
+                yes,
+                ..
+            } => {
+                assert_eq!(arms, [BenchArm::Files, BenchArm::Graph]);
+                assert_eq!((questions, repeats, yes), (6, 2, true));
+                assert!((budget - 4.0).abs() < 1e-9);
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&["bench", "questions", "--review", "-y"])
+            .unwrap()
+            .command
+        {
+            Command::Bench {
+                action: Some(BenchAction::Questions { review, yes, .. }),
+                ..
+            } => assert!(review && yes),
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["bench", "--arms", "files,mem0"]).is_err());
+        assert!(parse(&["bench", "--questions", "0"]).is_err());
+        assert!(parse(&["bench", "--budget", "-1"]).is_err());
     }
 
     #[test]
