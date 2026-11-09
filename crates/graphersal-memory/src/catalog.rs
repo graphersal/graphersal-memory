@@ -44,8 +44,8 @@ pub const FUNCTIONS: [&str; 7] = [
 ];
 
 /// The functions whose `project` parameter the MCP layer binds to the connection's project.
-pub const PROJECT_BOUND: [&str; 6] = [
-    "memories", "memory", "remember", "forget", "sessions", "recall",
+pub const PROJECT_BOUND: [&str; 7] = [
+    "memories", "memory", "remember", "forget", "sessions", "session", "recall",
 ];
 
 /// The name of the parameter bound to the connection's project.

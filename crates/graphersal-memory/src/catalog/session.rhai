@@ -1,8 +1,10 @@
-fn session(id, turns) {
+fn session(id, turns, project) {
+    let visible = if project == "" { __.not(__.has("project")) }
+                  else { __.or(__.not(__.has("project")), __.has("project", project)) };
     let sid = if id.starts_with("session:") { id } else { "session:" + id };
-    if g.v(sid).count().next() == 0 {
-        let m = g.v().has_label("session").id().filter(__.is(P.starting_with(sid))).limit(2).to_list();
-        if m.len() != 1 { return #{error: "no unique session matches " + id, candidates: m}; }
+    if g.v(sid).has_label("session").filter(visible).count().next() == 0 {
+        let m = g.v().has_label("session").filter(visible).id().filter(__.is(P.starting_with(sid))).limit(2).to_list();
+        if m.len() != 1 { return #{error: "no unique session of this project matches " + id, candidates: m}; }
         sid = m[0];
     }
     let s = g.v(sid).project("title", "headline", "body", "started_at", "ended_at", "branches", "files_edited", "turns")

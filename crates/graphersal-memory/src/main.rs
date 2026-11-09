@@ -5,6 +5,9 @@
 //! process with `--no-daemon`), `daemon` manages the daemon; every other command reports the
 //! roadmap stage that delivers it and exits with code 2.
 
+mod bench;
+#[cfg(test)]
+mod bench_tests;
 mod catalog;
 mod cli;
 mod client;
@@ -13,6 +16,7 @@ mod config;
 mod daemon;
 mod engine;
 mod fsutil;
+mod harness;
 mod hook;
 mod import;
 mod install;

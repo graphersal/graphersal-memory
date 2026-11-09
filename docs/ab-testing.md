@@ -1,10 +1,31 @@
 # Measuring it: the built-in A/B
 
-> Pre-release: `graphersal-memory bench` is planned for stage M5. This page describes its method,
-> and the numbers from the hand-made measurement it is based on.
+> Available since stage M5 for Claude Code: `graphersal-memory bench`. The arm with your whole
+> current setup and the structure variants of develop mode are planned. This page describes the
+> method, a first run of the built-in bench, and the hand-made measurement it is based on.
 
 Every memory tool claims to help. `bench` lets you check whether one does on **your** memory, with
 **your** harness, before you rely on it.
+
+## Running it
+
+```sh
+graphersal-memory bench --dry-run              # plan, sandboxes, estimate; a fake harness, no spend
+graphersal-memory bench                        # estimate, ask, generate questions if needed, run
+graphersal-memory bench questions              # generate a new question set only (asks first)
+graphersal-memory bench questions --review     # show the question set with its sources, confirm it
+```
+
+Options of `bench`: `--arms none,files,graph` (the default: all three), `--questions N` (12; used
+when the project has no question set yet), `--repeats R` (1), `--budget USD` (3), `--project
+ROOT` (default: the git root of the current directory), `--claude-dir DIR` (read the memory
+files, instruction files and transcripts from another Claude Code directory, for example a copy;
+the harness keeps its own), `--yes` (do not ask), `--dry-run`. The harness command is
+`summaries.harness_command` in `config.json` (`claude -p --model sonnet` by default); `bench`
+drives only `claude` for now.
+
+Each run writes `report.md` and `report.json` to `bench/<timestamp>/` in the data directory, with
+the sandboxes it used (the copy of the store is deleted after the run), and prints a summary.
 
 ## Method
 
@@ -12,52 +33,132 @@ Every memory tool claims to help. `bench` lets you check whether one does on **y
 
 Each arm answers the same questions:
 
-- **No memory**: shows what any memory adds at all.
-- **As is**: a copy of your current setup (MCP servers, hooks, plugins, memory files), minus
-  graphersal-memory's own entries. If you use another memory tool, it is part of this arm, so the
-  comparison is that tool against ours.
-- **graphersal-memory**: the same copy, without the other memory tool, plus graphersal-memory.
-- **Variants** (develop mode): a changed memory structure on a copy of your store, to compare
-  structures against each other. The winner is applied, and the rest is dropped.
+- **none**: no memory, no instruction files, no tools. It shows what any memory adds at all.
+- **files**: your file memory as it is: your `CLAUDE.md` files (the user one in the Claude Code
+  directory, `CLAUDE.md` and `CLAUDE.local.md` in the project root; graphersal-memory's marked
+  block left out) and `MEMORY.md` in the prompt, as Claude Code loads them, and the memory files
+  readable with Read, Grep and Glob from a copy.
+- **graph**: the same instruction files (they stay where your harness reads them with either
+  memory), and graphersal-memory's read-only tools (`memories`, `memory`, `sessions`, `session`,
+  `recall`) on a copy of your store.
+- **current** (planned): a copy of your whole current setup (MCP servers, hooks, plugins, memory
+  files), minus graphersal-memory's own entries, so that another memory tool you use is compared
+  against ours. It is not built yet, because another tool's MCP server could write to its live
+  data during the run; `--arms current` says so.
+- **Variants** (planned, develop mode): a changed memory structure on a copy of your store, to
+  compare structures against each other.
 
 ### Sandboxing: your live configuration is never touched
 
 A failed or interrupted benchmark must never leave your setup broken, so no arm switches anything
-off or edits your configuration. Each arm is a sandbox built for the run:
+off or edits your configuration. Each arm is a sandbox built for the run in
+`bench/<timestamp>/arms/<arm>/`, and every call of `claude -p` gets:
 
-- its own MCP configuration (for Claude Code: `--strict-mcp-config --mcp-config <file>`);
-- its own settings file, with no project settings or hooks;
-- an empty working directory, read-only tools only, and no session saved;
-- graph variants on a clone or a snapshot fork of the store, never on the live store.
+- `--strict-mcp-config --mcp-config <arm>/mcp.json`: no MCP servers but the arm's (none, or for the
+  graph arm `graphersal-memory mcp --no-daemon` on the copy of the store, never your live store
+  and never your running daemon);
+- `--setting-sources ""` and `--settings <arm>/settings.json`: none of your user, project or local
+  settings, so none of your hooks, plugins or `CLAUDE.md` files; the arm's settings switch hooks
+  off and deny the shell and write tools;
+- `--tools` with the arm's read-only tools (none, `Read,Grep,Glob`, or none plus the graph's
+  memory tools in `--allowedTools`), `--disable-slash-commands`;
+- `--append-system-prompt-file <arm>/system.md`: the arm's context;
+- an empty working directory (the files arm: the copy of the memory files),
+  `--no-session-persistence` (no transcript of its own), `--max-budget-usd`, and
+  `GRAPHERSAL_MEMORY_HOOK=off`.
 
-Other memory tools are detected from a known-tools list and heuristics, and you confirm them. In
-their arm, they run on their own data, read only.
+The copy of the store is a fork of its latest state (`Store::fork_dir`), read without its lock, so
+the bench works while your daemon runs. Tests build the sandboxes on a temporary home and check
+that no file and no argument names the live configuration or store.
 
 ### Questions and references
 
-- Questions are generated from your own sessions and memories, in three categories: **rules**,
-  **decisions** (with their why) and **history** (what happened in past sessions).
-- **Reference answers come from your raw transcripts**, which every arm shares, never from
-  graphersal-memory's own summaries: references written from the summaries one arm serves favour
-  that arm. You confirm a sample of the references before the run.
+- Questions are generated by your harness from your **raw transcripts**: the newest finished
+  sessions of the project (sessions still being written are left out for 30 minutes), up to about
+  120,000 characters, every turn marked with its id. The generator writes the asked number of
+  questions in three categories, **rules**, **decisions** (with their why) and **history** (what
+  happened in a session), each with a reference answer and the ids of the turns it comes from. A
+  question without a source turn of the excerpt is dropped.
+- **Reference answers never come from graphersal-memory's own summaries**: references written
+  from the summaries one arm serves favour that arm.
+- The set is kept per project in `bench/questions/<project>.json` with the start of each source
+  turn beside it. You review it (`bench questions --review`): fix a reference, set `"keep":
+  false` to drop a question, then confirm. `bench` asks before it uses an unconfirmed set;
+  `--yes` accepts it, and the report then says it was not reviewed.
 
 ### Running
 
-- **Per-run id.** Every question starts with a fresh run id. Otherwise a repeated run reuses the
+- **Per-run id.** Every question starts with the run id. Otherwise a repeated run reuses the
   cached tail of identical prompts, and its cost looks lower than a real first-time question.
-- **Warm-up** per arm, so every arm starts with the same prompt-cache state.
-- **Repeats**, to show the spread between runs.
-- **A cost estimate before anything is spent**, and a dry-run mode that calls no model.
+- **Warm-up** per arm (a one-word call), so every arm starts with the same prompt-cache state.
+- **Repeats**, to show the spread between runs (the report gives the mean score per repeat).
+- The calls run one after another, arm by arm within each question.
 
 ### Judge and metrics
 
-A separate model call scores each answer from 0 to 5 against the reference and flags **confidently
-wrong** answers: wrong facts stated as true, which are worse than "I don't know". The report gives,
-per arm and per category:
+A separate call (the same harness, no tools) scores each answer from 0 to 5 against the reference
+and flags **confidently wrong** answers: wrong facts stated as true, which are worse than "I don't
+know". A failed answer or judging counts as 0 and is named in the caveats. The report gives, per
+arm and per category:
 
 - mean score, and the number of confidently wrong answers;
-- mean cost (list price), turns, wall time, input tokens;
-- **cost per score point**: mean cost divided by mean score.
+- mean cost (list price, as `claude -p` reports it), input tokens (plain, cache writes and cache
+  reads), output tokens, turns and wall time;
+- **cost per score point**: mean cost divided by mean score;
+- what the run spent on questions, warm-up, answers and judging, and its caveats.
+
+### Cost guard
+
+Before anything is spent, `bench` prints an estimate (questions x arms x repeats x about $0.05
+per answer and $0.02 per judging, plus a warm-up per arm and the generation of the questions) and
+asks. A run whose estimate is above `--budget` is refused; every call carries a
+`--max-budget-usd` cap; and the run stops, with a partial report, when its real spend would pass
+the budget. `--dry-run` builds everything with a fake harness that calls no model.
+
+## A first run of the built-in bench
+
+The first real run of `bench`, on 2026-11-10, made to check the command end to end, not to
+measure the product. It ran on a temporary **copy** of one developer's memory (Graphersal's own
+development): a fresh data directory, 64 memory files imported from a copy of the file memory,
+and 10 of the project's transcripts copied and indexed (102 turns; **summaries off**, so the
+graph had raw turns but no session facts). Command: `bench --questions 6 --repeats 1 --arms
+none,files,graph`; answerer and judge `claude -p --model sonnet`; the 6 questions were generated
+from 9 finished sessions and accepted with `--yes`, **not reviewed**.
+
+| Category | Arm | Mean score (0-5) | Confidently wrong | Mean cost | Mean input tokens | Mean turns |
+|---|---|---|---|---|---|---|
+| rules (2) | none | 0.00 | 0 | $0.006 | 3,200 | 1.0 |
+| rules (2) | files | 4.50 | 0 | $0.019 | 64,123 | 3.0 |
+| rules (2) | graph | 5.00 | 0 | $0.022 | 46,090 | 2.5 |
+| decisions (3) | none | 0.00 | 0 | $0.006 | 3,206 | 1.0 |
+| decisions (3) | files | 1.00 | 0 | $0.017 | 59,691 | 2.3 |
+| decisions (3) | graph | 3.33 | 0 | $0.064 | 167,336 | 7.7 |
+| history (1) | none | 0.00 | 0 | $0.005 | 3,200 | 1.0 |
+| history (1) | files | 0.00 | 0 | $0.017 | 51,242 | 3.0 |
+| history (1) | graph | 1.00 | 0 | $0.041 | 96,673 | 6.0 |
+| **all (6)** | none | **0.00** | 0 | $0.006 | 3,203 | 1.0 |
+| **all (6)** | files | **2.00** | 0 | $0.018 | 59,760 | 2.7 |
+| **all (6)** | graph | **3.50** | 0 | $0.046 | 115,144 | 5.7 |
+
+Cost per score point: files $0.009, graph $0.013. The run spent $0.91 at list price (questions
+$0.17, warm-up $0.19, answers $0.42, judge $0.14); a first attempt spent $0.17 on questions that
+were all dropped (the generator cited turns without their `turn:` prefix; `bench` now accepts
+that).
+
+Caveats:
+
+- **Tiny sample**: 6 questions, one repeat, one project, one model; one question more or less
+  moves a mean by most of a point. This says the command works, not how much memory helps.
+- **The graph answer cost more here**: 2.5x the cost and about 2x the input tokens of a file
+  answer, because the graph arm searched raw turns in many steps (up to 10 turns per answer)
+  without session summaries. It was more expensive per score point too, unlike the prototype
+  measurement below, which had summaries and facts.
+- **The questions were not reviewed**; an LLM wrote them and their references from raw turns,
+  and the same model judged.
+- **Instruction files**: both memory arms carried the project's large `CLAUDE.md` files, which
+  is most of their input tokens.
+- **No memory scored 0** on every question, as it should: nothing of the user's leaked into that
+  arm.
 
 ## Our first measurement
 

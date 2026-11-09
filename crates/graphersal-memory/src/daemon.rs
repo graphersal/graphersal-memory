@@ -637,9 +637,12 @@ impl Daemon {
             handshake.profile,
             &handshake.project,
             Some(&handshake.harness),
-            reader,
-            writer,
+            &mut reader,
+            &mut writer,
         );
+        // Uncounted before the socket closes: a client that saw the connection end (a shim
+        // that exited) finds it gone from `status`.
+        drop(registered);
         match served {
             Ok(()) => log(&format!("connection closed: project {}", handshake.project)),
             Err(err) => log(&format!(
@@ -647,7 +650,8 @@ impl Daemon {
                 handshake.project
             )),
         }
-        drop(registered);
+        drop(reader);
+        drop(writer);
     }
 
     /// Counts a new connection, or refuses it: the daemon is stopping, or it is older than the

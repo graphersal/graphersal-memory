@@ -1,8 +1,8 @@
 # Supported harnesses
 
 > Pre-release: Claude Code is supported by `install`, `uninstall`, `status`, `doctor` and
-> `import` (stage M3) and the indexing of its past sessions with opt-in summaries (stage M4). The
-> other harnesses are targets, listed with what each one needs.
+> `import` (stage M3), the indexing of its past sessions with opt-in summaries (stage M4) and the
+> A/B `bench` (stage M5). The other harnesses are targets, listed with what each one needs.
 
 Every harness below supports MCP, so the memory tools work the same way everywhere. What differs is
 how graphersal-memory is installed into the harness, where the harness keeps its rules and
@@ -10,7 +10,7 @@ transcripts, and whether it has hooks.
 
 | Harness | Status | MCP registration | Rules exported to | Past sessions from | Hooks |
 |---|---|---|---|---|---|
-| Claude Code | install, import, hooks, rule block (M3); past sessions, opt-in summaries (M4) | a member of `mcpServers` in `~/.claude.json` (user scope), edited in place with a backup | a marked block in `~/.claude/CLAUDE.md` | local transcripts (`~/.claude/projects/`) | SessionStart / SessionEnd |
+| Claude Code | install, import, hooks, rule block (M3); past sessions, opt-in summaries (M4); bench (M5) | a member of `mcpServers` in `~/.claude.json` (user scope), edited in place with a backup | a marked block in `~/.claude/CLAUDE.md` | local transcripts (`~/.claude/projects/`) | SessionStart / SessionEnd |
 | opencode | planned (M7) | its MCP config | `AGENTS.md` (to be checked) | its local store (format to be checked) | to be checked |
 | OpenAI Codex CLI | planned (M7) | its MCP config | `AGENTS.md` (to be checked) | its local store (format to be checked) | to be checked |
 | Cursor | planned (M7) | its MCP config | Cursor rules (to be checked) | its local store (format to be checked) | to be checked |
@@ -111,6 +111,17 @@ unchanged. The files are only read. Rules in `CLAUDE.md` files are not imported 
 the same parts plus a missing binary behind a registration, a second registration of the server at
 local scope, the settings file, the registry, the socket path length, the daemon and memory files
 not imported yet, and names a fix for each problem (exit code 1 when it found one).
+
+### `bench` and `claude -p`
+
+The summaries and `bench` run your harness command (`summaries.harness_command` in
+`config.json`, `claude -p --model sonnet` by default). `bench` drives only `claude` for now: it
+builds each arm from Claude Code's flags (`--strict-mcp-config --mcp-config`, `--setting-sources
+""` with `--settings`, `--tools`, `--allowedTools`, `--append-system-prompt-file`,
+`--no-session-persistence`, `--json-schema`, `--max-budget-usd`), so it needs a recent Claude
+Code. On Windows, npm installs `claude` as `claude.cmd`; graphersal-memory finds it through
+`PATH` and `PATHEXT` and keeps line breaks out of its arguments (the prompts go on stdin, the
+context in a file). See [Measuring it](ab-testing.md) for the method.
 
 ## Without a terminal (later)
 

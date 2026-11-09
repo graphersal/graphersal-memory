@@ -502,7 +502,7 @@ mod tests {
         let binding = ProjectBinding::new("/work/a");
         for line in [
             &br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#[..],
-            br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"session","arguments":{"id":"x"}}}"#,
+            br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_schema","arguments":{"id":"x"}}}"#,
             br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gql","arguments":{"query":"MATCH (n) RETURN n"}}}"#,
             br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_saved_query","arguments":{"name":"mine"}}}"#,
             b"not json",
@@ -522,7 +522,7 @@ mod tests {
             {"name": "memory", "inputSchema": {"type": "object",
                 "properties": {"slug": {"type": "string"}, "project": {"type": "string"}},
                 "required": ["slug", "project"]}},
-            {"name": "session", "inputSchema": {"type": "object",
+            {"name": "get_schema", "inputSchema": {"type": "object",
                 "properties": {"id": {"type": "string"}}, "required": ["id"]}},
         ]}})
         .to_string();
@@ -532,9 +532,18 @@ mod tests {
         assert_eq!(memory["required"], json!(["slug"]));
         assert_eq!(
             out["result"]["tools"][1],
-            json!({"name": "session", "inputSchema": {
+            json!({"name": "get_schema", "inputSchema": {
             "type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}})
         );
+    }
+
+    #[test]
+    fn a_session_read_is_bound_to_the_project_too() {
+        let binding = ProjectBinding::new("/work/a");
+        let line = br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"session","arguments":{"id":"x","project":"/work/b"}}}"#;
+        let value: Value = serde_json::from_slice(&binding.inbound(line).unwrap()).unwrap();
+        assert_eq!(value["params"]["arguments"]["project"], "/work/a");
+        assert_eq!(value["params"]["arguments"]["id"], "x");
     }
 
     #[test]

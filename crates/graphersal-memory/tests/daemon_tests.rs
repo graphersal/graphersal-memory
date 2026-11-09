@@ -11,7 +11,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -395,8 +395,14 @@ fn the_daemon_exits_after_the_idle_time() {
 fn a_stale_socket_file_is_recovered() {
     let env = Env::new("10m");
     std::fs::create_dir_all(env.run_dir()).unwrap();
-    // A socket file nobody listens on, and an unlocked pid file: what a crash leaves.
-    drop(UnixListener::bind(env.socket()).unwrap());
+    // A socket file nobody listens on, and an unlocked pid file: what a crash leaves. The file
+    // is made by a datagram socket, never a listening one: on macOS std sets close-on-exec on a
+    // new socket only after creating it, so a shim another test spawns at that moment inherits
+    // the descriptor (and passes it on to its daemon); an inherited LISTENING socket would keep
+    // accepting connections into its backlog, so the "stale" socket answered nobody's handshake
+    // and this test failed whenever it ran beside the others. A stream connect to a datagram
+    // socket is refused, whoever holds its descriptor.
+    drop(UnixDatagram::bind(env.socket()).unwrap());
     std::fs::write(env.run_dir().join("daemon.pid"), "999999\n").unwrap();
     assert!(env.socket().exists());
     assert!(UnixStream::connect(env.socket()).is_err());

@@ -1,11 +1,11 @@
 # How it works
 
-> Pre-release: this page describes the target design. Implemented so far (M1 to M4): the store in
+> Pre-release: this page describes the target design. Implemented so far (M1 to M5): the store in
 > the per-user data directory, project and global memories, the two profiles with their access
 > policy, the daemon with the shim, the socket, the handshake, start on demand, idle exit, upgrade
 > and crash recovery, the settings file, the project records, the installation into Claude Code
 > with its hooks, the import of the file memory, and the background indexing of past sessions
-> with opt-in summaries. Not yet: the `ui` command, isolated project stores; see the
+> with opt-in summaries, and the built-in A/B ([Measuring it](ab-testing.md)). Not yet: the `ui` command, isolated project stores; see the
 > [status table](../README.md#status).
 
 ## Processes
@@ -178,10 +178,10 @@ tool list is what keeps a `use` client to the memory functions.
 
 The memory functions are saved queries kept in the store (folder `memory`, marked as the
 product's). When graphersal-memory is upgraded, it replaces them and the schema with its own
-version, so edit copies under another name. Each memory function that reads or writes memories
-takes the project as a parameter. The server sets it on every call to the connection's project and
-hides it from the tool list, so an agent cannot read another project's memories by passing a
-different one.
+version, so edit copies under another name. Every memory function (also `session`, which reads
+one past session by id) takes the project as a parameter. The server sets it on every call to the
+connection's project and hides it from the tool list, so an agent cannot read another project's
+memories or sessions by passing a different one, by id or by an id prefix.
 
 ## The engine
 
