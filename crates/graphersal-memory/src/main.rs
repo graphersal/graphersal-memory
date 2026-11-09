@@ -1,18 +1,29 @@
 //! `graphersal-memory`: local graph memory for AI coding agents.
 //!
-//! Pre-release: `mcp` serves the memory over stdio (through the shared daemon, or in this
-//! process with `--no-daemon`), `daemon` and `status` manage the daemon; every other command
-//! reports the roadmap stage that delivers it and exits with code 2.
+//! Pre-release: `install`, `uninstall`, `status`, `doctor` and `import` set graphersal-memory
+//! up in Claude Code, `mcp` serves the memory over stdio (through the shared daemon, or in this
+//! process with `--no-daemon`), `daemon` manages the daemon; every other command reports the
+//! roadmap stage that delivers it and exits with code 2.
 
 mod catalog;
 mod cli;
+mod client;
 mod commands;
+mod config;
 mod daemon;
 mod engine;
+mod fsutil;
+mod hook;
+mod import;
+mod install;
+#[cfg(test)]
+mod install_tests;
 mod ipc;
+mod jsonedit;
 mod mcp;
 #[cfg(test)]
 mod mcp_tests;
+mod projects;
 mod protocol;
 mod registry;
 mod shim;

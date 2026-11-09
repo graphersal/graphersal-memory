@@ -22,7 +22,7 @@ graphersal-memory is designed so that nothing leaves your machine unless you ask
 |---|---|---|
 | Nothing | by default | - |
 | Session summaries | only if you opt in | through **your own harness** (for example `claude -p` on your own subscription), to the model provider you already use |
-| Embedding model download | only if you accept it during install | a one-time download of potion-multilingual-128M; the built-in embedder needs none |
+| Embedding model download (planned) | only if you accept it during install | a one-time download of potion-multilingual-128M; the built-in embedder needs none |
 | Binary install or update | when you run the installer | GitHub Releases or crates.io |
 
 - **No telemetry**, no usage statistics and no crash reports are sent anywhere.
@@ -44,5 +44,6 @@ Without summaries, raw turns are still indexed locally and searchable.
 
 ## Removing it
 
-`graphersal-memory uninstall` removes what `install` added to your harness configuration. The
-store is a directory in your data directory: deleting it deletes your graph memory.
+`graphersal-memory uninstall` removes what `install` added to your harness configuration.
+`graphersal-memory uninstall --purge` also deletes the data directory, which holds your graph
+memory (it asks first). `install` reads your memory files but never changes or deletes them.

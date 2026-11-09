@@ -1,13 +1,21 @@
-//! Running a command. In this pre-release `mcp` (the shim, or `--no-daemon`), `daemon` and
-//! the daemon part of `status` work; every other command reports which stage delivers it.
+//! Running a command. In this pre-release `install`, `uninstall`, `status`, `doctor` and
+//! `import` (Claude Code), `mcp` (the shim, or `--no-daemon`), `daemon` and the hidden `hook`
+//! work; every other command reports which stage delivers it.
 
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use crate::cli::{Cli, Command, Profile};
+use crate::cli::{Cli, Command, Harness, Profile};
+use crate::config::{self, Config};
 use crate::daemon::{self, DaemonOptions};
+use crate::import::{self, Caller, ImportState};
+use crate::install::{self, ClaudePaths, InstallOptions, Setup, UninstallOptions};
 use crate::shim::{self, DaemonLocation, ShimOptions};
-use crate::{ipc, mcp, protocol, store};
+use crate::{client, hook, ipc, mcp, protocol, store};
+
+/// How long the product's own memory calls (import) wait for one answer.
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Exit code of a command that failed.
 pub const EXIT_FAILED: u8 = 1;
@@ -22,10 +30,14 @@ pub fn planned_stage(command: &Command) -> (&'static str, &'static str) {
         Command::Install { .. } | Command::Uninstall { .. } => {
             ("M3", "one-click install for Claude Code")
         }
-        Command::Status | Command::Doctor => ("M3", "one-click install for Claude Code"),
-        Command::Import { .. } | Command::Export { .. } => {
-            ("M3", "import of the file memory and rule export")
+        Command::Status | Command::Doctor | Command::Hook { .. } => {
+            ("M3", "one-click install for Claude Code")
         }
+        Command::Import { .. } => ("M3", "import of the file memory"),
+        Command::Export { .. } => (
+            "M7",
+            "the export of rules kept in the graph into the harness's instruction files",
+        ),
         Command::Mcp { .. } | Command::Daemon { .. } => {
             ("M2", "the shared daemon and the stdio shim")
         }
@@ -47,6 +59,7 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::Bench { .. } => "bench",
         Command::Import { .. } => "import",
         Command::Export { .. } => "export",
+        Command::Hook { .. } => "hook",
     }
 }
 
@@ -61,9 +74,24 @@ pub fn not_implemented_message(command: &Command) -> String {
     )
 }
 
+/// The message for a harness that is not supported yet.
+fn harness_not_implemented(command: &str, harness: Harness) -> String {
+    let name = match harness {
+        Harness::ClaudeCode => "claude-code",
+        Harness::Opencode => "opencode",
+        Harness::Codex => "codex",
+        Harness::Cursor => "cursor",
+    };
+    format!(
+        "graphersal-memory {command} --harness {name}: not implemented yet (planned in stage \
+         M7: other harnesses); Claude Code is supported."
+    )
+}
+
 /// Runs the command line: `mcp` serves MCP on `stdin`/`stdout` (through the daemon, or in this
-/// process with `--no-daemon`), `daemon` runs or starts the daemon, `status` reports it, every
-/// other command reports its stage. Diagnostics go to `stderr`; returns the process exit code.
+/// process with `--no-daemon`), `daemon` runs or starts the daemon, `install`, `uninstall`,
+/// `status`, `doctor`, `import` and `hook` work on Claude Code, every other command reports its
+/// stage. Diagnostics go to `stderr`; returns the process exit code.
 pub fn run_cli(
     cli: &Cli,
     stdin: impl Read + Send + 'static,
@@ -71,32 +99,275 @@ pub fn run_cli(
     stderr: &mut dyn Write,
 ) -> u8 {
     let name = command_name(&cli.command);
-    let result = match &cli.command {
+    let mut stdout = stdout;
+    let result: Result<u8, String> = match &cli.command {
+        Command::Install {
+            harness,
+            dry_run,
+            yes,
+            with_model,
+            enable_develop,
+        } => {
+            if *harness != Harness::ClaudeCode {
+                let _ = writeln!(stderr, "{}", harness_not_implemented(name, *harness));
+                return EXIT_NOT_IMPLEMENTED;
+            }
+            let options = InstallOptions {
+                dry_run: *dry_run,
+                yes: *yes,
+                with_model: *with_model,
+                enable_develop: *enable_develop,
+            };
+            setup(cli).and_then(|setup| {
+                let mut connect = daemon_connector(&setup);
+                install::install(
+                    &setup,
+                    &options,
+                    &mut connect,
+                    &mut BufReader::new(stdin),
+                    &mut stdout,
+                )
+            })
+        }
+        Command::Uninstall {
+            harness,
+            dry_run,
+            yes,
+            purge,
+            disable_develop,
+        } => {
+            if *harness != Harness::ClaudeCode {
+                let _ = writeln!(stderr, "{}", harness_not_implemented(name, *harness));
+                return EXIT_NOT_IMPLEMENTED;
+            }
+            let options = UninstallOptions {
+                dry_run: *dry_run,
+                yes: *yes,
+                purge: *purge,
+                disable_develop_only: *disable_develop,
+            };
+            setup(cli).and_then(|setup| {
+                install::uninstall(&setup, &options, &mut BufReader::new(stdin), &mut stdout)
+            })
+        }
+        Command::Doctor => setup(cli).map(|setup| doctor(&setup, &mut stdout)),
+        Command::Import { dry_run } => setup(cli).and_then(|setup| {
+            let mut connect = daemon_connector(&setup);
+            run_import(&setup, *dry_run, &mut connect, &mut stdout)
+        }),
+        Command::Hook { event } => return run_hook(cli, *event, stdin, &mut stdout, stderr),
         Command::Mcp {
             profile,
             no_daemon: true,
             project,
         } => serve_options(cli, *profile, project.as_deref())
-            .and_then(|options| mcp::serve(&options, BufReader::new(stdin), stdout)),
+            .and_then(|options| mcp::serve(&options, BufReader::new(stdin), stdout))
+            .map(|()| 0),
         Command::Mcp {
             profile,
             no_daemon: false,
             project,
         } => shim_options(cli, *profile, project.as_deref())
-            .and_then(|options| shim::run(&options, stdin, stdout)),
+            .and_then(|options| shim::run(&options, stdin, stdout))
+            .map(|()| 0),
         Command::Daemon {
             idle,
             foreground,
             version_as,
-        } => run_daemon(cli, *idle, *foreground, version_as.as_deref(), stdout),
-        Command::Status => status(cli, stdout),
-        command => return run(command, stderr),
+        } => run_daemon(cli, *idle, *foreground, version_as.as_deref(), stdout).map(|()| 0),
+        Command::Status => status(cli, stdout).map(|()| 0),
+        command @ (Command::Ui | Command::Bench { .. } | Command::Export { .. }) => {
+            return run(command, stderr);
+        }
     };
     match result {
-        Ok(()) => 0,
+        Ok(code) => code,
         Err(err) => {
             let _ = writeln!(stderr, "graphersal-memory {name}: {err}");
             EXIT_FAILED
+        }
+    }
+}
+
+/// `path` made absolute against the current directory (not canonicalized: the directory may
+/// not exist yet, and the entries install writes must not change once it does).
+fn absolute(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+/// What install, uninstall, status, doctor, import and the hooks work on.
+fn setup(cli: &Cli) -> Result<Setup, String> {
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let (data_dir, run_dir) = dirs(cli)?;
+    let paths = ClaudePaths::resolve(&env)?;
+    let exe =
+        std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
+    let mut dir_args = Vec::new();
+    if cli.data_dir.is_some() || env(store::DATA_DIR_ENV).is_some() {
+        dir_args.push("--data-dir".to_string());
+        dir_args.push(absolute(&data_dir).display().to_string());
+    }
+    if cli.run_dir.is_some() || env(ipc::RUN_DIR_ENV).is_some() {
+        dir_args.push("--run-dir".to_string());
+        dir_args.push(absolute(&run_dir).display().to_string());
+    }
+    Ok(Setup {
+        paths,
+        data_dir,
+        run_dir,
+        exe: mcp::canonical(&exe),
+        dir_args,
+    })
+}
+
+/// Connections of the product's own calls: through the daemon, `use` profile.
+fn daemon_connector(
+    setup: &Setup,
+) -> impl FnMut(&str) -> Result<Box<dyn Caller>, String> + Send + 'static {
+    let location = DaemonLocation {
+        data_dir: setup.data_dir.clone(),
+        run_dir: setup.run_dir.clone(),
+        exe: setup.exe.clone(),
+        start_timeout: shim::START_TIMEOUT,
+    };
+    move |project: &str| -> Result<Box<dyn Caller>, String> {
+        Ok(Box::new(client::connect(&location, project, CALL_TIMEOUT)?))
+    }
+}
+
+/// `import`: the file memory of every project, new and changed files only.
+pub fn run_import(
+    setup: &Setup,
+    dry_run: bool,
+    connect: &mut import::Connect<'_>,
+    out: &mut dyn Write,
+) -> Result<u8, String> {
+    let state = ImportState::load(&setup.data_dir)?;
+    let plans = import::plan(import::scan(&setup.paths.projects)?, &state);
+    let (with_project, skipped, new, changed, unchanged) = import::totals(&plans);
+    let _ = writeln!(
+        out,
+        "{} memory director{} under {}: {new} new, {changed} changed, {unchanged} unchanged \
+         memory files{}",
+        with_project + skipped,
+        if with_project + skipped == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+        setup.paths.projects.display(),
+        if skipped > 0 {
+            format!("; {skipped} skipped (the project's directory no longer exists)")
+        } else {
+            String::new()
+        }
+    );
+    if dry_run {
+        for plan in &plans {
+            let project = plan
+                .dir
+                .project
+                .as_deref()
+                .unwrap_or("(skipped: not found)");
+            let _ = writeln!(
+                out,
+                "  {} -> {project}: {} new, {} changed, {} unchanged",
+                plan.dir.name,
+                plan.new.len(),
+                plan.changed.len(),
+                plan.unchanged
+            );
+        }
+        let _ = writeln!(out, "Dry run: nothing was imported.");
+        return Ok(0);
+    }
+    if new + changed == 0 {
+        let _ = writeln!(out, "Nothing to import.");
+        return Ok(0);
+    }
+    let report = import::with_lock(&setup.data_dir, Duration::from_secs(60), || {
+        let mut state = ImportState::load(&setup.data_dir)?;
+        Ok::<_, String>(import::apply(
+            &plans,
+            connect,
+            &mut state,
+            &setup.data_dir,
+            None,
+        ))
+    })?
+    .ok_or("another import is running; try again later")??;
+    let _ = writeln!(out, "{}", install::import_summary(&report));
+    for warning in &report.warnings {
+        let _ = writeln!(out, "  warning: {warning}");
+    }
+    for problem in &report.problems {
+        let _ = writeln!(out, "  failed: {problem}");
+    }
+    Ok(if report.problems.is_empty() {
+        0
+    } else {
+        EXIT_FAILED
+    })
+}
+
+/// `doctor`: every check with its fix; exit code 1 when a problem was found.
+fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
+    let findings = install::doctor(setup);
+    let _ = writeln!(out, "graphersal-memory doctor (Claude Code)\n");
+    let mut problems = 0;
+    for finding in &findings {
+        if finding.problem {
+            problems += 1;
+            let _ = writeln!(out, "  PROBLEM {}", finding.text);
+            if let Some(fix) = &finding.fix {
+                let _ = writeln!(out, "          fix: {fix}");
+            }
+        } else {
+            let _ = writeln!(out, "  ok      {}", finding.text);
+        }
+    }
+    let _ = writeln!(
+        out,
+        "\n{}",
+        if problems == 0 {
+            "No problems found.".to_string()
+        } else {
+            format!("{problems} problem(s) found.")
+        }
+    );
+    if problems == 0 { 0 } else { EXIT_FAILED }
+}
+
+/// `hook`: never fails (exit code 0, notes on stderr).
+fn run_hook(
+    cli: &Cli,
+    event: hook::HookEvent,
+    stdin: impl Read + Send + 'static,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
+    match setup(cli) {
+        Ok(setup) => {
+            let connect = daemon_connector(&setup);
+            hook::run(
+                event,
+                Ok(setup.paths.clone()),
+                setup.data_dir.clone(),
+                Box::new(connect),
+                stdin,
+                stdout,
+                stderr,
+            )
+        }
+        Err(err) => {
+            let _ = writeln!(stderr, "graphersal-memory hook: {err}");
+            0
         }
     }
 }
@@ -174,14 +445,8 @@ fn run_daemon(
 ) -> Result<(), String> {
     if foreground {
         let (data_dir, run_dir) = dirs(cli)?;
-        let idle = match idle {
-            Some(idle) => idle,
-            None => match std::env::var(daemon::IDLE_ENV) {
-                Ok(text) if !text.is_empty() => daemon::parse_duration(&text)
-                    .map_err(|err| format!("{}: {err}", daemon::IDLE_ENV))?,
-                _ => daemon::DEFAULT_IDLE,
-            },
-        };
+        let settings = Config::load(&data_dir)?;
+        let idle = config::idle(idle, std::env::var(daemon::IDLE_ENV).ok(), &settings)?;
         return daemon::run(DaemonOptions {
             data_dir,
             run_dir,
@@ -191,8 +456,10 @@ fn run_daemon(
     }
     if idle.is_some() || version_as.is_some() {
         return Err(format!(
-            "--idle and --version-as need --foreground (a detached daemon reads {})",
-            daemon::IDLE_ENV
+            "--idle and --version-as need --foreground (a detached daemon reads {} or the \
+             settings file {})",
+            daemon::IDLE_ENV,
+            config::CONFIG_FILE
         ));
     }
     let location = location(cli)?;
@@ -230,23 +497,58 @@ fn describe(status: &serde_json::Value) -> String {
     )
 }
 
-/// `status`: whether the daemon runs; the installation part arrives in M3.
+/// `status`: the daemon, the data directory, the settings and what is installed in Claude Code.
 fn status(cli: &Cli, mut stdout: impl Write) -> Result<(), String> {
     let (data_dir, run_dir) = dirs(cli)?;
-    let daemon = match shim::control(&run_dir, "status")? {
+    let setup = setup(cli);
+    let text = status_text(&data_dir, &run_dir, setup.as_ref().map_err(String::as_str))?;
+    let _ = write!(stdout, "{text}");
+    Ok(())
+}
+
+/// The text of `status`.
+pub fn status_text(
+    data_dir: &Path,
+    run_dir: &Path,
+    setup: Result<&Setup, &str>,
+) -> Result<String, String> {
+    let daemon = match shim::control(run_dir, "status")? {
         Some(status) => describe(&status),
         None => format!(
             "daemon: not running (run directory {}; the next agent session starts it)",
             run_dir.display()
         ),
     };
-    let (stage, _) = planned_stage(&Command::Status);
-    let _ = writeln!(
-        stdout,
-        "{daemon}\ndata directory: {}\ninstallation: not checked yet (planned in stage {stage})",
+    let settings = match Config::load(data_dir) {
+        Ok(settings) => {
+            let idle = config::idle(None, std::env::var(daemon::IDLE_ENV).ok(), &settings)
+                .map(|idle| format!("{}s", idle.as_secs()))
+                .unwrap_or_else(|err| err);
+            format!(
+                "settings: {} (daemon idle time {idle})",
+                if config::path(data_dir).exists() {
+                    config::path(data_dir).display().to_string()
+                } else {
+                    "defaults".to_string()
+                }
+            )
+        }
+        Err(err) => format!("settings: {err}"),
+    };
+    let mut text = format!(
+        "{daemon}\ndata directory: {}\n{settings}\n",
         data_dir.display()
     );
-    Ok(())
+    match setup {
+        Ok(setup) => {
+            for line in install::status_lines(setup) {
+                text.push_str(&line);
+                text.push('\n');
+            }
+        }
+        Err(err) => text.push_str(&format!("Claude Code: cannot check ({err})\n")),
+    }
+    Ok(text)
 }
 
 /// Runs a command that is not implemented yet: writes its stage to `stderr` and returns the
@@ -265,15 +567,7 @@ mod tests {
 
     #[test]
     fn every_command_reports_its_stage_and_exits_2() {
-        for (name, stage) in [
-            ("install", "M3"),
-            ("uninstall", "M3"),
-            ("doctor", "M3"),
-            ("ui", "M7"),
-            ("bench", "M5"),
-            ("import", "M3"),
-            ("export", "M3"),
-        ] {
+        for (name, stage) in [("ui", "M7"), ("bench", "M5"), ("export", "M7")] {
             let cli = Cli::try_parse_from(["graphersal-memory", name]).unwrap();
             let mut err = Vec::new();
             assert_eq!(run(&cli.command, &mut err), 2);
@@ -287,23 +581,43 @@ mod tests {
     }
 
     #[test]
-    fn status_without_a_daemon_says_so() {
+    fn status_without_a_daemon_says_so_and_shows_the_installation() {
         let data = crate::mcp_tests::TempDir::new("st");
-        let data_dir = data.path().display().to_string();
-        let cli =
-            Cli::try_parse_from(["graphersal-memory", "status", "--data-dir", &data_dir]).unwrap();
-        let out = SharedBuffer::default();
-        let mut err = Vec::new();
-        assert_eq!(
-            run_cli(&cli, std::io::empty(), out.clone(), &mut err),
-            0,
-            "{}",
-            String::from_utf8_lossy(&err)
-        );
-        let text = out.text();
+        let home = crate::mcp_tests::TempDir::new("sthome");
+        let setup = crate::install_tests::setup_in(home.path(), data.path());
+        let text = status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
         assert!(text.contains("daemon: not running"), "{text}");
-        assert!(text.contains(&data_dir), "{text}");
-        assert!(text.contains("stage M3"), "{text}");
+        assert!(text.contains(&data.path().display().to_string()), "{text}");
+        assert!(
+            text.contains("settings: defaults (daemon idle time 7200s)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("MCP server graphersal-memory (use): not installed"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Not installed: run `graphersal-memory install`"),
+            "{text}"
+        );
+        let text = status_text(data.path(), &setup.run_dir, Err("no home")).unwrap();
+        assert!(
+            text.contains("Claude Code: cannot check (no home)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn other_harnesses_are_not_implemented_yet() {
+        for command in ["install", "uninstall"] {
+            let cli =
+                Cli::try_parse_from(["graphersal-memory", command, "--harness", "cursor"]).unwrap();
+            let mut err = Vec::new();
+            assert_eq!(run_cli(&cli, std::io::empty(), Vec::new(), &mut err), 2);
+            let text = String::from_utf8(err).unwrap();
+            assert!(text.contains("not implemented yet"), "{text}");
+            assert!(text.contains("M7"), "{text}");
+        }
     }
 
     #[test]
@@ -324,26 +638,5 @@ mod tests {
         );
         let text = String::from_utf8(err).unwrap();
         assert!(text.contains("--foreground"), "{text}");
-    }
-
-    /// An output buffer the test keeps a handle of.
-    #[derive(Clone, Default)]
-    struct SharedBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl SharedBuffer {
-        fn text(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-        }
-    }
-
-    impl Write for SharedBuffer {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 }

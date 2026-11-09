@@ -1,10 +1,11 @@
 # How it works
 
-> Pre-release: this page describes the target design. Implemented so far (M1, M2): the store in
+> Pre-release: this page describes the target design. Implemented so far (M1 to M3): the store in
 > the per-user data directory, project and global memories, the two profiles with their access
 > policy, the daemon with the shim, the socket, the handshake, start on demand, idle exit, upgrade
-> and crash recovery. Not yet: the `ui` command, isolated project stores, background indexing; see
-> the [status table](../README.md#status).
+> and crash recovery, the settings file, the project records, the installation into Claude Code
+> with its hooks and the import of the file memory. Not yet: the `ui` command, isolated project
+> stores, background indexing; see the [status table](../README.md#status).
 
 ## Processes
 
@@ -57,9 +58,10 @@ or `GRAPHERSAL_MEMORY_DIR` gets `<data dir>/run`, so each data directory has a d
   `graphersal-memory daemon --foreground` detached (its own process group on Unix, a detached
   process on Windows). A shim that started at the same moment waits for the lock and then finds
   the socket. A shim gives up after 30 seconds with an error naming the daemon's log.
-- **Idle exit.** With no connection for the idle time (2 hours; `daemon --foreground --idle 30m`,
-  or `GRAPHERSAL_MEMORY_IDLE`, which a daemon started by a shim inherits), the daemon removes its
-  socket, closes every store cleanly and exits.
+- **Idle exit.** With no connection for the idle time, the daemon removes its socket, closes every
+  store cleanly and exits. The idle time is, in this order: `daemon --foreground --idle 30m`, the
+  environment variable `GRAPHERSAL_MEMORY_IDLE` (a daemon started by a shim inherits it), the
+  settings file, two hours.
 - **Crashes.** A socket file is treated as stale only when connecting fails and no process holds
   `daemon.pid`. If the daemon dies, open sessions see their MCP server end with an error naming the
   log (restarting the MCP server in the harness reconnects); the next session starts a new daemon,
@@ -99,6 +101,14 @@ or `GRAPHERSAL_MEMORY_DIR` gets `<data dir>/run`, so each data directory has a d
 - **One shared store by default.** Every memory carries its project, and search defaults to the
   current project plus your global memory: preferences and cross-project rules. The global
   memories live in the same store, without a project.
+- **The settings file** (`config.json` in the data directory, written with the defaults by
+  `install`): `{"version": 1, "daemon": {"idle": "2h"}}`. A missing file means the defaults; keys
+  this version does not know are ignored, and `doctor` names them.
+- **The project records** (`projects.json` in the data directory): every project that connected,
+  with its git remote URL (the `origin` remote, else the first one, without credentials) and when it
+  was first seen. The project key stays the canonical root path, so moving a repository orphans its
+  memories for now; the recorded remote lets a later version find the moved repository and re-map
+  them. The daemon records a project the first time it connects in the daemon's life.
 - **The store registry** (`registry.json` in the data directory) says which store serves which
   project: `{"version": 1, "default": "default", "projects": {}}`. Today every project goes to
   the default store; the registry is where isolated projects will be listed.
@@ -140,3 +150,15 @@ The stores, queries, embeddings, access policies and the MCP endpoint come from
 (the MCP endpoint, connections, profiles and stdio framing) and `graphersal-serve` (the hosted
 graph runtime). graphersal-memory adds the product around them: daemon, shim, store registry,
 installation into harnesses, the memory schema and functions, import and export, and the A/B.
+
+## Installation into a harness
+
+`graphersal-memory install` writes only managed parts into the harness's configuration and records
+what it changed in the data directory (`install/claude-code.json`, with a backup of every file
+before its first change in `install/backups/`); `uninstall` reverts exactly that. The details per
+harness are in [Supported harnesses](harnesses.md).
+
+The import of the file memory goes through the memory functions like any agent call: the product
+opens a `use` connection to the daemon for each project and calls `remember`, so the store keeps a
+single writer. `import/claude-code.json` in the data directory remembers the fingerprint of every
+imported file, so only new and changed files are sent again.

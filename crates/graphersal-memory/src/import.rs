@@ -1,0 +1,943 @@
+//! Import of Claude Code's file memory: every `<claude config>/projects/<project>/memory/`
+//! directory (a `MEMORY.md` index and one markdown file per memory, with a front matter of
+//! `name`, `description` and `metadata.type`) becomes memories of that project.
+//!
+//! - The memory's slug is the file name (lower case, other characters turned into `-`); its kind
+//!   is `metadata.type` (or a top-level `type`), `project` when missing or unknown; its summary
+//!   is `description`; its body is the text below the front matter (a trailing `**Why:**` /
+//!   `**How to apply:**` section is passed as `why` / `how_to_apply`, which `remember` appends
+//!   back); its title and hook come from its `MEMORY.md` line (`- [Title](file.md) — hook`),
+//!   which also gives the order; `[[slug]]` in the body become links.
+//! - The project is the directory the harness ran in: the `cwd` recorded in the project's
+//!   transcripts, else the directory name decoded against the file system (Claude Code names it
+//!   after the path with every other character turned into `-`). The memories get the project
+//!   key of that directory (its git root), as a session started there would. A directory whose
+//!   project no longer exists is skipped and reported.
+//! - Idempotent: every file is written through the memory function `remember` (replace by slug,
+//!   never a duplicate), and `<data dir>/import/claude-code.json` remembers each imported file's
+//!   fingerprint, so a later import sends only new and changed files. A memory forgotten in the
+//!   graph is not brought back while its file is unchanged.
+//! - The files are only read, never changed or deleted. Rules in `CLAUDE.md` files are not
+//!   imported in this version.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+
+use crate::fsutil;
+
+/// The import's state directory in the data directory.
+const STATE_DIR: &str = "import";
+
+/// The state file of the Claude Code import.
+const STATE_FILE: &str = "claude-code.json";
+
+/// The lock file that keeps two imports (two hooks at once) apart.
+const LOCK_FILE: &str = "import.lock";
+
+/// The format version of the state file.
+const FORMAT: u64 = 1;
+
+/// The memory kinds of the memory schema.
+pub const KINDS: [&str; 4] = ["user", "feedback", "project", "reference"];
+
+/// How many directories the file-system decoding of a project name visits at most.
+const DECODE_BUDGET: usize = 4000;
+
+/// One memory file, parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryFile {
+    /// The file.
+    pub path: PathBuf,
+    /// The memory's slug.
+    pub slug: String,
+    /// The memory's kind.
+    pub kind: String,
+    /// Whether the kind was missing or unknown (and `project` was taken).
+    pub kind_defaulted: bool,
+    /// One line.
+    pub summary: String,
+    /// The markdown body (without the why / how-to-apply tail when it was split off).
+    pub body: String,
+    /// The reason, from a trailing `**Why:**`.
+    pub why: String,
+    /// When and how to apply it, from a trailing `**How to apply:**`.
+    pub how_to_apply: String,
+    /// Its index line's title.
+    pub title: String,
+    /// Its index line's hook.
+    pub hook: String,
+    /// Its position in `MEMORY.md` (files not listed there come after, by name).
+    pub order: usize,
+    /// The slugs it links to.
+    pub links: Vec<String>,
+    /// The fingerprint of what is imported (the file and its index line).
+    pub fingerprint: String,
+}
+
+impl MemoryFile {
+    /// The arguments of `remember` for this memory.
+    pub fn remember_args(&self) -> Value {
+        json!({
+            "slug": self.slug,
+            "kind": self.kind,
+            "summary": self.summary,
+            "body": self.body,
+            "why": self.why,
+            "how_to_apply": self.how_to_apply,
+            "title": self.title,
+            "hook": self.hook,
+            "links": self.links,
+        })
+    }
+}
+
+/// One memory directory of the harness.
+#[derive(Debug, Clone)]
+pub struct MemoryDir {
+    /// The `memory` directory.
+    pub dir: PathBuf,
+    /// The project directory's name (the harness's encoding of the path).
+    pub name: String,
+    /// The project key, or `None` when the project's directory was not found.
+    pub project: Option<String>,
+    /// The memory files.
+    pub files: Vec<MemoryFile>,
+    /// Files that could not be read or parsed, with the reason.
+    pub problems: Vec<String>,
+}
+
+/// Claude Code's name for the project directory of `path`: every character that is not an
+/// ASCII letter or digit becomes `-`.
+pub fn claude_slug(path: &str) -> String {
+    path.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// A memory slug from a file name or a link: lower case, characters other than `a-z`, `0-9`
+/// and `-` become `-`, repeated and outer dashes removed.
+pub fn slugify(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        let c = c.to_ascii_lowercase();
+        let c = if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            c
+        } else {
+            '-'
+        };
+        if c == '-' && (out.is_empty() || out.ends_with('-')) {
+            continue;
+        }
+        out.push(c);
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+/// The memory directories under the harness's `projects` directory, sorted by name.
+pub fn scan(projects_dir: &Path) -> Result<Vec<MemoryDir>, String> {
+    let entries = match std::fs::read_dir(projects_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(format!("cannot read {}: {err}", projects_dir.display())),
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.join("memory").is_dir())
+        .collect();
+    dirs.sort();
+    Ok(dirs
+        .iter()
+        .map(|project_dir| {
+            let project =
+                resolve_project_dir(project_dir).map(|dir| crate::mcp::project_key(None, &dir));
+            read_dir(&project_dir.join("memory"), project)
+        })
+        .collect())
+}
+
+/// Reads one memory directory (its project already resolved).
+pub fn read_dir(dir: &Path, project: Option<String>) -> MemoryDir {
+    let name = dir
+        .parent()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut out = MemoryDir {
+        dir: dir.to_path_buf(),
+        name,
+        project,
+        files: Vec::new(),
+        problems: Vec::new(),
+    };
+    let index = std::fs::read_to_string(dir.join("MEMORY.md"))
+        .map(|text| index_lines(&text))
+        .unwrap_or_default();
+    let mut paths: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path.extension().is_some_and(|ext| ext == "md")
+                    && path.file_name().is_some_and(|name| name != "MEMORY.md")
+            })
+            .collect(),
+        Err(err) => {
+            out.problems
+                .push(format!("cannot read {}: {err}", dir.display()));
+            return out;
+        }
+    };
+    paths.sort();
+    let mut seen = BTreeSet::new();
+    for path in paths {
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                out.problems
+                    .push(format!("cannot read {}: {err}", path.display()));
+                continue;
+            }
+        };
+        let entry = index.get(&stem);
+        match parse_file(&path, &stem, &text, entry, index.len()) {
+            Ok(file) => {
+                if !seen.insert(file.slug.clone()) {
+                    out.problems.push(format!(
+                        "{}: another file has the slug {} already; skipped",
+                        path.display(),
+                        file.slug
+                    ));
+                    continue;
+                }
+                out.files.push(file);
+            }
+            Err(err) => out.problems.push(format!("{}: {err}", path.display())),
+        }
+    }
+    out.files
+        .sort_by(|a, b| (a.order, &a.path).cmp(&(b.order, &b.path)));
+    out
+}
+
+/// One `MEMORY.md` line: title, hook, position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexEntry {
+    title: String,
+    hook: String,
+    position: usize,
+}
+
+/// The lines `- [Title](file.md) — hook` of a `MEMORY.md`, by file stem.
+fn index_lines(text: &str) -> BTreeMap<String, IndexEntry> {
+    let mut out = BTreeMap::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("- [") else {
+            continue;
+        };
+        let Some((title, rest)) = rest.split_once("](") else {
+            continue;
+        };
+        let Some((target, rest)) = rest.split_once(')') else {
+            continue;
+        };
+        let Some(stem) = target.strip_suffix(".md") else {
+            continue;
+        };
+        let stem = stem.rsplit('/').next().unwrap_or(stem).to_string();
+        let rest = rest.trim();
+        let hook = ["—", "–", "-", ":"]
+            .iter()
+            .find_map(|dash| rest.strip_prefix(dash))
+            .unwrap_or(rest)
+            .trim()
+            .to_string();
+        let position = out.len();
+        out.entry(stem).or_insert(IndexEntry {
+            title: title.to_string(),
+            hook,
+            position,
+        });
+    }
+    out
+}
+
+/// Parses one memory file.
+fn parse_file(
+    path: &Path,
+    stem: &str,
+    text: &str,
+    entry: Option<&IndexEntry>,
+    unlisted: usize,
+) -> Result<MemoryFile, String> {
+    let normalized = text.replace("\r\n", "\n");
+    let (front, body) = split_front_matter(&normalized);
+    let slug = slugify(stem);
+    if slug.is_empty() {
+        return Err("the file name gives no slug".to_string());
+    }
+    let declared = field(front, "type").map(|kind| kind.to_ascii_lowercase());
+    let (kind, kind_defaulted) = match declared {
+        Some(kind) if KINDS.contains(&kind.as_str()) => (kind, false),
+        _ => ("project".to_string(), true),
+    };
+    let body = body.trim().to_string();
+    let mut summary = field(front, "description").unwrap_or_default();
+    if summary.is_empty() {
+        summary = body
+            .lines()
+            .map(|line| line.trim().trim_start_matches('#').trim())
+            .find(|line| !line.is_empty())
+            .unwrap_or(stem)
+            .chars()
+            .take(200)
+            .collect();
+    }
+    let (main, why, how_to_apply) = split_why(&body);
+    let main = if main.is_empty() {
+        summary.clone()
+    } else {
+        main
+    };
+    let links: Vec<String> = wiki_links(&body)
+        .into_iter()
+        .filter(|link| *link != slug)
+        .collect();
+    let (title, hook, order) = match entry {
+        Some(entry) => (entry.title.clone(), entry.hook.clone(), entry.position),
+        None => (String::new(), String::new(), unlisted),
+    };
+    let fingerprint = fsutil::fingerprint(format!("{text}\n\u{0}{title}\n\u{0}{hook}").as_bytes());
+    Ok(MemoryFile {
+        path: path.to_path_buf(),
+        slug,
+        kind,
+        kind_defaulted,
+        summary,
+        body: main,
+        why,
+        how_to_apply,
+        title,
+        hook,
+        order,
+        links,
+        fingerprint,
+    })
+}
+
+/// The front matter (between the first two `---` lines) and the rest.
+fn split_front_matter(text: &str) -> (&str, &str) {
+    if let Some(rest) = text.strip_prefix("---\n")
+        && let Some(end) = rest.find("\n---")
+    {
+        let front = &rest[..end];
+        let after = &rest[end + 4..];
+        let after = after.split_once('\n').map_or("", |(_, body)| body);
+        return (front, after);
+    }
+    ("", text)
+}
+
+/// A front-matter field (top-level or nested one level, as `metadata.type`), unquoted.
+fn field(front: &str, key: &str) -> Option<String> {
+    front.lines().find_map(|line| {
+        let (name, value) = line.trim().split_once(':')?;
+        if name.trim() != key {
+            return None;
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+        Some(unquote(value))
+    })
+}
+
+fn unquote(value: &str) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 && bytes[0] == bytes[bytes.len() - 1] && matches!(bytes[0], b'"' | b'\'') {
+        let inner = &value[1..value.len() - 1];
+        if bytes[0] == b'"' {
+            return inner.replace("\\\"", "\"").replace("\\\\", "\\");
+        }
+        return inner.replace("''", "'");
+    }
+    value.to_string()
+}
+
+/// Splits a trailing `**Why:** ...` / `**How to apply:** ...` section off the body (only when
+/// each marker appears once and the section ends the body).
+fn split_why(body: &str) -> (String, String, String) {
+    const WHY: &str = "**Why:**";
+    const HOW: &str = "**How to apply:**";
+    let whys = body.matches(WHY).count();
+    let hows = body.matches(HOW).count();
+    if whys > 1 || hows > 1 || (whys == 0 && hows == 0) {
+        return (body.to_string(), String::new(), String::new());
+    }
+    let why_at = body.find(WHY);
+    let how_at = body.find(HOW);
+    let tail_start = match (why_at, how_at) {
+        (Some(w), Some(h)) if w < h => w,
+        (Some(_), Some(_)) => return (body.to_string(), String::new(), String::new()),
+        (Some(w), None) => w,
+        (None, Some(h)) => h,
+        (None, None) => return (body.to_string(), String::new(), String::new()),
+    };
+    let main = body[..tail_start].trim().to_string();
+    let why = match (why_at, how_at) {
+        (Some(w), Some(h)) => body[w + WHY.len()..h].trim().to_string(),
+        (Some(w), None) => body[w + WHY.len()..].trim().to_string(),
+        _ => String::new(),
+    };
+    let how = how_at
+        .map(|h| body[h + HOW.len()..].trim().to_string())
+        .unwrap_or_default();
+    (main, why, how)
+}
+
+/// The `[[slug]]` links of a body, slugified, sorted, without duplicates.
+fn wiki_links(body: &str) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("[[") {
+        rest = &rest[start + 2..];
+        let Some(end) = rest.find("]]") else { break };
+        let link = slugify(&rest[..end]);
+        if !link.is_empty() && end <= 100 {
+            out.insert(link);
+        }
+        rest = &rest[end + 2..];
+    }
+    out.into_iter().collect()
+}
+
+/// The directory a harness project directory stands for: the `cwd` of its transcripts whose
+/// encoding is the directory's name, else the name decoded against the file system.
+pub fn resolve_project_dir(project_dir: &Path) -> Option<PathBuf> {
+    let name = project_dir.file_name()?.to_str()?.to_string();
+    if let Some(dir) = cwd_from_transcripts(project_dir, &name) {
+        return Some(dir);
+    }
+    decode(&name)
+}
+
+/// The first transcript `cwd` (of up to 20 transcripts, the first 64 KiB of each) whose
+/// encoding equals `name` and that exists.
+fn cwd_from_transcripts(project_dir: &Path, name: &str) -> Option<PathBuf> {
+    use std::io::Read;
+    let mut files: Vec<PathBuf> = std::fs::read_dir(project_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .collect();
+    files.sort();
+    for file in files.iter().take(20) {
+        let Ok(handle) = std::fs::File::open(file) else {
+            continue;
+        };
+        let mut head = String::new();
+        let _ = handle.take(64 * 1024).read_to_string(&mut head);
+        for line in head.lines() {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if let Some(cwd) = value.get("cwd").and_then(Value::as_str)
+                && claude_slug(cwd) == name
+                && Path::new(cwd).is_dir()
+            {
+                return Some(PathBuf::from(cwd));
+            }
+        }
+    }
+    None
+}
+
+/// Decodes a project directory name against the file system: walks down from the root,
+/// matching each directory entry's encoding against the name (every `-` may be a separator or
+/// part of a name). `None` when no existing directory matches within the budget.
+pub fn decode(name: &str) -> Option<PathBuf> {
+    let (root, rest) = if let Some(rest) = name.strip_prefix('-') {
+        (PathBuf::from("/"), rest)
+    } else {
+        // A Windows drive: `C:\x` is encoded `C--x`.
+        let mut chars = name.chars();
+        let drive = chars.next().filter(char::is_ascii_alphabetic)?;
+        let rest = name.get(1..)?.strip_prefix("--")?;
+        (PathBuf::from(format!("{drive}:\\")), rest)
+    };
+    let mut budget = DECODE_BUDGET;
+    walk(&root, rest, &mut budget)
+}
+
+fn walk(dir: &Path, rest: &str, budget: &mut usize) -> Option<PathBuf> {
+    if rest.is_empty() {
+        return Some(dir.to_path_buf());
+    }
+    if *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    let mut entries: Vec<(String, PathBuf)> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .is_ok_and(|t| t.is_dir() || t.is_symlink())
+        })
+        .map(|entry| {
+            (
+                claude_slug(&entry.file_name().to_string_lossy()),
+                entry.path(),
+            )
+        })
+        .filter(|(encoded, _)| !encoded.is_empty() && rest.starts_with(encoded.as_str()))
+        .collect();
+    // Longer matches first: `my-app` before `my`.
+    entries.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
+    for (encoded, path) in entries {
+        let after = &rest[encoded.len()..];
+        if after.is_empty() {
+            if path.is_dir() {
+                return Some(path);
+            }
+            continue;
+        }
+        if let Some(next) = after.strip_prefix('-')
+            && let Some(found) = walk(&path, next, budget)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// What the import knows about the files it imported (`<data dir>/import/claude-code.json`).
+#[derive(Debug, Clone, Default)]
+pub struct ImportState {
+    files: BTreeMap<String, Value>,
+}
+
+impl ImportState {
+    fn path(data_dir: &Path) -> PathBuf {
+        data_dir.join(STATE_DIR).join(STATE_FILE)
+    }
+
+    /// Reads the state of `data_dir` (empty when there is none).
+    pub fn load(data_dir: &Path) -> Result<Self, String> {
+        let path = Self::path(data_dir);
+        let Some(bytes) = fsutil::read_optional(&path)? else {
+            return Ok(Self::default());
+        };
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|err| format!("{} is invalid: {err}", path.display()))?;
+        if value.get("version").and_then(Value::as_u64) != Some(FORMAT) {
+            return Err(format!("{}: unsupported version", path.display()));
+        }
+        let files = value
+            .get("files")
+            .and_then(Value::as_object)
+            .map(|files| files.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        Ok(Self { files })
+    }
+
+    /// Writes the state.
+    pub fn save(&self, data_dir: &Path) -> Result<(), String> {
+        let path = Self::path(data_dir);
+        let dir = data_dir.join(STATE_DIR);
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+        let files: serde_json::Map<String, Value> = self.files.clone().into_iter().collect();
+        let value = json!({"version": FORMAT, "files": files});
+        fsutil::write_atomic(
+            &path,
+            format!("{}\n", crate::jsonedit::render(&value, Some("  "), 0)).as_bytes(),
+        )
+    }
+
+    fn fingerprint_of(&self, file: &Path) -> Option<&str> {
+        self.files
+            .get(&file.display().to_string())
+            .and_then(|entry| entry["fingerprint"].as_str())
+    }
+
+    fn record(&mut self, file: &MemoryFile, project: &str) {
+        self.files.insert(
+            file.path.display().to_string(),
+            json!({"fingerprint": file.fingerprint, "slug": file.slug, "project": project,
+                   "imported_at": crate::daemon::now_utc()}),
+        );
+    }
+
+    /// How many files the state lists.
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+}
+
+/// What an import will do with one directory.
+#[derive(Debug, Clone)]
+pub struct DirPlan {
+    /// The directory and its files.
+    pub dir: MemoryDir,
+    /// Files never imported.
+    pub new: Vec<MemoryFile>,
+    /// Files changed since their import.
+    pub changed: Vec<MemoryFile>,
+    /// Files unchanged since their import.
+    pub unchanged: usize,
+}
+
+/// Plans the import of `dirs` against `state`.
+pub fn plan(dirs: Vec<MemoryDir>, state: &ImportState) -> Vec<DirPlan> {
+    dirs.into_iter()
+        .map(|dir| {
+            let mut new = Vec::new();
+            let mut changed = Vec::new();
+            let mut unchanged = 0;
+            for file in &dir.files {
+                match state.fingerprint_of(&file.path) {
+                    None => new.push(file.clone()),
+                    Some(known) if known != file.fingerprint => changed.push(file.clone()),
+                    Some(_) => unchanged += 1,
+                }
+            }
+            DirPlan {
+                dir,
+                new,
+                changed,
+                unchanged,
+            }
+        })
+        .collect()
+}
+
+/// Totals of a plan: (directories with a project, skipped directories, new, changed,
+/// unchanged).
+pub fn totals(plans: &[DirPlan]) -> (usize, usize, usize, usize, usize) {
+    let mut out = (0, 0, 0, 0, 0);
+    for plan in plans {
+        if plan.dir.project.is_some() {
+            out.0 += 1;
+            out.2 += plan.new.len();
+            out.3 += plan.changed.len();
+            out.4 += plan.unchanged;
+        } else {
+            out.1 += 1;
+        }
+    }
+    out
+}
+
+/// A connection to the memory functions, bound to one project.
+pub trait Caller {
+    /// Calls the memory function `name`.
+    fn call(&mut self, name: &str, arguments: Value) -> Result<Value, String>;
+}
+
+impl<R: std::io::BufRead, W: std::io::Write> Caller for crate::client::McpClient<R, W> {
+    fn call(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
+        crate::client::McpClient::call(self, name, arguments)
+    }
+}
+
+/// Opens a connection bound to a project.
+pub type Connect<'a> = dyn FnMut(&str) -> Result<Box<dyn Caller>, String> + 'a;
+
+/// An owned connector that can move to another thread.
+pub type SendConnect = Box<dyn FnMut(&str) -> Result<Box<dyn Caller>, String> + Send>;
+
+/// What an import did.
+#[derive(Debug, Clone, Default)]
+pub struct ImportReport {
+    /// Memories created.
+    pub created: usize,
+    /// Memories replaced.
+    pub updated: usize,
+    /// Files unchanged since their import (not sent).
+    pub unchanged: usize,
+    /// Projects written to.
+    pub projects: BTreeSet<String>,
+    /// Directories skipped (no project found), by name.
+    pub skipped_dirs: Vec<String>,
+    /// Files whose kind was missing or unknown.
+    pub kind_defaulted: usize,
+    /// Failures: a memory that could not be written, a project that could not be reached.
+    pub problems: Vec<String>,
+    /// Files that could not be read or parsed (skipped).
+    pub warnings: Vec<String>,
+    /// Whether the deadline stopped the import early.
+    pub timed_out: bool,
+}
+
+/// Runs `plans`: every new or changed file goes through `remember` (in index order, then a
+/// second call for a memory whose links point to memories created after it), and its
+/// fingerprint goes into `state` (saved to `data_dir` after each directory).
+pub fn apply(
+    plans: &[DirPlan],
+    connect: &mut Connect<'_>,
+    state: &mut ImportState,
+    data_dir: &Path,
+    deadline: Option<Instant>,
+) -> ImportReport {
+    let mut report = ImportReport::default();
+    for plan in plans {
+        report.warnings.extend(plan.dir.problems.iter().cloned());
+        let Some(project) = &plan.dir.project else {
+            report.skipped_dirs.push(plan.dir.name.clone());
+            continue;
+        };
+        report.unchanged += plan.unchanged;
+        let mut todo: Vec<&MemoryFile> = plan.new.iter().chain(plan.changed.iter()).collect();
+        if todo.is_empty() {
+            continue;
+        }
+        todo.sort_by(|a, b| (a.order, &a.path).cmp(&(b.order, &b.path)));
+        let mut caller = match connect(project) {
+            Ok(caller) => caller,
+            Err(err) => {
+                report.problems.push(format!(
+                    "{}: cannot reach the memory: {err}",
+                    plan.dir.dir.display()
+                ));
+                continue;
+            }
+        };
+        let written: BTreeSet<&str> = todo.iter().map(|f| f.slug.as_str()).collect();
+        let mut again = Vec::new();
+        for file in &todo {
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                report.timed_out = true;
+                break;
+            }
+            match caller.call("remember", file.remember_args()) {
+                Ok(answer) => {
+                    if answer["created"] == Value::Bool(true) {
+                        report.created += 1;
+                    } else {
+                        report.updated += 1;
+                    }
+                    if file.kind_defaulted {
+                        report.kind_defaulted += 1;
+                    }
+                    state.record(file, project);
+                    let missing: Vec<&str> = answer["missing_targets"]
+                        .as_array()
+                        .map(|m| m.iter().filter_map(Value::as_str).collect())
+                        .unwrap_or_default();
+                    if missing.iter().any(|slug| written.contains(slug)) {
+                        again.push(*file);
+                    }
+                }
+                Err(err) => report
+                    .problems
+                    .push(format!("{}: {err}", file.path.display())),
+            }
+        }
+        // Links to memories created later in this import resolve on the second call.
+        for file in again {
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                report.timed_out = true;
+                break;
+            }
+            if let Err(err) = caller.call("remember", file.remember_args()) {
+                report
+                    .problems
+                    .push(format!("{}: {err}", file.path.display()));
+            }
+        }
+        report.projects.insert(project.clone());
+        if let Err(err) = state.save(data_dir) {
+            report.problems.push(err);
+        }
+        if report.timed_out {
+            break;
+        }
+    }
+    report
+}
+
+/// Runs `work` holding the import lock of `data_dir`, taken within `wait`; `Ok(None)` when
+/// another import holds it all that time.
+pub fn with_lock<T>(
+    data_dir: &Path,
+    wait: Duration,
+    work: impl FnOnce() -> T,
+) -> Result<Option<T>, String> {
+    let dir = data_dir.join(STATE_DIR);
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(LOCK_FILE))
+        .map_err(|err| format!("cannot open the import lock: {err}"))?;
+    let mut lock = fd_lock::RwLock::new(file);
+    let deadline = Instant::now() + wait;
+    loop {
+        match lock.try_write() {
+            Ok(_guard) => return Ok(Some(work())),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) => return Err(format!("cannot take the import lock: {err}")),
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugs_and_claude_names() {
+        assert_eq!(slugify("My_Memory File"), "my-memory-file");
+        assert_eq!(slugify("--a--b--"), "a-b");
+        assert_eq!(slugify("Ünï"), "n");
+        assert_eq!(
+            claude_slug("/Users/a/Application Support/x.y"),
+            "-Users-a-Application-Support-x-y"
+        );
+    }
+
+    #[test]
+    fn index_lines_give_title_hook_and_order() {
+        let index = index_lines(
+            "<!-- header -->\n## How\n- [Graph first](graph-first.md) — study the graph\n\
+             - [No hook](no-hook.md)\nnot a line\n- [Sub](dir/sub.md) - dash hook\n",
+        );
+        assert_eq!(index["graph-first"].title, "Graph first");
+        assert_eq!(index["graph-first"].hook, "study the graph");
+        assert_eq!(index["graph-first"].position, 0);
+        assert_eq!(index["no-hook"].hook, "");
+        assert_eq!(index["sub"].hook, "dash hook");
+        assert_eq!(index["sub"].position, 2);
+    }
+
+    #[test]
+    fn a_memory_file_is_parsed() {
+        let text = "---\nname: ci-manual\ndescription: \"CI: manual only\"\nmetadata:\n  type: feedback\n  graph_hash: 1\n---\n\n\
+                    CI runs on dispatch. See [[Release-Plan]] and [[ci-manual]].\n\n**Why:** minutes cost.\n**How to apply:** never add push triggers.\n";
+        let entry = IndexEntry {
+            title: "CI manual".into(),
+            hook: "dispatch only".into(),
+            position: 3,
+        };
+        let file = parse_file(
+            Path::new("/m/ci-manual.md"),
+            "ci-manual",
+            text,
+            Some(&entry),
+            9,
+        )
+        .unwrap();
+        assert_eq!(file.slug, "ci-manual");
+        assert_eq!(file.kind, "feedback");
+        assert!(!file.kind_defaulted);
+        assert_eq!(file.summary, "CI: manual only");
+        assert_eq!(
+            file.body,
+            "CI runs on dispatch. See [[Release-Plan]] and [[ci-manual]]."
+        );
+        assert_eq!(file.why, "minutes cost.");
+        assert_eq!(file.how_to_apply, "never add push triggers.");
+        assert_eq!(file.links, vec!["release-plan".to_string()]);
+        assert_eq!((file.title.as_str(), file.order), ("CI manual", 3));
+
+        let plain = parse_file(Path::new("/m/x.md"), "X", "# Heading\n\nText.", None, 9).unwrap();
+        assert_eq!(plain.kind, "project");
+        assert!(plain.kind_defaulted);
+        assert_eq!(plain.summary, "Heading");
+        assert_eq!(plain.body, "# Heading\n\nText.");
+        assert_eq!(plain.order, 9);
+        let old_style = parse_file(
+            Path::new("/m/u.md"),
+            "u",
+            "---\ntype: user\n---\nbody",
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(old_style.kind, "user");
+    }
+
+    #[test]
+    fn why_is_split_only_from_a_clean_tail() {
+        assert_eq!(
+            split_why("a\n\n**Why:** b"),
+            ("a".into(), "b".into(), String::new())
+        );
+        assert_eq!(
+            split_why("a\n**How to apply:** c"),
+            ("a".into(), String::new(), "c".into())
+        );
+        let twice = "**Why:** x **Why:** y";
+        assert_eq!(split_why(twice).0, twice);
+        let reversed = "**How to apply:** c\n**Why:** b";
+        assert_eq!(split_why(reversed).0, reversed);
+    }
+
+    #[test]
+    fn a_project_name_decodes_against_the_file_system() {
+        let tmp = crate::mcp_tests::TempDir::new("decode");
+        let deep = tmp.path().join("my-app").join("sub dir");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(tmp.path().join("my")).unwrap();
+        let root = crate::mcp::canonical(tmp.path());
+        let target = root.join("my-app").join("sub dir");
+        let name = claude_slug(&target.display().to_string());
+        assert_eq!(decode(&name), Some(target));
+        assert_eq!(decode(&format!("{name}-missing")), None);
+    }
+
+    #[test]
+    fn transcripts_name_the_project_directory() {
+        let tmp = crate::mcp_tests::TempDir::new("cwd");
+        let work = crate::mcp::canonical(tmp.path()).join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let name = claude_slug(&work.display().to_string());
+        let project_dir = tmp.path().join("projects").join(&name);
+        std::fs::create_dir_all(project_dir.join("memory")).unwrap();
+        std::fs::write(
+            project_dir.join("s.jsonl"),
+            format!(
+                "not json\n{}\n",
+                json!({"type": "user", "cwd": work.display().to_string()})
+            ),
+        )
+        .unwrap();
+        assert_eq!(resolve_project_dir(&project_dir), Some(work));
+    }
+
+    #[test]
+    fn the_lock_is_exclusive() {
+        let tmp = crate::mcp_tests::TempDir::new("ilock");
+        let inner = with_lock(tmp.path(), Duration::ZERO, || {
+            with_lock(tmp.path(), Duration::from_millis(100), || ()).unwrap()
+        })
+        .unwrap();
+        assert_eq!(inner, Some(None), "a second taker waits and gives up");
+        assert_eq!(
+            with_lock(tmp.path(), Duration::ZERO, || 7).unwrap(),
+            Some(7)
+        );
+    }
+}

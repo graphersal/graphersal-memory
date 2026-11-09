@@ -95,8 +95,17 @@ pub fn log(message: &str) {
     let _ = stderr.flush();
 }
 
+/// The current time as `YYYY-MM-DDTHH:MM:SSZ`.
+pub(crate) fn now_utc() -> String {
+    utc_timestamp(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+    )
+}
+
 /// `seconds` since the epoch as `YYYY-MM-DDTHH:MM:SSZ`.
-fn utc_timestamp(seconds: u64) -> String {
+pub(crate) fn utc_timestamp(seconds: u64) -> String {
     let days = (seconds / 86400) as i64;
     let rest = seconds % 86400;
     // Civil date from days since 1970-01-01 (H. Hinnant's algorithm).
@@ -135,6 +144,8 @@ struct Daemon {
     registry: Registry,
     mcp: Arc<Mcp>,
     stores: Mutex<BTreeMap<String, Arc<StoreRuntime>>>,
+    /// The projects recorded in `projects.json` during this daemon's life.
+    projects_seen: Mutex<std::collections::BTreeSet<String>>,
     state: Mutex<State>,
     started_at: SystemTime,
     started: Instant,
@@ -201,6 +212,7 @@ pub fn run(options: DaemonOptions) -> Result<(), String> {
         registry,
         mcp: Arc::new(mcp::endpoint()),
         stores: Mutex::new(BTreeMap::new()),
+        projects_seen: Mutex::new(std::collections::BTreeSet::new()),
         state: Mutex::new(State {
             connections: 0,
             last_change: Instant::now(),
@@ -326,6 +338,20 @@ impl Daemon {
         }
         log("stopped");
         std::process::exit(0)
+    }
+
+    /// Records a project (its git remote) in `projects.json` the first time it connects in
+    /// this daemon's life.
+    fn note_project(&self, project: &str) {
+        let mut seen = self
+            .projects_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if seen.insert(project.to_string())
+            && let Err(err) = crate::projects::record(&self.options.data_dir, project)
+        {
+            log(&format!("cannot record the project {project}: {err}"));
+        }
     }
 
     /// The runtime of the store that serves `project`, opened on first use.
@@ -460,6 +486,7 @@ impl Daemon {
             json!({"ok": true, "daemon_version": self.options.version, "store": store.name()})
                 .to_string(),
         );
+        self.note_project(&handshake.project);
         let _ = reader.get_ref().set_read_timeout(None);
         let profile = match handshake.profile {
             crate::cli::Profile::Use => "use",

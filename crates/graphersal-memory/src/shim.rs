@@ -245,13 +245,9 @@ pub struct ShimOptions {
     pub harness: String,
 }
 
-/// Connects (starting the daemon if needed), hands over, then relays `input` to the daemon and
-/// the daemon's answers to `output` until the input ends and the daemon has answered.
-pub fn run(
-    options: &ShimOptions,
-    input: impl Read + Send + 'static,
-    mut output: impl Write,
-) -> Result<(), String> {
+/// Connects (starting the daemon if needed) and hands over: the connection, ready for MCP
+/// lines, and the reader of the daemon's answers.
+pub fn open(options: &ShimOptions) -> Result<(Stream, BufReader<Stream>), String> {
     let handshake = protocol::handshake_line(
         options.profile,
         &options.project,
@@ -261,12 +257,12 @@ pub fn run(
             .to_string(),
     );
     let mut attempt = 0;
-    let (stream, mut reader) = loop {
+    loop {
         attempt += 1;
         let stream = connect_or_start(&options.location)?;
         let (answer, reader) = exchange(&stream, &handshake, options.location.start_timeout)?;
         if answer["ok"] == Value::Bool(true) {
-            break (stream, reader);
+            return Ok((stream, reader));
         }
         let code = answer["error"]["code"].as_str().unwrap_or_default();
         let message = answer["error"]["message"]
@@ -278,7 +274,17 @@ pub fn run(
             continue;
         }
         return Err(format!("the daemon refused the connection: {message}"));
-    };
+    }
+}
+
+/// Connects (starting the daemon if needed), hands over, then relays `input` to the daemon and
+/// the daemon's answers to `output` until the input ends and the daemon has answered.
+pub fn run(
+    options: &ShimOptions,
+    input: impl Read + Send + 'static,
+    mut output: impl Write,
+) -> Result<(), String> {
+    let (stream, mut reader) = open(options)?;
     let mut to_daemon = stream
         .try_clone()
         .map_err(|err| format!("cannot use the daemon's socket: {err}"))?;
