@@ -82,7 +82,8 @@ pub fn resolve_run_dir(
     match platform {
         Platform::MacOs | Platform::Windows => Ok(data_dir.join("run")),
         Platform::Xdg => {
-            if let Some(base) = set("XDG_RUNTIME_DIR").filter(|b| Path::new(b).is_absolute()) {
+            // An XDG path is a Unix path: absolute means a leading `/`.
+            if let Some(base) = set("XDG_RUNTIME_DIR").filter(|b| b.starts_with('/')) {
                 return Ok(PathBuf::from(base).join("graphersal-memory"));
             }
             let home = set("HOME").ok_or_else(|| missing("HOME"))?;

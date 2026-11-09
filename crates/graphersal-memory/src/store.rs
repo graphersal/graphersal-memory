@@ -74,7 +74,9 @@ pub fn resolve_data_dir(
             Ok(PathBuf::from(base).join(APP_DIR))
         }
         Platform::Xdg => {
-            if let Some(base) = set("XDG_DATA_HOME").filter(|b| Path::new(b).is_absolute()) {
+            // XDG paths are Unix paths: absolute means a leading `/` (also when this code runs
+            // elsewhere, as the tests of every platform do).
+            if let Some(base) = set("XDG_DATA_HOME").filter(|b| b.starts_with('/')) {
                 return Ok(PathBuf::from(base).join(APP_DIR));
             }
             let home = set("HOME").ok_or_else(|| missing("HOME"))?;
