@@ -25,6 +25,14 @@ graphersal-serve = { git = "https://github.com/graphersal/graphersal", rev = "06
 # JSON-RPC messages of the MCP stream (the project binding) and the product catalog; already in
 # the tree through the engine crates.
 serde_json = "1.0"
+# The daemon's lock files (`daemon.pid`, `daemon.start.lock`): an OS advisory lock (`flock` on
+# Unix, `LockFileEx` on Windows) that the OS releases when the process ends, also on a crash.
+# Already in the tree through `graphersal` (persist: the Store's directory lock), the same
+# version; `std::fs::File::lock` would need Rust 1.89, above the MSRV.
+fd-lock = "4"
+# AF_UNIX sockets on Windows (10 1803 and later), the shim <-> daemon transport; std offers
+# them only on Unix (`std::os::unix::net`). Windows only.
+uds_windows = "1.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

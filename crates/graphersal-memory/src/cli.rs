@@ -28,8 +28,9 @@ const LONG_VERSION: &str = concat!(
         graphersal-memory keeps your agent's rules, decisions, past sessions and facts in a local \
         graph database and lets the agent search them through MCP, instead of loading a growing \
         memory file on every turn. Everything stays on your machine.\n\n\
-        PRE-RELEASE: only `mcp --no-daemon` works yet (one store served over stdio in this \
-        process). Every other command says which stage delivers it; the plan is in docs/roadmap.md.",
+        PRE-RELEASE: `mcp` (the stdio server a harness starts; it shares one background daemon \
+        with every other session), `daemon` and `status` (the daemon part) work. Every other \
+        command says which stage delivers it; the plan is in docs/roadmap.md.",
     after_help = "Start with `graphersal-memory install` (planned). \
         Docs: https://github.com/graphersal/graphersal-memory",
     propagate_version = true,
@@ -44,6 +45,11 @@ pub struct Cli {
     /// environment variable GRAPHERSAL_MEMORY_DIR overrides it too).
     #[arg(long, global = true, value_name = "DIR")]
     pub data_dir: Option<PathBuf>,
+    /// The run directory holding the daemon's socket, lock files and log (default: `run` in an
+    /// explicitly chosen data directory, else the per-user run directory; the environment
+    /// variable GRAPHERSAL_MEMORY_RUN_DIR overrides it too).
+    #[arg(long, global = true, value_name = "DIR")]
+    pub run_dir: Option<PathBuf>,
 }
 
 /// The product's commands.
@@ -86,7 +92,18 @@ pub enum Command {
         project: Option<PathBuf>,
     },
     /// Run the background daemon that owns the stores (started on demand by `mcp`).
-    Daemon,
+    Daemon {
+        /// Exit after this long without a connection (examples: 90s, 30m, 2h; default 2h; the
+        /// environment variable GRAPHERSAL_MEMORY_IDLE sets it too).
+        #[arg(long, value_name = "DURATION", value_parser = parse_idle)]
+        idle: Option<std::time::Duration>,
+        /// Run in this process (logging to stderr) instead of starting a detached daemon.
+        #[arg(long)]
+        foreground: bool,
+        /// The version the daemon reports (tests of the upgrade path).
+        #[arg(long, hide = true, value_name = "VERSION")]
+        version_as: Option<String>,
+    },
     /// Open the memory in the browser (develop mode); runs while this terminal runs.
     Ui,
     /// Measure whether the memory helps: the built-in A/B on your own data.
@@ -110,6 +127,11 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+/// Parses `--idle`.
+fn parse_idle(text: &str) -> Result<std::time::Duration, String> {
+    crate::daemon::parse_duration(text)
 }
 
 /// An AI agent harness graphersal-memory can be installed into.
@@ -286,5 +308,25 @@ mod tests {
             assert!(help.contains(name), "help lacks {name}");
         }
         assert!(help.contains("PRE-RELEASE"));
+    }
+
+    #[test]
+    fn daemon_options_parse() {
+        assert_eq!(
+            parse(&["daemon", "--idle", "90s", "--foreground"])
+                .unwrap()
+                .command,
+            Command::Daemon {
+                idle: Some(std::time::Duration::from_secs(90)),
+                foreground: true,
+                version_as: None
+            }
+        );
+        assert_eq!(
+            parse(&["daemon", "--idle", "soon"]).unwrap_err().kind(),
+            ErrorKind::ValueValidation
+        );
+        let cli = parse(&["status", "--run-dir", "/r"]).unwrap();
+        assert_eq!(cli.run_dir, Some(PathBuf::from("/r")));
     }
 }
