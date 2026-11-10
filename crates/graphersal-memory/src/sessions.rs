@@ -972,7 +972,7 @@ pub struct Estimate {
 
 /// Estimates the summaries of every finished transcript under `projects_dir` (read only: the
 /// state of `data_dir` and the transcripts; nothing is written, no model is called).
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub fn estimate(
     projects_dir: &Path,
     data_dir: &Path,
