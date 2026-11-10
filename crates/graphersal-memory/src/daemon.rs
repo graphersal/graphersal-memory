@@ -368,7 +368,7 @@ impl Daemon {
             };
             let (summarizer, problem) = crate::summaries::Summarizer::new(&self.options.data_dir);
             // A sandboxed opencode run may use the user's opencode logins (a copy).
-            let mut summarizer = summarizer.map(|summarizer| {
+            let summarizer = summarizer.map(|summarizer| {
                 // Only the database is needed: no `opencode --version`.
                 let given = crate::opencode::Detected::given(crate::opencode::Major::V2);
                 match crate::opencode::OpenCodePaths::resolve_for(
@@ -379,6 +379,14 @@ impl Daemon {
                     Err(_) => summarizer,
                 }
             });
+            // A sandboxed Codex run uses the user's Codex model settings and login (a copy).
+            let mut summarizer =
+                summarizer.map(|summarizer| {
+                    match crate::codex::CodexPaths::resolve(&|name| std::env::var(name).ok()) {
+                        Ok(paths) => summarizer.with_codex_home(paths.codex_home),
+                        Err(_) => summarizer,
+                    }
+                });
             if let Some(problem) = problem {
                 log(&format!(
                     "session summaries are off for this run: {problem}"

@@ -92,7 +92,7 @@ fn harness_not_implemented(command: &str, harness: Harness) -> String {
     };
     format!(
         "graphersal-memory {command} --harness {name}: not implemented yet (planned in stage \
-         M7: other harnesses); Claude Code and opencode are supported."
+         M7: other harnesses); Claude Code, opencode and Codex are supported."
     )
 }
 
@@ -202,6 +202,7 @@ pub fn run_cli(
             let kind = match harness {
                 Harness::ClaudeCode => crate::agents::Kind::ClaudeCode,
                 Harness::Opencode => crate::agents::Kind::OpenCode,
+                Harness::Codex => crate::agents::Kind::Codex,
                 other => {
                     let _ = writeln!(stderr, "{}", harness_not_implemented(name, *other));
                     return EXIT_NOT_IMPLEMENTED;
@@ -348,6 +349,7 @@ fn setup_with(cli: &Cli, probe: bool) -> Result<Setup, String> {
     let paths = ClaudePaths::resolve(&env)?;
     let detected = crate::opencode::detect(&env, None, probe)?;
     let opencode = crate::opencode::OpenCodePaths::resolve_for(&env, detected)?;
+    let codex = crate::codex::CodexPaths::resolve(&env)?;
     let exe =
         std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
     let mut dir_args = Vec::new();
@@ -362,6 +364,7 @@ fn setup_with(cli: &Cli, probe: bool) -> Result<Setup, String> {
     Ok(Setup {
         paths,
         opencode,
+        codex,
         search_path: None,
         data_dir,
         run_dir,
@@ -478,11 +481,18 @@ pub fn export_target(agent: &dyn crate::agents::Agent) -> String {
 
 /// What to do with an export for a harness without file memory.
 pub fn export_note(agent: &dyn crate::agents::Agent) -> String {
+    let how = match agent.kind() {
+        crate::agents::Kind::Codex => {
+            "to give the agent a file, paste it into ~/.codex/AGENTS.md or a project's AGENTS.md"
+        }
+        _ => {
+            "to give the agent a file, add its path to `instructions` in the agent's configuration"
+        }
+    };
     format!(
         "{} has no file memory: the export is plain Markdown (per project MEMORY.md and one file \
-         per memory, the global ones in {}). It is not loaded automatically; to give the agent a \
-         file, add its path to `instructions` in the agent's configuration. `graphersal-memory \
-         export --to-files --harness {}` writes it again.",
+         per memory, the global ones in {}). It is not loaded automatically; {how}. \
+         `graphersal-memory export --to-files --harness {}` writes it again.",
         agent.display_name(),
         agent.global_memory_file().display(),
         agent.id()
@@ -786,7 +796,11 @@ pub fn session_harnesses(setup: &Setup) -> Vec<crate::agents::Kind> {
     let detected: Vec<_> = setup
         .detected()
         .into_iter()
-        .filter(|kind| *kind != crate::agents::Kind::OpenCode || setup.opencode.db.is_file())
+        .filter(|kind| match kind {
+            crate::agents::Kind::OpenCode => setup.opencode.db.is_file(),
+            crate::agents::Kind::Codex => setup.codex.sessions.is_dir(),
+            crate::agents::Kind::ClaudeCode => true,
+        })
         .collect();
     if detected.is_empty() {
         vec![crate::agents::Kind::ClaudeCode]
@@ -824,10 +838,19 @@ fn session_counts(data_dir: &Path) -> Result<(usize, usize), String> {
     Ok(counts)
 }
 
-/// One estimate line for summaries through `command`: $0 for a free model of opencode Zen,
-/// else [`estimate_line`].
+/// One estimate line for summaries through `command`: $0 for a free model of opencode Zen or a
+/// local model of Codex, else [`estimate_line`].
 pub fn estimate_line_for(estimate: &sessions::Estimate, command: &[String]) -> String {
-    if crate::opencode::free_model(command) {
+    if crate::codex::local_model(command) {
+        format!(
+            "{} finished session{}, {} without a summary: $0.00 (`{}` runs a local model on this \
+             machine)",
+            estimate.sessions,
+            if estimate.sessions == 1 { "" } else { "s" },
+            estimate.pending,
+            command.join(" ")
+        )
+    } else if crate::opencode::free_model(command) {
         format!(
             "{} finished session{}, {} without a summary: $0.00 (`{}` uses a free model of \
              opencode Zen, free for a limited time; the monthly budget still applies)",
@@ -950,6 +973,9 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
     if kinds.contains(&crate::agents::Kind::OpenCode) {
         findings.extend(crate::opencode::install::doctor(setup));
     }
+    if kinds.contains(&crate::agents::Kind::Codex) {
+        findings.extend(crate::codex::install::doctor(setup));
+    }
     // Claude Code's checks end with the shared ones (settings, model, daemon, registry).
     if kinds.contains(&crate::agents::Kind::ClaudeCode) {
         findings.extend(install::doctor(setup));
@@ -1025,6 +1051,16 @@ fn run_hook(
                         .to_string())
                 }
             });
+            if harness == Harness::Codex {
+                return hook::run_codex(
+                    event,
+                    setup.codex.sessions.clone(),
+                    Some(enqueue),
+                    stdin,
+                    stdout,
+                    stderr,
+                );
+            }
             if harness == Harness::Opencode {
                 return hook::run_opencode(
                     event,
@@ -1084,6 +1120,7 @@ pub fn bench_options(
     data_dir: &Path,
     claude: ClaudePaths,
     opencode: crate::opencode::OpenCodePaths,
+    codex: crate::codex::CodexPaths,
     exe: PathBuf,
     project: String,
     request: &BenchRequest,
@@ -1099,6 +1136,7 @@ pub fn bench_options(
         project,
         claude,
         opencode,
+        codex,
         data_dir: data_dir.to_path_buf(),
         exe,
         harness_command: settings.summaries.harness_command,
@@ -1129,6 +1167,7 @@ fn run_bench(
         &data_dir,
         claude,
         crate::opencode::OpenCodePaths::resolve(&env)?,
+        crate::codex::CodexPaths::resolve(&env)?,
         mcp::canonical(&exe),
         project(request.project.as_deref())?,
         request,
@@ -1346,6 +1385,14 @@ pub fn status_text(
                 lines.push(
                     "opencode: found, not set up (`graphersal-memory install --harness \
                      opencode`)"
+                        .to_string(),
+                );
+            }
+            if kinds.contains(&crate::agents::Kind::Codex) {
+                lines.extend(crate::codex::install::status_lines(setup));
+            } else if setup.detected().contains(&crate::agents::Kind::Codex) {
+                lines.push(
+                    "Codex: found, not set up (`graphersal-memory install --harness codex`)"
                         .to_string(),
                 );
             }

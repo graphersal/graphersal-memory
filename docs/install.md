@@ -616,3 +616,195 @@ Report:
 
 Restart running Claude Code and opencode sessions to load the MCP server and the hooks and the plugin. `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` removes it.
 ```
+
+## Codex
+
+Captured on 2026-11-10 like the outputs above, with the M7c build, on a throwaway home (shown as
+`/tmp/gmc/h`; data directory `/tmp/gmc/d`, run directory `/tmp/gmc/r`, the binary's path
+shortened to `/opt/gm/graphersal-memory`) holding only `~/.codex/config.toml` (`model =
+"gpt-5.5"` and `[features] memories = true`) and a one-line `~/.codex/AGENTS.md`, so Codex was
+the one harness found and the wizard did not ask which agents. Because Codex's own memories were
+on, the wizard asked about them (with Codex's memories off, which is Codex's default, that step
+is not shown). Answers: Enter (English), `3` (built-in model, no download), Enter (switch Codex's
+memories off), `2` (no summaries), `2` (no develop server), `y` (apply).
+
+```text
+graphersal-memory install (Codex)
+A few questions; Enter takes the default. Nothing changes before the last step.
+
+Step 1 of 6 · Memory language
+  Memories are found by meaning. Keeping them in one language lets a search find a
+  memory whatever language you wrote in; or keep each memory in your own words.
+
+  1) English only  the agent stores and searches in English  (default)
+                   (it translates a query before searching)
+  2) Any language  the agent stores in the language of the conversation
+                   (and searches in it and in English)
+Choose [1]: 
+
+Step 2 of 6 · Embedding model
+  The model turns every memory into a vector, so a search finds related wording,
+  not only the same words. Downloaded once from Hugging Face; it then runs locally.
+
+  1) potion-retrieval-32M      English, ~130 MB, MIT  (default)
+  2) potion-multilingual-128M  100+ languages, ~530 MB, MIT
+  3) Built-in (no download)    works offline, but finds only shared words and spellings,
+                               not meaning; weaker search
+Choose [1]: 3
+
+Step 3 of 6 · Codex's memories
+  Codex's own memory feature is on: it generates memories from your chats and
+  loads them into sessions; with graphersal-memory both would keep the same facts
+  twice.
+  Nothing is lost: if you uninstall graphersal-memory later, every memory, including new
+  ones, is exported as readable Markdown files and Codex's memories are switched back
+  on.
+
+  1) Yes  switch it off ([features] memories = false in /tmp/gmc/h/.codex/config.toml)  (default)
+  2) No   keep it on
+Choose [1]: 
+
+Step 4 of 6 · Session summaries
+  Past sessions are indexed locally (their raw turns, no model call). Optionally each
+  finished session is summarized through your own `codex exec`
+  (decisions, corrections, outcomes, open threads). That costs model usage:
+  0 finished sessions, 0 without a summary: about $0.00 at list price (an estimate: ~4
+  characters per token, $3/$15 per million input/output tokens, plus the harness's own
+  prompt; your harness reports the real cost)
+
+  1) Yes  summarize, at most $5.00 per month
+  2) No   raw turns only (`graphersal-memory summaries enable` later)
+Choose 1-2: 2
+
+Step 5 of 6 · The develop server
+  A second MCP server with tools to inspect and reshape the memory's structure
+  (schema, saved queries, indexes). Most people do not need it; its tool
+  descriptions are paid on every agent turn.
+
+  1) Yes  register graphersal-memory-develop
+  2) No   not now (`graphersal-memory install --enable-develop` later)
+Choose 1-2: 2
+
+Step 6 of 6 · Summary
+  This is what install will do:
+
+  1. Agents
+     - Codex (one store and one daemon serve every agent chosen)
+  2. Memory language
+     - English only (stored and searched in English) (in the MCP instructions and the rule block; config.json memory.language)
+  3. Embedding model
+     - the built-in embedder hash-ngram/1 (no download; finds shared words and spellings, not meaning)
+  4. Register the MCP servers in Codex's /tmp/gmc/h/.codex/config.toml (tables mcp_servers.*)
+     - graphersal-memory (use profile): add (enabled)
+     - graphersal-memory-develop (develop profile): add (disabled)
+     - [features] memories: false (switch Codex's memories off). Nothing is lost: if you uninstall graphersal-memory later, every memory, including new ones, is exported as readable Markdown files and Codex's memories are switched back on.
+  5. Add the SessionStart and SessionEnd hooks in /tmp/gmc/h/.codex/hooks.json
+     - SessionStart: add `"/opt/gm/graphersal-memory" hook session-start --data-dir "/tmp/gmc/d" --run-dir "/tmp/gmc/r" --harness codex`
+     - SessionEnd: add `"/opt/gm/graphersal-memory" hook session-end --data-dir "/tmp/gmc/d" --run-dir "/tmp/gmc/r" --harness codex`
+     - ACTION NEEDED: Codex needs your approval for the two graphersal-memory hooks: open Codex, type `/hooks` and trust both graphersal-memory hooks (SessionStart and SessionEnd); without it the memory still works, but past sessions are indexed only after 30 minutes idle instead of at session end.
+  6. Write the managed rule block into /tmp/gmc/h/.codex/AGENTS.md
+     - append the block (your own text stays as it is)
+  7. Index past sessions (raw turns, locally, in the background)
+     - Codex: 0 sessions in /tmp/gmc/h/.codex/sessions: 0 to index, 0 still being written (indexed later)
+     - summaries: off (raw turns only; `graphersal-memory summaries enable` later)
+  8. Settings file /tmp/gmc/d/config.json
+     - write the defaults (daemon idle time 2h) and the answers
+
+  Nothing is lost: if you uninstall graphersal-memory later, every memory, including new ones, is exported as readable Markdown files and Codex's memories are switched back on.
+
+Apply these changes? [Enter = apply, n = cancel]: y
+
+Report:
+  changed /tmp/gmc/h/.codex/config.toml (backup: /tmp/gmc/d/install/backups/2026-11-10T094254Z/config.toml)
+  created /tmp/gmc/h/.codex/hooks.json
+  changed /tmp/gmc/h/.codex/AGENTS.md (backup: /tmp/gmc/d/install/backups/2026-11-10T094254Z/AGENTS.md)
+  Codex's memories: off (uninstall exports every memory as Markdown and switches them on again)
+  created /tmp/gmc/d/config.json
+  summaries run through `codex exec` when you switch them on (Codex only; the model of your Codex configuration; summaries.harness_command in config.json)
+  embedding model: the built-in hash-ngram/1 (the daemon re-embeds the memory with it in the background)
+  summaries: off (raw turns are indexed; `graphersal-memory summaries enable` switches them on)
+  past sessions: indexed at the next session start (or now: `graphersal-memory import --sessions`)
+
+Restart running Codex sessions to load the MCP server and the hooks. `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` removes it.
+
+ACTION NEEDED: Codex needs your approval for the two graphersal-memory hooks: open Codex, type `/hooks` and trust both graphersal-memory hooks (SessionStart and SessionEnd); without it the memory still works, but past sessions are indexed only after 30 minutes idle instead of at session end.
+```
+
+`~/.codex/config.toml` afterwards (the block went before the first table, `[features]`; the
+memories value was changed in place):
+
+```toml
+model = "gpt-5.5"
+
+# graphersal-memory:begin fingerprint=... (managed by `graphersal-memory install`; `graphersal-memory uninstall` removes it; an edit inside is reported as a conflict)
+[mcp_servers.graphersal-memory]
+command = "/opt/gm/graphersal-memory"
+args = ["mcp", "--profile", "use", "--data-dir", "/tmp/gmc/d", "--run-dir", "/tmp/gmc/r"]
+startup_timeout_sec = 30
+
+[mcp_servers.graphersal-memory-develop]
+command = "/opt/gm/graphersal-memory"
+args = ["mcp", "--profile", "develop", "--data-dir", "/tmp/gmc/d", "--run-dir", "/tmp/gmc/r"]
+startup_timeout_sec = 30
+enabled = false
+# graphersal-memory:end
+
+[features]
+memories = false
+```
+
+(`--data-dir` and `--run-dir` appear because this run chose its directories explicitly; with the
+defaults the arguments are just `["mcp", "--profile", "use"]`.)
+
+### `graphersal-memory status` afterwards
+
+```text
+daemon: not running (run directory /tmp/gmc/r; the next agent session starts it)
+data directory: /tmp/gmc/d
+settings: /tmp/gmc/d/config.json (daemon idle time 7200s)
+sessions: 0 indexed, 0 summarized; summaries off
+Memory:
+  memory language: English only (stored and searched in English)
+  embedding model: hash-ngram/1 (built-in, no download; finds shared words, not meaning)
+Codex (configuration /tmp/gmc/h/.codex/config.toml):
+  MCP server graphersal-memory (use): installed
+  MCP server graphersal-memory-develop: registered, disabled (`graphersal-memory install --harness codex --enable-develop` enables it)
+  hook SessionStart (/tmp/gmc/h/.codex/hooks.json): installed
+  hook SessionEnd (/tmp/gmc/h/.codex/hooks.json): installed
+  hook trust: NOT APPROVED YET
+  ACTION NEEDED: Codex needs your approval for the two graphersal-memory hooks: open Codex, type `/hooks` and trust both graphersal-memory hooks (SessionStart and SessionEnd); without it the memory still works, but past sessions are indexed only after 30 minutes idle instead of at session end.
+  rule block (/tmp/gmc/h/.codex/AGENTS.md): installed
+  Codex memories: off (switched off by install; uninstall switches them on again)
+  headless command (summaries, bench): `codex exec` by default
+  sessions: read from /tmp/gmc/h/.codex/sessions (not there yet)
+```
+
+### `graphersal-memory uninstall`
+
+One memory was saved first (through `mcp --no-daemon`, project `/tmp/gmc/proj`); answers `y`
+(export), `y` (proceed). Afterwards `~/.codex/` was byte-identical to before the install (checked
+with `diff -r`); the only new files are the export.
+
+```text
+graphersal-memory uninstall (Codex)
+
+  - export 1 memory of 1 project (0 global) into readable Markdown files under /tmp/gmc/h/graphersal-memory-export/codex (Codex has no file memory; nothing is deleted)
+  - /tmp/gmc/h/.codex/config.toml: restore the file as it was before install
+  - /tmp/gmc/h/.codex/hooks.json: delete the file (install created it)
+  - /tmp/gmc/h/.codex/AGENTS.md: restore the file as it was before install
+
+Export 1 memory of 1 project into readable Markdown files under /tmp/gmc/h/graphersal-memory-export/codex? [Y/n] y
+
+Proceed? [y/N] y
+
+Report:
+  exported 1 memory of 1 project (plus the global ones): 2 files written, 0 unchanged
+    wrote /tmp/gmc/h/graphersal-memory-export/codex/-tmp-gmc-proj/tabs-not-spaces.md
+    wrote /tmp/gmc/h/graphersal-memory-export/codex/-tmp-gmc-proj/MEMORY.md
+  Codex has no file memory: the export is plain Markdown (per project MEMORY.md and one file per memory, the global ones in /tmp/gmc/h/graphersal-memory-export/codex/global.md). It is not loaded automatically; to give the agent a file, paste it into ~/.codex/AGENTS.md or a project's AGENTS.md. `graphersal-memory export --to-files --harness codex` writes it again.
+  Codex's memories: switched on again, as before install
+  changed /tmp/gmc/h/.codex/config.toml
+  removed /tmp/gmc/h/.codex/hooks.json
+  changed /tmp/gmc/h/.codex/AGENTS.md
+  Your memories stay in /tmp/gmc/d (`uninstall --purge` deletes them).
+```

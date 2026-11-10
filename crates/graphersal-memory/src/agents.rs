@@ -1,6 +1,6 @@
 //! The harness abstraction: what `install`, `uninstall`, `import` and `export` need to know
-//! about one AI agent harness, behind one interface. Claude Code ([`ClaudeCode`]) and opencode
-//! (`crate::opencode::OpenCode`) implement it; `crate::install` asks the [`Agent`] for the
+//! about one AI agent harness, behind one interface. Claude Code ([`ClaudeCode`]), opencode
+//! (`crate::opencode::OpenCode`) and Codex (`crate::codex::Codex`) implement it; `crate::install` asks the [`Agent`] for the
 //! files it edits, the JSON keys of its MCP registrations and the names the wizard shows.
 
 use std::path::{Path, PathBuf};
@@ -17,17 +17,20 @@ pub enum Kind {
     ClaudeCode,
     /// opencode.
     OpenCode,
+    /// OpenAI Codex CLI.
+    Codex,
 }
 
 impl Kind {
     /// Every supported harness, in the order the wizard lists them.
-    pub const ALL: [Kind; 2] = [Kind::ClaudeCode, Kind::OpenCode];
+    pub const ALL: [Kind; 3] = [Kind::ClaudeCode, Kind::OpenCode, Kind::Codex];
 
     /// The id of the command line and the state files (`claude-code`, `opencode`).
     pub fn id(self) -> &'static str {
         match self {
             Kind::ClaudeCode => "claude-code",
             Kind::OpenCode => "opencode",
+            Kind::Codex => "codex",
         }
     }
 
@@ -36,6 +39,7 @@ impl Kind {
         match self {
             Kind::ClaudeCode => "Claude Code",
             Kind::OpenCode => "opencode",
+            Kind::Codex => "Codex",
         }
     }
 
@@ -49,7 +53,7 @@ impl Kind {
 pub trait Agent {
     /// Which harness this is.
     fn kind(&self) -> Kind;
-    /// The harness id of the command line (`claude-code`, `opencode`).
+    /// The harness id of the command line (`claude-code`, `opencode`, `codex`).
     fn id(&self) -> &'static str {
         self.kind().id()
     }

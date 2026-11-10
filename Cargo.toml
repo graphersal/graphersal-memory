@@ -45,6 +45,11 @@ ring = "0.17"
 # SQLite (a C file built with the C compiler `ring` already needs), so no system library is
 # required on any release platform.
 rusqlite = { version = "0.37", features = ["bundled"] }
+# Reading Codex's `config.toml` (its MCP servers, the memories switch): TOML has inline tables,
+# dotted and quoted keys and multi-line strings, which a hand-written reader would get wrong.
+# Reading only: install edits the file as text (our managed tables and one value), so every
+# other byte of the user's file is kept. No `display` (no TOML is written through it).
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 
 [profile.release]
 # One codegen unit, as the engine's own release builds use.

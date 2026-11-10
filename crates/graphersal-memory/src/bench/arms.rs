@@ -23,6 +23,14 @@
 //! not stored in the user's session database; `config/opencode/opencode.json` holds the arm's
 //! MCP servers, its permissions (everything denied but the arm's tools) and `instructions`
 //! naming `system.md`; the user's logins (`auth.json`) are copied, never changed.
+//!
+//! Codex ([`build_codex`]): the sandbox is a `CODEX_HOME` of the arm's own
+//! (`crate::codex::build_sandbox`): its `config.toml` holds the user's model settings, no hooks,
+//! no Codex memories, no history, and every built-in tool switched off (shell, unified exec,
+//! image viewing, web search, sub-agents, apps, plugins), so an arm sees nothing but its context
+//! and, for the graph arm, the read-only memory functions of a server over a FORK of the store
+//! (`enabled_tools`, approved without asking); its `AGENTS.md` is the arm's context; runs are
+//! `--ephemeral` (no rollout in the user's sessions); the user's login is copied, never changed.
 
 use std::path::{Path, PathBuf};
 
@@ -102,6 +110,37 @@ impl Sources {
                 .iter()
                 .find_map(|path| std::fs::read_to_string(path).ok())
             else {
+                continue;
+            };
+            let text = without_block(&text);
+            if !text.trim().is_empty() {
+                out.push((label.to_string(), text));
+            }
+        }
+        out
+    }
+}
+
+impl Sources {
+    /// Codex's instruction files of `project`: the global one (`AGENTS.override.md` when it
+    /// holds text, else `AGENTS.md`, in the Codex home) and the project's (the same two names
+    /// in its root), those that exist, each without graphersal-memory's managed block.
+    pub fn codex_instructions_of(
+        paths: &crate::codex::CodexPaths,
+        project: &str,
+    ) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (label, path) in [
+            (
+                "global AGENTS.md",
+                crate::codex::instruction_file(&paths.codex_home),
+            ),
+            (
+                "project AGENTS.md",
+                crate::codex::instruction_file(Path::new(project)),
+            ),
+        ] {
+            let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
             let text = without_block(&text);
@@ -438,6 +477,135 @@ pub fn tool_free_opencode(
         &dir.join("opencode"),
         &json!({"mcp": {}, "permission": crate::opencode::permissions(&[])}),
         Some(user_db),
+    )?;
+    Ok((cwd, env))
+}
+
+/// The `config.toml` of a Codex sandbox with `tables` (the graph arm's server).
+fn codex_config(user_config: &Path, tables: &str) -> String {
+    crate::codex::sandbox_config(Some(user_config), tables)
+}
+
+/// The sandbox of `arm` for Codex in `<arms_dir>/<arm>/`: `codex exec --json` with a
+/// `CODEX_HOME` of its own (`paths`: the user's Codex home, whose model settings and login are
+/// copied).
+pub fn build_codex(
+    arm: BenchArm,
+    arms_dir: &Path,
+    sources: &Sources,
+    paths: &crate::codex::CodexPaths,
+) -> Result<Sandbox, String> {
+    let dir = arms_dir.join(arm.name());
+    let cwd = dir.join("cwd");
+    std::fs::create_dir_all(&cwd)
+        .map_err(|err| format!("cannot create {}: {err}", cwd.display()))?;
+    let mut scratch = None;
+    let (tables, system, description) = match arm {
+        BenchArm::None => (
+            String::new(),
+            "# Memory\n\nYou have no memory of earlier sessions with this developer.\n".to_string(),
+            "no memory: no instruction files, no tools".to_string(),
+        ),
+        BenchArm::Files => (
+            String::new(),
+            format!(
+                "{}# Memory\n\nYour memory of this developer is the instructions above (Codex \
+                 keeps no memory files).\n",
+                instruction_section(sources)
+            ),
+            format!(
+                "file memory: {} instruction file(s) (Codex has no memory files), no tools",
+                sources.instructions.len()
+            ),
+        ),
+        BenchArm::Graph => {
+            let data = dir.join("data-store");
+            let fork = crate::store::default_store_dir(&data);
+            graphersal::persist::Store::fork_dir(
+                sources.store_dir.as_path(),
+                graphersal::persist::RecoveryTarget::Latest,
+                fork.as_path(),
+            )
+            .map_err(|err| {
+                format!(
+                    "cannot copy the memory store {} for the graph arm: {err}",
+                    sources.store_dir.display()
+                )
+            })?;
+            scratch = Some(data.clone());
+            let args = [
+                "mcp".to_string(),
+                "--no-daemon".to_string(),
+                "--data-dir".to_string(),
+                data.display().to_string(),
+                "--project".to_string(),
+                sources.project.clone(),
+            ];
+            let tools: Vec<String> = READ_FUNCTIONS.iter().map(|f| f.to_string()).collect();
+            (
+                format!(
+                    "[mcp_servers.{SERVER}]\ncommand = {}\nargs = {}\nstartup_timeout_sec = {}\n\
+                     enabled_tools = {}\ndefault_tools_approval_mode = \"approve\"\n\
+                     env = {{ {} = \"off\" }}\n",
+                    crate::tomledit::string(&sources.exe.display().to_string()),
+                    crate::tomledit::strings(&args),
+                    crate::codex::STARTUP_TIMEOUT_SECS,
+                    crate::tomledit::strings(&tools),
+                    crate::summaries::HOOK_ENV
+                ),
+                format!(
+                    "{}# Memory\n\nYour memory of this developer and every past session of this \
+                     project is kept in a graph behind your MCP tools (server {SERVER}): \
+                     memories, memory, sessions, session, recall. Look up what you need. The \
+                     memory is read-only in this task.\n",
+                    instruction_section(sources)
+                ),
+                format!(
+                    "graph memory: {} instruction file(s), the use tools {} on a fork of the \
+                     store",
+                    sources.instructions.len(),
+                    READ_FUNCTIONS.join("/")
+                ),
+            )
+        }
+        BenchArm::Current => {
+            return Err(
+                "the arm `current` (a copy of your own MCP setup) is not built yet. Use none, \
+                 files and graph."
+                    .to_string(),
+            );
+        }
+    };
+    let env = crate::codex::build_sandbox(
+        &dir.join("codex"),
+        &codex_config(&paths.config_file, &tables),
+        Some(&system),
+        Some(&paths.auth_file()),
+    )?;
+    Ok(Sandbox {
+        arm,
+        cwd,
+        args: Vec::new(),
+        description,
+        scratch,
+        env,
+    })
+}
+
+/// The Codex sandbox of the generator and the judge: no tools, no MCP servers, no context, in
+/// `<dir>/`. Returns the working directory and the environment.
+pub fn tool_free_codex(
+    dir: &Path,
+    paths: &crate::codex::CodexPaths,
+) -> Result<(PathBuf, Vec<(String, String)>), String> {
+    let cwd = dir.join("cwd");
+    std::fs::create_dir_all(&cwd)
+        .map_err(|err| format!("cannot create {}: {err}", cwd.display()))?;
+    let env = crate::codex::build_sandbox(
+        &dir.join("codex"),
+        &codex_config(&paths.config_file, ""),
+        None,
+        Some(&paths.auth_file()),
     )?;
     Ok((cwd, env))
 }

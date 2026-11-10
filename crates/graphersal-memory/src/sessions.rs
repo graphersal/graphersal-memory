@@ -1,6 +1,8 @@
 //! Indexing of past sessions: every finished Claude Code transcript
 //! (`<claude config>/projects/<project>/<session>.jsonl`, parsed by `crate::transcript`) and every
-//! finished opencode session (its database, read by `crate::opencode::sessions`) becomes a
+//! finished opencode session (its database, read by `crate::opencode::sessions`) and every
+//! finished Codex rollout (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`, read by
+//! `crate::codex::sessions`) becomes a
 //! `session` vertex with its `turn`s, and, when the user opted in, an English summary split into
 //! `fact`s (`crate::summaries`). A [`Request`] names one harness; each harness has its own state
 //! file. An opencode session is addressed like a file, as `<opencode.db>#<session id>`
@@ -253,6 +255,7 @@ pub fn units(request: &Request) -> Result<Vec<Unit>, String> {
             })
             .collect()),
         Kind::OpenCode => crate::opencode::sessions::units(&request.projects_dir),
+        Kind::Codex => Ok(crate::codex::sessions::units(&request.projects_dir)),
     }
 }
 
@@ -368,7 +371,7 @@ impl State {
 }
 
 /// A file's size and modification time (seconds since the epoch).
-fn stamp(file: &Path) -> Option<(u64, u64)> {
+pub(crate) fn stamp(file: &Path) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(file).ok()?;
     let modified = meta
         .modified()
@@ -406,16 +409,21 @@ pub fn project_of(transcript: &Transcript, file: &Path) -> Option<String> {
     Some(crate::mcp::project_key(None, &dir))
 }
 
-/// The session's id in the graph: `session:<transcript file name>` (opencode:
+/// The session's id in the graph: `session:<transcript file name>` (Codex: `session:<thread
+/// id>`; opencode:
 /// `session:<session id>`).
 pub fn session_id(file: &Path) -> String {
     format!("session:{}", unit_uuid(file))
 }
 
-/// The session's own id: the transcript's file name, or the opencode session id.
+/// The session's own id: the transcript's file name, the opencode session id, or the thread
+/// id of a Codex rollout.
 fn unit_uuid(file: &Path) -> String {
     if let Some((_, id)) = crate::opencode::sessions::split_unit(file) {
         return id;
+    }
+    if crate::codex::sessions::is_rollout(file) {
+        return crate::codex::sessions::thread_id(file);
     }
     file.file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -451,6 +459,16 @@ fn parse_file(
             Kind::OpenCode,
             crate::opencode::sessions::read(&db, &id)?,
             format!("opencode:{id}"),
+        ),
+        None if crate::codex::sessions::is_rollout(file) => (
+            Kind::Codex,
+            crate::codex::sessions::read(file)?,
+            format!(
+                "rollout:{}",
+                file.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            ),
         ),
         None => {
             let bytes = std::fs::read(file)
@@ -1730,5 +1748,202 @@ mod tests {
             &crate::config::split_command("opencode run --model opencode/big-pickle").unwrap(),
         );
         assert!(line.contains("$0.00"), "{line}");
+    }
+
+    fn codex_setup(tmp: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let work = crate::mcp::canonical(tmp).join("work");
+        std::fs::create_dir_all(work.join(".git")).unwrap();
+        let sessions = tmp.join("codex/sessions");
+        let file =
+            crate::codex::sessions::tests::write_fixture(&sessions, &work.display().to_string());
+        (sessions, work, file)
+    }
+
+    fn codex_request(sessions: &Path) -> Request {
+        Request {
+            idle: Duration::ZERO,
+            ..Request::for_harness(Kind::Codex, sessions)
+        }
+    }
+
+    #[test]
+    fn codex_rollouts_are_indexed_once_and_again_when_they_grow() {
+        let tmp = crate::mcp_tests::TempDir::new("cx-idx");
+        let data = crate::mcp_tests::TempDir::new("cx-idx-data");
+        let (sessions, work, file) = codex_setup(tmp.path());
+        let id = "019a5c1e-0000-7000-8000-000000000001";
+        let mut store = Direct::new();
+        let first = index(&codex_request(&sessions), data.path(), &mut store);
+        assert_eq!(first.problems, Vec::<String>::new());
+        assert_eq!((first.found, first.indexed, first.turns), (1, 1, 2));
+        let session = store.query(&format!(
+            "g.v(\"session:{id}\").project(\"name\", \"project\", \"harness\", \"files\", \"source\")\
+             .by(\"name\").by(\"project\").by(\"harness\").by(\"files_edited\").by(\"source\").next()"
+        ));
+        assert_eq!(session[0]["harness"], "codex");
+        assert_eq!(session[0]["project"], work.display().to_string());
+        assert_eq!(session[0]["files"], json!(["src/parser.rs"]));
+        assert_eq!(
+            session[0]["name"],
+            "Use tabs in this repository, never spaces."
+        );
+        assert!(
+            session[0]["source"]
+                .as_str()
+                .unwrap()
+                .starts_with("rollout:rollout-2026-11-09"),
+            "{session}"
+        );
+        assert!(data.path().join("sessions/codex.json").exists());
+        // Unchanged: not read again.
+        let second = index(&codex_request(&sessions), data.path(), &mut store);
+        assert_eq!((second.found, second.indexed), (1, 0));
+        // A resumed session appends to its rollout: indexed again.
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str(&format!(
+            "{}\n{}\n",
+            json!({"timestamp": "2026-11-09T11:00:00.000Z", "type": "event_msg",
+                   "payload": {"type": "user_message", "message": "And the lexer?"}}),
+            json!({"timestamp": "2026-11-09T11:00:05.000Z", "type": "event_msg",
+                   "payload": {"type": "agent_message", "message": "The lexer is fine."}})
+        ));
+        std::fs::write(&file, text).unwrap();
+        let grown = index(&codex_request(&sessions), data.path(), &mut store);
+        assert_eq!((grown.indexed, grown.turns), (1, 3), "{:?}", grown.problems);
+        // The session being written is left alone.
+        let mut active = codex_request(&sessions);
+        active.active.insert(file.clone());
+        let line = active.to_control();
+        assert_eq!(line["harness"], "codex");
+        assert_eq!(Request::from_control(&line).unwrap().harness, Kind::Codex);
+    }
+
+    /// A fake `codex`: records its arguments, `CODEX_HOME` and prompt, answers `exec --json`
+    /// with the events of one summary.
+    #[cfg(unix)]
+    fn fake_codex(dir: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = dir.join("codex-calls.log");
+        let summary = json!({"headline": "Tabs and a parser fix",
+            "summary": "The user set a tabs rule; the parser's off-by-one was fixed.",
+            "decisions": [{"decision": "Tabs, never spaces", "why": "repository style"}],
+            "corrections": [], "outcomes": ["Parser fixed"], "open_threads": []});
+        let events = [
+            json!({"type": "thread.started", "thread_id": "t"}),
+            json!({"type": "turn.started"}),
+            json!({"type": "item.completed", "item": {"id": "i", "type": "agent_message",
+                   "text": summary.to_string()}}),
+            json!({"type": "turn.completed", "usage": {"input_tokens": 900,
+                   "cached_input_tokens": 0, "output_tokens": 100, "reasoning_output_tokens": 0}}),
+        ]
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let script = bin.join("codex");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'CALL %s\\n' \"$*\" >> '{log}'\nprintf 'ENV %s %s\\n' \"$CODEX_HOME\" \"$GRAPHERSAL_MEMORY_HOOK\" >> '{log}'\ncat >> '{log}'\nprintf '\\nEND\\n' >> '{log}'\ncat <<'JSON'\n{events}\nJSON\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (script, log)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn summaries_through_codex_exec_run_in_a_sandbox_home_and_cost_nothing_locally() {
+        let tmp = crate::mcp_tests::TempDir::new("cx-sum");
+        let data = crate::mcp_tests::TempDir::new("cx-sum-data");
+        let (sessions, _, file) = codex_setup(tmp.path());
+        // Long enough for a summary.
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str(&format!(
+            "{}\n",
+            json!({"timestamp": "2026-11-09T10:02:00.000Z", "type": "event_msg", "payload": {
+                "type": "user_message", "message": "Explain the parser design in detail. ".repeat(60)}})
+        ));
+        std::fs::write(&file, text).unwrap();
+        // The user's Codex home: a model setting, a login, an MCP server of theirs.
+        let user_home = tmp.path().join("user-codex");
+        std::fs::create_dir_all(&user_home).unwrap();
+        std::fs::write(
+            user_home.join("config.toml"),
+            "model = \"openai/gpt-oss-20b\"\n\n[mcp_servers.theirs]\ncommand = \"x\"\n",
+        )
+        .unwrap();
+        std::fs::write(user_home.join("auth.json"), "{}").unwrap();
+        let (harness, log) = fake_codex(tmp.path());
+        std::fs::write(
+            crate::config::path(data.path()),
+            json!({"version": 1, "summaries": {"enabled": true,
+                "harness_command": format!("'{}' exec --oss --local-provider lmstudio", harness.display()),
+                "monthly_budget_usd": 0.5}})
+            .to_string(),
+        )
+        .unwrap();
+        let (summarizer, err) = Summarizer::new(data.path());
+        assert_eq!(err, None);
+        let mut summarizer = summarizer.map(|s| s.with_codex_home(user_home.clone()));
+        let mut store = Direct::new();
+        let report = run(
+            &codex_request(&sessions),
+            data.path(),
+            &mut store,
+            summarizer.as_mut(),
+            &mut |_| {},
+            &|| false,
+        );
+        assert_eq!(report.problems, Vec::<String>::new());
+        assert_eq!((report.indexed, report.summarized), (1, 1));
+        let recorded = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            recorded.contains(
+                "CALL exec --oss --local-provider lmstudio --json --ephemeral --skip-git-repo-check --sandbox read-only -c model_provider=\"lmstudio\""
+            ),
+            "{recorded}"
+        );
+        let sandbox = data.path().join("sessions/harness/codex/home");
+        assert!(
+            recorded.contains(&format!("ENV {} off", sandbox.display())),
+            "{recorded}"
+        );
+        assert!(
+            recorded.contains("Use tabs in this repository"),
+            "{recorded}"
+        );
+        let config =
+            crate::tomledit::parse(&std::fs::read_to_string(sandbox.join("config.toml")).unwrap())
+                .unwrap();
+        assert_eq!(config["model"], "openai/gpt-oss-20b");
+        assert!(
+            config["mcp_servers"].is_null(),
+            "the user's servers stay out"
+        );
+        assert_eq!(config["features"]["shell_tool"], false);
+        assert!(sandbox.join("auth.json").is_file());
+        let id = "019a5c1e-0000-7000-8000-000000000001";
+        assert_eq!(
+            store.query(&format!("g.v(\"session:{id}\").values(\"name\").next()")),
+            json!(["Tabs and a parser fix"])
+        );
+        let spend = summaries::Spend::load(data.path()).unwrap();
+        assert_eq!(spend.usd(&summaries::this_month()), 0.0);
+        let estimate =
+            estimate_for(Kind::Codex, &sessions, data.path(), Duration::ZERO, None).unwrap();
+        assert_eq!(estimate.sessions, 1);
+        let line = crate::commands::estimate_line_for(
+            &estimate,
+            &crate::config::split_command("codex exec --oss").unwrap(),
+        );
+        assert!(
+            line.contains("$0.00") && line.contains("local model"),
+            "{line}"
+        );
     }
 }

@@ -16,6 +16,11 @@
 //! so it only queues the indexing (its session `<opencode.db>#<id>` active at the start, ended
 //! at the end) and prints the start line, which the plugin shows as a toast.
 //!
+//! Codex's hooks (`crate::codex`) run it with `--harness codex` ([`run_codex`]): its input
+//! names the session's rollout file (`transcript_path`); Codex keeps no memory files, so it only
+//! queues the indexing (the rollout active at the start, ended at the end) and prints the start
+//! line, which Codex adds to the session's context.
+//!
 //! A hook never blocks or fails the session: the work runs on a thread with a time limit, every
 //! error becomes a note on stderr, and the exit code is always 0. With
 //! `GRAPHERSAL_MEMORY_HOOK=off` (set for the summaries' own harness runs) a hook does nothing.
@@ -299,6 +304,74 @@ pub fn run_opencode(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> u8 {
+    run_queued(
+        event,
+        move |value: &Value| opencode_request(event, &db, value["session_id"].as_str()),
+        OPENCODE_START_LINE,
+        enqueue,
+        stdin,
+        stdout,
+        stderr,
+    )
+}
+
+/// The session start line for Codex (its `SessionStart` hook adds it to the model's context).
+pub const CODEX_START_LINE: &str = "graphersal-memory: your memory is served by the MCP server \
+    graphersal-memory (tools mcp__graphersal_memory__memories, recall, memory, remember, forget; \
+    past sessions: sessions, session).";
+
+/// The indexing request of Codex's hook: every rollout under `sessions`, with the hook's own
+/// rollout (`transcript_path`) active (start) or finished (end).
+pub fn codex_request(
+    event: HookEvent,
+    sessions: &Path,
+    transcript: Option<&str>,
+) -> crate::sessions::Request {
+    let mut request = crate::sessions::Request::for_harness(crate::agents::Kind::Codex, sessions);
+    if let Some(path) = transcript
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute() && crate::codex::sessions::is_rollout(p))
+    {
+        match event {
+            HookEvent::SessionStart => request.active.insert(path),
+            HookEvent::SessionEnd => request.ended.insert(path),
+        };
+    }
+    request
+}
+
+/// `hook session-start|session-end --harness codex` (Codex's hooks, input `{"session_id",
+/// "transcript_path", "cwd", ...}`): queues the indexing within the time limit, prints the
+/// start line; never fails (exit code 0). Codex keeps no memory files, so nothing is imported.
+pub fn run_codex(
+    event: HookEvent,
+    sessions: PathBuf,
+    enqueue: Option<Enqueue>,
+    stdin: impl Read + Send + 'static,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
+    run_queued(
+        event,
+        move |value: &Value| codex_request(event, &sessions, value["transcript_path"].as_str()),
+        CODEX_START_LINE,
+        enqueue,
+        stdin,
+        stdout,
+        stderr,
+    )
+}
+
+/// A hook that only queues the indexing: `request` of the input, `start_line` at the start.
+fn run_queued(
+    event: HookEvent,
+    request: impl FnOnce(&Value) -> crate::sessions::Request + Send + 'static,
+    start_line: &str,
+    enqueue: Option<Enqueue>,
+    stdin: impl Read + Send + 'static,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
     let (done, result) = mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("hook".into())
@@ -306,7 +379,7 @@ pub fn run_opencode(
             let mut input = String::new();
             let _ = stdin.take(MAX_INPUT).read_to_string(&mut input);
             let value: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
-            let request = opencode_request(event, &db, value["session_id"].as_str());
+            let request = request(&value);
             let mut notes = Vec::new();
             if let Some(enqueue) = enqueue
                 && let Err(err) = enqueue(request)
@@ -325,7 +398,7 @@ pub fn run_opencode(
         Err(err) => vec![format!("cannot start the hook: {err}")],
     };
     if event == HookEvent::SessionStart {
-        let _ = writeln!(stdout, "{OPENCODE_START_LINE}");
+        let _ = writeln!(stdout, "{start_line}");
         let _ = stdout.flush();
     }
     for note in &notes {
@@ -513,5 +586,49 @@ mod tests {
         );
         assert_eq!(code, 0);
         assert!(String::from_utf8(err).unwrap().contains("no daemon"));
+    }
+
+    #[test]
+    fn the_codex_hook_queues_its_rollout_and_adds_one_line_at_the_start() {
+        use std::sync::{Arc, Mutex};
+        let sessions = PathBuf::from("/c/.codex/sessions");
+        let rollout = "/c/.codex/sessions/2026/11/09/rollout-2026-11-09T10-00-00-abc.jsonl";
+        for (event, lines) in [(HookEvent::SessionStart, 1), (HookEvent::SessionEnd, 0)] {
+            let seen: Arc<Mutex<Option<crate::sessions::Request>>> = Arc::default();
+            let keep = seen.clone();
+            let enqueue: Enqueue = Box::new(move |request| {
+                *keep.lock().unwrap() = Some(request);
+                Ok(())
+            });
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let input = serde_json::json!({"session_id": "abc", "transcript_path": rollout,
+                "cwd": "/w/app", "hook_event_name": "SessionStart", "model": "gpt-5.5"})
+            .to_string();
+            let code = run_codex(
+                event,
+                sessions.clone(),
+                Some(enqueue),
+                std::io::Cursor::new(input.into_bytes()),
+                &mut out,
+                &mut err,
+            );
+            assert_eq!(code, 0);
+            let out = String::from_utf8(out).unwrap();
+            assert_eq!(out.lines().count(), lines, "{out}");
+            if lines == 1 {
+                assert!(out.contains("mcp__graphersal_memory__memories"), "{out}");
+            }
+            let request = seen.lock().unwrap().clone().unwrap();
+            assert_eq!(request.harness, crate::agents::Kind::Codex);
+            assert_eq!(request.projects_dir, sessions);
+            let unit = PathBuf::from(rollout);
+            match event {
+                HookEvent::SessionStart => assert!(request.active.contains(&unit)),
+                HookEvent::SessionEnd => assert!(request.ended.contains(&unit)),
+            }
+        }
+        // No rollout named (or not a rollout): every rollout is queued, none marked.
+        let request = codex_request(HookEvent::SessionEnd, &sessions, Some("/etc/passwd"));
+        assert!(request.ended.is_empty() && request.active.is_empty());
     }
 }

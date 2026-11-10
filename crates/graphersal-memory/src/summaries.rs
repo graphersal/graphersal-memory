@@ -268,6 +268,9 @@ pub struct Summarizer {
     /// opencode's session database, whose `auth.json` beside it a sandboxed opencode run gets
     /// a copy of (the daemon sets it; `None`: no login is copied, free models still work).
     opencode_db: Option<PathBuf>,
+    /// The user's Codex home, whose model settings and login a sandboxed Codex run gets a copy
+    /// of (the daemon sets it; `None`: Codex's defaults, no login).
+    codex_home: Option<PathBuf>,
     spend: Spend,
     /// The calls this run made.
     pub calls: usize,
@@ -284,6 +287,7 @@ impl Summarizer {
                         settings: config.summaries,
                         data_dir: data_dir.to_path_buf(),
                         opencode_db: None,
+                        codex_home: None,
                         spend,
                         calls: 0,
                     }),
@@ -302,6 +306,12 @@ impl Summarizer {
         self
     }
 
+    /// Lets sandboxed Codex runs use the model settings and the login of the Codex home `dir`.
+    pub fn with_codex_home(mut self, dir: PathBuf) -> Self {
+        self.codex_home = Some(dir);
+        self
+    }
+
     /// The date before which sessions get no summary.
     pub fn since(&self) -> Option<&str> {
         self.settings.since.as_deref()
@@ -310,8 +320,9 @@ impl Summarizer {
     /// Summarizes one session with `prompt`, within the budget.
     pub fn summarize(&mut self, prompt: &str) -> Result<Summary, Refused> {
         let month = this_month();
-        // A free model of opencode Zen costs nothing; the cap still applies to what it reports.
-        let estimate = if crate::opencode::free_model(&self.settings.harness_command) {
+        // A free model of opencode Zen or a local model of Codex costs nothing; the cap still
+        // applies to what the harness reports.
+        let estimate = if crate::harness::costs_nothing(&self.settings.harness_command) {
             0.0
         } else {
             estimate_usd(prompt.chars().count())
@@ -331,6 +342,7 @@ impl Summarizer {
             &work,
             HARNESS_TIMEOUT,
             self.opencode_db.as_deref(),
+            self.codex_home.as_deref(),
         );
         // A call that ran costs money even when its answer is unusable.
         let cost = match &result {
@@ -380,19 +392,42 @@ pub fn harness_args(command: &[String]) -> Vec<String> {
 /// ...`) runs with `--format json` (2.x: and `--standalone`) in a sandbox in `work_dir` (its own configuration and data directories: no tools, no MCP
 /// servers, none of the user's plugins or rules, its session not stored in the user's
 /// database; a copy of the logins beside `opencode_db`), and its events are read as the answer.
+/// A Codex command (`codex exec ...`) runs with `--json --ephemeral --sandbox read-only` in a
+/// `CODEX_HOME` of its own in `work_dir` (the model settings of `codex_home`'s `config.toml`,
+/// a copy of its login; no MCP servers, hooks, rules or history), and its events are read as
+/// the answer.
 pub fn run_harness_with(
     command: &[String],
     prompt: &str,
     work_dir: &Path,
     timeout: Duration,
     opencode_db: Option<&Path>,
+    codex_home: Option<&Path>,
 ) -> Result<Summary, String> {
     let mut args = harness_args(command);
     if args.is_empty() {
         return Err("summaries.harness_command is empty".to_string());
     }
     let opencode = crate::opencode::is_opencode(command);
+    let codex = crate::codex::is_codex(command);
     let mut env: Vec<(String, String)> = vec![(HOOK_ENV.to_string(), "off".to_string())];
+    if codex {
+        args = crate::codex::exec_args(&args);
+        let sandbox = work_dir.join("codex");
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let config = crate::codex::sandbox_config(
+            codex_home
+                .map(|d| d.join(crate::codex::CONFIG_FILE))
+                .as_deref(),
+            "",
+        );
+        env = crate::codex::build_sandbox(
+            &sandbox,
+            &config,
+            None,
+            codex_home.map(|d| d.join("auth.json")).as_deref(),
+        )?;
+    }
     if opencode {
         args = crate::opencode::headless_args(&args);
         args.extend(["--format".to_string(), "json".to_string()]);
@@ -418,6 +453,9 @@ pub fn run_harness_with(
         })?;
     let stdout = if opencode {
         crate::opencode::normalize_run_output(&output.stdout).to_string()
+    } else if codex {
+        crate::codex::normalize_exec_output(&output.stdout, crate::codex::local_model(command))
+            .to_string()
     } else {
         output.stdout.clone()
     };

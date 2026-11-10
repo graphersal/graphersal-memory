@@ -161,6 +161,7 @@ impl Machine {
             project: PROJECT.to_string(),
             claude: self.claude(),
             opencode: crate::opencode::OpenCodePaths::of_home(self.home.path()),
+            codex: crate::codex::CodexPaths::of_home(self.home.path()),
             data_dir: self.data.path().to_path_buf(),
             exe: PathBuf::from("/opt/gm/bin/graphersal-memory"),
             harness_command: vec![
@@ -612,7 +613,8 @@ fn failed_answers_and_judgings_count_as_zero_and_are_reported() {
 fn bench_refuses_what_it_cannot_run() {
     let machine = Machine::new();
     let mut options = machine.options();
-    // opencode is supported since M7a; another harness is refused.
+    // opencode is supported since M7a, Codex since M7c with a local model only; Codex on a
+    // model without a known cost is refused (and so is any other harness).
     options.harness_command = vec!["codex".into(), "exec".into()];
     let mut out = Vec::new();
     let err = bench::run(
@@ -811,4 +813,103 @@ fn an_opencode_bench_runs_every_arm_in_its_own_sandbox_for_free() {
     let report: Value =
         serde_json::from_slice(&std::fs::read(run.join("report.json")).unwrap()).unwrap();
     assert_eq!(report["rows"].as_array().unwrap().len(), 9);
+}
+
+#[test]
+fn a_codex_bench_with_a_local_model_runs_every_arm_in_its_own_codex_home() {
+    let machine = Machine::new();
+    let paths = crate::codex::CodexPaths::of_home(machine.home.path());
+    let rollout = crate::codex::sessions::tests::write_fixture(&paths.sessions, PROJECT);
+    // A second session, so the excerpt has questions to ask about; both finished long ago.
+    let second = rollout
+        .with_file_name("rollout-2026-11-09T11-00-00-019a5c1e-0000-7000-8000-000000000002.jsonl");
+    std::fs::write(
+        &second,
+        crate::codex::sessions::tests::fixture(PROJECT).replace("000000000001", "000000000002"),
+    )
+    .unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 3600);
+    for file in [&rollout, &second] {
+        std::fs::File::options()
+            .write(true)
+            .open(file)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+    std::fs::write(paths.codex_home.join("AGENTS.md"), "# My Codex rules\n").unwrap();
+    std::fs::write(&paths.config_file, "model = \"openai/gpt-oss-20b\"\n").unwrap();
+    std::fs::write(paths.auth_file(), "{}").unwrap();
+    let before = machine.live_files();
+    let mut options = machine.options();
+    options.harness_command =
+        crate::config::split_command("codex exec --oss --local-provider lmstudio").unwrap();
+    let mut harness = DryRun::default();
+    let (code, out) = machine.run(&options, &mut harness, "");
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("runs a local model on this machine"), "{out}");
+    assert!(out.contains("about $0.00"), "{out}");
+    assert_eq!(
+        machine.live_files(),
+        before,
+        "the live files are never changed"
+    );
+    let run = machine.run_dirs().pop().unwrap();
+    assert!(!harness.calls.is_empty());
+    for call in &harness.calls {
+        assert_eq!(&call.args[..2], ["codex", "exec"]);
+        assert!(!call.args.iter().any(|a| a == "--max-budget-usd"));
+        let home = &call.env.iter().find(|(k, _)| k == "CODEX_HOME").unwrap().1;
+        assert!(Path::new(home).starts_with(&run), "{home}");
+        assert!(Path::new(home).join("auth.json").is_file());
+        let config = crate::tomledit::parse(
+            &std::fs::read_to_string(Path::new(home).join("config.toml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(config["model"], "openai/gpt-oss-20b");
+        assert_eq!(config["features"]["shell_tool"], false);
+        assert_eq!(config["features"]["hooks"], false);
+    }
+    // The graph arm: our server on a fork, only the read functions, approved without asking.
+    let home = run.join("arms/graph/codex/home");
+    let config =
+        crate::tomledit::parse(&std::fs::read_to_string(home.join("config.toml")).unwrap())
+            .unwrap();
+    let server = &config["mcp_servers"]["graphersal-memory"];
+    assert_eq!(
+        server["enabled_tools"],
+        json!(crate::bench::arms::READ_FUNCTIONS)
+    );
+    assert_eq!(server["default_tools_approval_mode"], "approve");
+    assert_eq!(server["args"][1], "--no-daemon");
+    assert!(
+        Path::new(server["args"][3].as_str().unwrap()).starts_with(&run),
+        "a fork in the run directory, never the live store"
+    );
+    let agents = std::fs::read_to_string(home.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("# My Codex rules"), "{agents}");
+    let report: Value =
+        serde_json::from_str(&std::fs::read_to_string(run.join("report.json")).unwrap()).unwrap();
+    assert!(
+        report.to_string().contains("Codex has no file memory"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_codex_bench_on_a_paid_model_is_refused() {
+    let machine = Machine::new();
+    let mut options = machine.options();
+    options.harness_command = vec!["codex".into(), "exec".into(), "-m".into(), "gpt-5.5".into()];
+    let err = bench::run(
+        &options,
+        &mut DryRun::default(),
+        &mut "".as_bytes(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("local model") && err.contains("no cost"),
+        "{err}"
+    );
 }
