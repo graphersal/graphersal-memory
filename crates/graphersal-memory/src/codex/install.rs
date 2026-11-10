@@ -84,6 +84,23 @@ pub const NOTHING_IS_LOST: &str = "Nothing is lost: if you uninstall graphersal-
     every memory, including new ones, is exported as readable Markdown files and Codex's \
     memories are switched back on.";
 
+/// How to approve our hooks in Codex (user decision 2026-11-10: the trust stays with the user,
+/// and every place that mentions the hooks says so explicitly).
+pub const HOOK_APPROVAL_HOW: &str = "open Codex, type `/hooks` and trust both \
+    graphersal-memory hooks (SessionStart and SessionEnd)";
+
+/// What happens without the approval.
+pub const HOOK_APPROVAL_WITHOUT: &str = "without it the memory still works, but past sessions \
+    are indexed only after 30 minutes idle instead of at session end";
+
+/// The visible line about the approval, for the wizard, the report, `status` and `doctor`.
+pub fn hook_approval_line() -> String {
+    format!(
+        "ACTION NEEDED: Codex needs your approval for the two graphersal-memory hooks: \
+         {HOOK_APPROVAL_HOW}; {HOOK_APPROVAL_WITHOUT}."
+    )
+}
+
 /// The block text of a memory language.
 pub fn rule_block(language: Language) -> &'static str {
     match language {
@@ -165,6 +182,53 @@ pub fn hook_group(setup: &Setup, event: &str) -> Value {
                       "timeout": timeout}]})
 }
 
+/// The keys of our server entries that belong to the user: tool approvals Codex writes when the
+/// user answers "always allow" (`tools.<tool>.approval_mode`, `codex-rs/core/src/
+/// mcp_tool_call.rs`, `persist_custom_mcp_tool_approval_with`) or sets by hand.
+const USER_KEYS: [&str; 2] = ["tools", "default_tools_approval_mode"];
+
+/// An entry without the user's keys ([`USER_KEYS`]).
+pub fn without_user_keys(entry: &Value) -> Value {
+    let mut entry = entry.clone();
+    if let Some(map) = entry.as_object_mut() {
+        for key in USER_KEYS {
+            map.remove(key);
+        }
+    }
+    entry
+}
+
+/// Whether a managed block's text, the user's keys aside, holds exactly our two servers (with
+/// the develop server in either state): a block Codex only added tool approvals to.
+fn block_is_ours(setup: &Setup, body: &str) -> bool {
+    let Ok(doc) = tomledit::parse(body) else {
+        return false;
+    };
+    let servers = doc["mcp_servers"].as_object().cloned().unwrap_or_default();
+    let develop = without_user_keys(&doc["mcp_servers"][DEVELOP_SERVER]);
+    servers.len() == 2
+        && without_user_keys(&doc["mcp_servers"][USE_SERVER]) == mcp_entry(setup, "use", true)
+        && (develop == mcp_entry(setup, "develop", true)
+            || develop == mcp_entry(setup, "develop", false))
+        && doc.as_object().is_some_and(|o| o.len() == 1)
+}
+
+/// `text` without the tables of our servers' user keys written outside the block
+/// (`[mcp_servers.graphersal-memory.tools.remember]`): left behind they would name a server
+/// without a command.
+fn remove_user_tables(text: &str) -> String {
+    let mut current = text.to_string();
+    for header in tomledit::headers(text) {
+        let ours = [USE_SERVER, DEVELOP_SERVER]
+            .iter()
+            .any(|name| header.starts_with(&format!("mcp_servers.{name}.")));
+        if ours && let Some(new) = tomledit::remove_table(&current, &header) {
+            current = new;
+        }
+    }
+    current
+}
+
 /// Whether an entry is switched on.
 fn enabled(entry: &Value) -> bool {
     entry["enabled"] != false
@@ -211,6 +275,20 @@ pub fn plan(
     let block = tomledit::find(&text).map_err(|err| format!("{}: {err}", path.display()))?;
     let mut blocked = false;
     match &block {
+        Some(found)
+            if !found.intact
+                && block_is_ours(setup, &found.body)
+                && without_user_keys(&doc["mcp_servers"][DEVELOP_SERVER])
+                    == mcp_entry(setup, "develop", develop) =>
+        {
+            // Codex added the user's tool approvals inside the block: kept as it is.
+            lines.push(
+                "graphersal-memory, graphersal-memory-develop: already registered (the block \
+                 holds your tool approvals; kept)"
+                    .to_string(),
+            );
+            blocked = true;
+        }
         Some(found) if !found.intact => {
             conflicts.push(format!(
                 "{}: the graphersal-memory block was edited by hand; kept as it is. Move your \
@@ -264,7 +342,7 @@ pub fn plan(
                 "{name} ({profile} profile): {} ({word})",
                 if existing.is_null() {
                     "add"
-                } else if *existing == mcp_entry(setup, profile, on) {
+                } else if without_user_keys(existing) == mcp_entry(setup, profile, on) {
                     "already registered"
                 } else {
                     "update"
@@ -362,11 +440,7 @@ pub fn plan(
             hook_command(setup, sub)
         ));
     }
-    lines.push(
-        "Codex runs a new hook only after you trust it: open `/hooks` in Codex once and trust \
-         both (until then sessions are indexed when unchanged for 30 minutes)"
-            .to_string(),
-    );
+    lines.push(hook_approval_line());
     steps.push(Step {
         title: format!(
             "Add the SessionStart and SessionEnd hooks in {}",
@@ -619,7 +693,7 @@ fn remove_from_config(
     let mut current = text.to_string();
     let mut changed = false;
     match block {
-        Some(found) if found.intact => {
+        Some(found) if found.intact || block_is_ours(setup, &found.body) => {
             if let Some(new) = tomledit::remove_block(&current)? {
                 current = new;
                 changed = true;
@@ -641,6 +715,11 @@ fn remove_from_config(
                 }
             }
         }
+    }
+    let without = remove_user_tables(&current);
+    if without != current && tomledit::parse(&without).is_ok() {
+        current = without;
+        changed = true;
     }
     let recorded = state
         .file(path)
@@ -751,7 +830,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
             )
         } else {
             let on = enabled(entry);
-            if *entry == mcp_entry(setup, profile, on) {
+            if without_user_keys(entry) == mcp_entry(setup, profile, on) {
                 (PartState::Installed, on)
             } else {
                 (
@@ -886,9 +965,12 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
             if inspection.hooks_trusted {
                 "recorded by Codex"
             } else {
-                "not yet: open `/hooks` in Codex and trust both hooks"
+                "NOT APPROVED YET"
             }
         ));
+        if !inspection.hooks_trusted {
+            lines.push(format!("  {}", hook_approval_line()));
+        }
     }
     lines.push(format!(
         "  rule block ({}): {}",
@@ -979,9 +1061,11 @@ pub fn doctor(setup: &Setup) -> Vec<Finding> {
             findings.push(ok("Codex: the hooks are trusted (/hooks)"));
         } else {
             findings.push(problem(
-                "Codex: the hooks are not trusted yet, so Codex does not run them",
-                "open `/hooks` in Codex and trust the two graphersal-memory hooks (sessions are \
-                 still indexed once unchanged for 30 minutes)",
+                format!(
+                    "Codex: the two graphersal-memory hooks are not approved yet, so Codex does \
+                     not run them ({HOOK_APPROVAL_WITHOUT})"
+                ),
+                HOOK_APPROVAL_HOW,
             ));
         }
     }

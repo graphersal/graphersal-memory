@@ -2227,11 +2227,7 @@ pub fn install(
     if answers.harnesses.contains(&Kind::Codex)
         && !crate::codex::install::inspect(setup).hooks_trusted
     {
-        let _ = writeln!(
-            out,
-            "Codex runs the new hooks only after you trust them: open `/hooks` in Codex once and \
-             trust the two graphersal-memory hooks."
-        );
+        let _ = writeln!(out, "\n{}", crate::codex::install::hook_approval_line());
     }
     Ok(if plan.conflicts.is_empty() && failures == 0 {
         0

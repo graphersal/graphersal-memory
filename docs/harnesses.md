@@ -326,7 +326,13 @@ point into that tag.
   ([`codex-mcp/src/mcp/mod.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/codex-mcp/src/mcp/mod.rs),
   `qualified_mcp_tool_name_prefix`): ours are `mcp__graphersal_memory__memories`, and so on. A
   tool marked read-only by its server (ours: `memories`, `memory`, `recall`, `sessions`,
-  `session`) runs without asking; `remember` and `forget` ask the first time, as in Claude Code
+  `session`) runs without asking; `remember` and `forget` ask for your approval the first time,
+  as in Claude Code (install leaves Codex's default as it is, user decision 2026-11-10). To allow
+  them for good, answer Codex's question with the option that always allows the tool: Codex then
+  writes `[mcp_servers.graphersal-memory.tools.remember]` `approval_mode = "approve"` into
+  `config.toml` (`persist_custom_mcp_tool_approval_with` in the same file). graphersal-memory
+  keeps such approvals (inside or outside its managed block; they are not a conflict) and removes
+  them with its servers at uninstall, so no server entry without a command is left behind
   ([`core/src/mcp_tool_call.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/core/src/mcp_tool_call.rs),
   `requires_mcp_tool_approval`).
 - **Rules**: Codex loads one global instruction file, the first non-empty of
@@ -344,12 +350,14 @@ point into that tag.
   session's rollout file (`transcript_path`); plain stdout of `SessionStart` becomes model
   context; `SessionEnd` may run at most 3 seconds
   ([`hooks/src/events/session_end.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/hooks/src/events/session_end.rs)).
-  **Codex runs a hook you did not review only after you trust it**: open `/hooks` in Codex once
-  and trust the two graphersal-memory hooks (Codex records the trust in `config.toml`,
+  **Codex needs your approval for the two hooks.** Open Codex, type `/hooks` and trust both
+  graphersal-memory hooks (SessionStart and SessionEnd); Codex records the trust in `config.toml`
+  (
   [`hooks/src/engine/discovery.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/hooks/src/engine/discovery.rs)).
-  install does not trust its own hooks for you: that is your security decision. Until then,
-  sessions are still indexed once a rollout is unchanged for 30 minutes; `status` and `doctor`
-  say whether the trust is recorded.
+  install does not approve its own hooks for you: that is your security decision (user decision
+  2026-11-10). Without the approval the memory works as usual, but past sessions are indexed
+  only after 30 minutes idle instead of at session end. install's plan and report, `status` and
+  `doctor` show an `ACTION NEEDED` line until the approval is recorded.
 - **Sessions**: one JSON Lines rollout file per session,
   `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread id>.jsonl`
   ([`rollout/src/recorder.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/rollout/src/recorder.rs)),
@@ -401,8 +409,8 @@ With Codex installed alone, install sets `summaries.harness_command` to `codex e
 exec ...` command works, for example `codex exec --oss --local-provider lmstudio` for LM Studio
 on `localhost:1234` with its default model `openai/gpt-oss-20b`,
 [`lmstudio/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/lmstudio/src/lib.rs)).
-Every run gets `--json --ephemeral --skip-git-repo-check --sandbox read-only` and the prompt on
-stdin, in a `CODEX_HOME` of its own in the data directory: its `config.toml` has your model
+Every run gets `--json --ephemeral --skip-git-repo-check --sandbox read-only` (with `--oss
+--local-provider X` also `-c model_provider="X"`, see the smoke run) and the prompt on stdin, in a `CODEX_HOME` of its own in the data directory: its `config.toml` has your model
 settings (`model`, `model_provider`, `model_reasoning_effort`, `oss_provider`,
 `model_providers` copied from yours), `approval_policy = "never"`, no hooks, no Codex memories, no
 history, no project instruction files and every built-in tool switched off (shell, unified exec,
@@ -416,6 +424,30 @@ runs through Codex only with a local model (`--oss`) and refuses otherwise. Its 
 none (no context), files (your Codex instruction files, `AGENTS.md`; Codex has no memory files),
 graph (the read functions of a server over a fork of the store, `enabled_tools`, approved without
 asking), each with its own `CODEX_HOME` and no built-in tools.
+
+### Smoke run (2026-11-10)
+
+Codex 0.167.0 in a temporary npm prefix, a throwaway home, LM Studio with
+`qwen2.5-coder-14b-instruct` (`codex exec --oss --local-provider lmstudio -m
+qwen2.5-coder-14b-instruct`):
+
+- `codex mcp list` showed both servers (develop `disabled`); `codex exec --strict-config`
+  accepted the configuration install wrote.
+- Every `codex exec` session started our MCP server (the daemon logged a `use` connection per
+  session), but the model wrote the tool call as JSON text instead of calling the tool, in all
+  three tries with increasingly explicit prompts: a limitation of that model with Codex's tool
+  format, not of graphersal-memory. `remember` and `memories` through Codex with a local model
+  are therefore not shown yet (a stronger local model, such as `openai/gpt-oss-20b`, or an OpenAI
+  model is the next try).
+- `--oss --local-provider lmstudio -m <model>` alone failed with "This chat uses lmstudio, but
+  your current provider is openai": headless runs now add `-c model_provider="<provider>"`.
+- The four rollouts were indexed through the session end hook's command (the hooks themselves
+  were not approved in this run): 4 sessions, their turns searchable with `recall`.
+- One summary through `codex exec` with the local model: headline, decisions with why ("Releases
+  go out on Fridays"), outcomes; cost $0.00.
+- `uninstall --harness codex --yes` deleted the three files install had created; only Codex's own
+  runtime files stayed in `~/.codex`. (The export itself is shown in
+  [install.md](install.md#codex); this store had no memories.)
 
 ## Without a terminal (later)
 

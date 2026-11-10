@@ -204,6 +204,24 @@ pub fn remove_table(text: &str, header: &str) -> Option<String> {
     start.map(|s| text[..s].to_string())
 }
 
+/// The headers (`a.b.c` of `[a.b.c]`) of the tables written as header lines in `text`.
+pub fn headers(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('[') && !line.starts_with("[["))
+        .map(|line| {
+            line.split('#')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .to_string()
+        })
+        .collect()
+}
+
 /// A TOML basic string.
 pub fn string(text: &str) -> String {
     Value::from(text).to_string()

@@ -613,7 +613,8 @@ fn failed_answers_and_judgings_count_as_zero_and_are_reported() {
 fn bench_refuses_what_it_cannot_run() {
     let machine = Machine::new();
     let mut options = machine.options();
-    // opencode is supported since M7a; another harness is refused.
+    // opencode is supported since M7a, Codex since M7c with a local model only; Codex on a
+    // model without a known cost is refused (and so is any other harness).
     options.harness_command = vec!["codex".into(), "exec".into()];
     let mut out = Vec::new();
     let err = bench::run(

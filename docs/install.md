@@ -701,7 +701,7 @@ Step 6 of 6 · Summary
   5. Add the SessionStart and SessionEnd hooks in /tmp/gmc/h/.codex/hooks.json
      - SessionStart: add `"/opt/gm/graphersal-memory" hook session-start --data-dir "/tmp/gmc/d" --run-dir "/tmp/gmc/r" --harness codex`
      - SessionEnd: add `"/opt/gm/graphersal-memory" hook session-end --data-dir "/tmp/gmc/d" --run-dir "/tmp/gmc/r" --harness codex`
-     - Codex runs a new hook only after you trust it: open `/hooks` in Codex once and trust both (until then sessions are indexed when unchanged for 30 minutes)
+     - ACTION NEEDED: Codex needs your approval for the two graphersal-memory hooks: open Codex, type `/hooks` and trust both graphersal-memory hooks (SessionStart and SessionEnd); without it the memory still works, but past sessions are indexed only after 30 minutes idle instead of at session end.
   6. Write the managed rule block into /tmp/gmc/h/.codex/AGENTS.md
      - append the block (your own text stays as it is)
   7. Index past sessions (raw turns, locally, in the background)
@@ -726,7 +726,8 @@ Report:
   past sessions: indexed at the next session start (or now: `graphersal-memory import --sessions`)
 
 Restart running Codex sessions to load the MCP server and the hooks. `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` removes it.
-Codex runs the new hooks only after you trust them: open `/hooks` in Codex once and trust the two graphersal-memory hooks.
+
+ACTION NEEDED: Codex needs your approval for the two graphersal-memory hooks: open Codex, type `/hooks` and trust both graphersal-memory hooks (SessionStart and SessionEnd); without it the memory still works, but past sessions are indexed only after 30 minutes idle instead of at session end.
 ```
 
 `~/.codex/config.toml` afterwards (the block went before the first table, `[features]`; the
@@ -770,7 +771,8 @@ Codex (configuration /tmp/gmc/h/.codex/config.toml):
   MCP server graphersal-memory-develop: registered, disabled (`graphersal-memory install --harness codex --enable-develop` enables it)
   hook SessionStart (/tmp/gmc/h/.codex/hooks.json): installed
   hook SessionEnd (/tmp/gmc/h/.codex/hooks.json): installed
-  hook trust: not yet: open `/hooks` in Codex and trust both hooks
+  hook trust: NOT APPROVED YET
+  ACTION NEEDED: Codex needs your approval for the two graphersal-memory hooks: open Codex, type `/hooks` and trust both graphersal-memory hooks (SessionStart and SessionEnd); without it the memory still works, but past sessions are indexed only after 30 minutes idle instead of at session end.
   rule block (/tmp/gmc/h/.codex/AGENTS.md): installed
   Codex memories: off (switched off by install; uninstall switches them on again)
   headless command (summaries, bench): `codex exec` by default

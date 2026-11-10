@@ -317,7 +317,33 @@ pub fn exec_args(command: &[String]) -> Vec<String> {
     {
         args.extend(["--sandbox".to_string(), "read-only".to_string()]);
     }
+    // `--oss --local-provider X` alone left 0.167.0 on the `openai` provider in the smoke run
+    // ("This chat uses lmstudio, but your current provider is openai"): name it explicitly.
+    if let Some(provider) = local_provider(command)
+        && !args.iter().any(|arg| arg.starts_with("model_provider="))
+    {
+        args.extend([
+            "-c".to_string(),
+            format!("model_provider={}", crate::tomledit::string(&provider)),
+        ]);
+    }
     args
+}
+
+/// The provider of `--local-provider X` (or `--local-provider=X`) in a `--oss` command.
+pub fn local_provider(command: &[String]) -> Option<String> {
+    if !local_model(command) {
+        return None;
+    }
+    command
+        .windows(2)
+        .find(|pair| pair[0] == "--local-provider")
+        .map(|pair| pair[1].clone())
+        .or_else(|| {
+            command
+                .iter()
+                .find_map(|arg| arg.strip_prefix("--local-provider=").map(str::to_string))
+        })
 }
 
 /// A JSON value as a TOML value (inline tables for objects; `None` for null).
@@ -542,6 +568,10 @@ mod tests {
             "codex exec --oss --local-provider lmstudio"
         )));
         assert!(!local_model(&words("codex exec -m gpt-5.5")));
+        assert_eq!(
+            exec_args(&words("codex exec --oss --local-provider lmstudio"))[10..],
+            words("-c model_provider=\"lmstudio\"")[..]
+        );
         assert_eq!(
             exec_args(&words("codex exec --oss")),
             words("codex exec --oss --json --ephemeral --skip-git-repo-check --sandbox read-only")

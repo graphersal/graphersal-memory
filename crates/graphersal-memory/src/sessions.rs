@@ -1904,7 +1904,7 @@ mod tests {
         let recorded = std::fs::read_to_string(&log).unwrap();
         assert!(
             recorded.contains(
-                "CALL exec --oss --local-provider lmstudio --json --ephemeral --skip-git-repo-check --sandbox read-only"
+                "CALL exec --oss --local-provider lmstudio --json --ephemeral --skip-git-repo-check --sandbox read-only -c model_provider=\"lmstudio\""
             ),
             "{recorded}"
         );

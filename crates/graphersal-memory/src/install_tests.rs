@@ -1967,8 +1967,16 @@ fn codex_install_then_uninstall_leaves_existing_files_byte_identical() {
         "no Claude Code wording: {out}"
     );
     assert!(
-        out.contains("/hooks"),
-        "the report says how to trust the hooks: {out}"
+        out.contains(
+            "ACTION NEEDED: Codex needs your approval for the two graphersal-memory hooks"
+        ) && out.contains("type `/hooks`")
+            && out.contains("30 minutes idle"),
+        "the report says explicitly how to approve the hooks: {out}"
+    );
+    assert!(
+        crate::codex::install::status_lines(&setup)
+            .iter()
+            .any(|l| l.contains("ACTION NEEDED")),
     );
     let text = read(&setup.codex.config_file);
     assert!(
@@ -2040,7 +2048,9 @@ fn codex_install_then_uninstall_leaves_existing_files_byte_identical() {
     assert!(
         crate::codex::install::doctor(&setup)
             .iter()
-            .any(|f| f.problem && f.text.contains("not trusted")),
+            .any(|f| f.problem
+                && f.text.contains("not approved yet")
+                && f.fix.as_deref().is_some_and(|fix| fix.contains("`/hooks`"))),
     );
 
     // Idempotent.
@@ -2220,4 +2230,52 @@ fn codex_is_detected_by_its_home_and_exported_as_markdown() {
         home.path().join("graphersal-memory-export/codex/global.md")
     );
     assert!(crate::commands::export_note(agent.as_ref()).contains("AGENTS.md"));
+}
+
+#[test]
+fn codex_tool_approvals_the_user_gave_are_kept_and_cleaned_up_with_our_servers() {
+    for inside in [false, true] {
+        let home = TempDir::new("cx-appr-home");
+        let data = TempDir::new("cx-appr-data");
+        let dir = home.path().join(".codex");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), "model = \"o3\"\n").unwrap();
+        let setup = setup_in(home.path(), data.path());
+        let memory = Memory::open(data.path());
+        let (code, out) = run_install(&setup, &memory, codex_only());
+        assert_eq!(code, 0, "{out}");
+        // "Always allow" in Codex: a tools table of our server, outside or inside the block.
+        let approval =
+            "\n[mcp_servers.graphersal-memory.tools.remember]\napproval_mode = \"approve\"\n";
+        let text = read(&setup.codex.config_file);
+        let edited = if inside {
+            text.replacen(
+                "\n[mcp_servers.graphersal-memory-develop]",
+                &format!("{approval}\n[mcp_servers.graphersal-memory-develop]"),
+                1,
+            )
+        } else {
+            format!("{text}{approval}")
+        };
+        assert_ne!(edited, text);
+        std::fs::write(&setup.codex.config_file, &edited).unwrap();
+        let inspection = crate::codex::install::inspect(&setup);
+        assert_eq!(inspection.use_server, crate::install::PartState::Installed);
+        let (code, out) = run_install(&setup, &memory, codex_only());
+        assert_eq!(code, 0, "inside: {inside}: {out}");
+        assert_eq!(
+            read(&setup.codex.config_file),
+            edited,
+            "the approval is kept"
+        );
+        let (code, out) = run_uninstall(&setup, codex_uninstall());
+        assert_eq!(code, 0, "inside: {inside}: {out}");
+        let left = read(&setup.codex.config_file);
+        assert_eq!(
+            crate::tomledit::parse(&left).unwrap(),
+            json!({"model": "o3"}),
+            "inside: {inside}: {left}"
+        );
+        memory.close();
+    }
 }
