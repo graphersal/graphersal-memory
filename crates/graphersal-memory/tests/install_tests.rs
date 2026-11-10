@@ -4,20 +4,20 @@
 //! installed `claude` binary read the registration (skipped when `claude` is not installed),
 //! with its home pointed at the temporary directory too.
 //!
-//! Unix only, like the daemon tests (they stop processes with `kill` and talk to the socket with
-//! `std::os::unix::net`).
+//! Every platform (the socket and process helpers are in `support`).
 
-#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+
+mod support;
+use support::{UnixStream, alive, kill};
 
 const BIN: &str = env!("CARGO_BIN_EXE_graphersal-memory");
 
@@ -59,6 +59,7 @@ impl Env {
             .env("HOME", self.home())
             .env("TMPDIR", std::env::temp_dir())
             .current_dir(&self.root);
+        support::platform_env(command, &self.home(), &self.root);
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -136,23 +137,10 @@ impl Drop for Env {
             while alive(pid) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            let _ = Command::new("kill")
-                .arg("-9")
-                .arg(pid.to_string())
-                .stderr(Stdio::null())
-                .status();
+            kill(pid);
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
-}
-
-fn alive(pid: u64) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 fn text(output: &Output) -> String {
@@ -172,7 +160,7 @@ fn fixture(env: &Env) -> PathBuf {
         "[remote \"origin\"]\n\turl = https://user:secret@example.org/me/work.git\n",
     )
     .unwrap();
-    let project = std::fs::canonicalize(&project).unwrap();
+    let project = support::canonical(&project);
     let name: String = project
         .display()
         .to_string()
@@ -244,7 +232,9 @@ fn install_import_status_doctor_hook_uninstall_and_purge() {
     let entry = &config["mcpServers"]["graphersal-memory"];
     assert_eq!(
         entry["command"],
-        std::fs::canonicalize(BIN).unwrap().display().to_string()
+        support::canonical(std::path::Path::new(BIN))
+            .display()
+            .to_string()
     );
     assert_eq!(entry["args"][0], "mcp");
     assert!(
@@ -355,7 +345,14 @@ fn a_hook_without_anything_installed_never_fails() {
 fn claude() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join("claude"))
+        // Windows: the native binary only (npm's `claude` there is a shell script).
+        .map(|dir| {
+            dir.join(if cfg!(windows) {
+                "claude.exe"
+            } else {
+                "claude"
+            })
+        })
         .find(|candidate| candidate.is_file())
 }
 
@@ -541,7 +538,12 @@ fn cursor_install_hooks_status_and_uninstall_through_the_binary() {
     // Cursor's sessionStart input (cursor.com/docs/hooks) with a transcript in its home.
     let transcript = env
         .home()
-        .join(".cursor/projects/w/agent-transcripts/c1/c1.jsonl");
+        .join(".cursor")
+        .join("projects")
+        .join("w")
+        .join("agent-transcripts")
+        .join("c1")
+        .join("c1.jsonl");
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     std::fs::write(
         &transcript,
