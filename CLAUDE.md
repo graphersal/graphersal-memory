@@ -174,7 +174,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/protocol.rs`: the shim <-> daemon handshake and control lines, refusal codes, version
     order (the protocol is internal; bump `PROTOCOL` on an incompatible change);
   - `src/shim.rs`: `connect_or_start` (start lock, stale socket only after a failed connect AND a
-    free `daemon.pid`, detached spawn, timeout naming the log), the handshake with retries on
+    free `daemon.pid`, detached spawn, timeout naming the log; on Windows the spawning process's
+    standard handles are made non-inheritable first, `keep_std_handles_from_children`, the one
+    `unsafe` of the crate), the handshake with retries on
     `restarting`/`stopping`, then a byte relay; `control` (status/stop);
   - `src/daemon.rs`: the daemon: pid lock, socket, one thread per connection, routing by the
     handshake to a `StoreRuntime` (the default store opened at the start, beside the first
@@ -213,21 +215,31 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/install_tests.rs`: install/uninstall/import/status/doctor/hooks on temporary homes with
     the store served in the test process (byte-identical round trips, idempotence, dry run,
     conflicts, structural uninstall, develop on/off, import of a fixture memory directory).
-  - `tests/daemon_tests.rs`: the real binary as shims and daemon (Unix only): shared daemon,
+  - `tests/support/mod.rs`: what the end-to-end tests share across platforms (the socket type,
+    `alive`/`kill` through `kill` or `tasklist`/`taskkill`, `canonical` without `\\?\`, the
+    Windows variables a cleared environment keeps).
+  - `tests/daemon_tests.rs`: the real binary as shims and daemon (every platform; the permission
+    test Unix only): shared daemon,
     parallel calls, idle exit, stale socket, killed daemon, start race, handshake errors, upgrade
     and drain, `daemon`/`status`, permissions. Each test has its own temporary data/run/home
     directories (`GRAPHERSAL_MEMORY_DIR`, `GRAPHERSAL_MEMORY_RUN_DIR`, short
     `GRAPHERSAL_MEMORY_IDLE`) and stops (or kills) every daemon it started.
   - `tests/install_tests.rs`: the real binary's install/status/doctor/hook/uninstall/purge on a
-    temporary home (environment cleared, Unix only), the settings file's idle time, and the
+    temporary home (environment cleared; every platform), the settings file's idle time, and the
     installed `claude` binary reading the registration (`claude mcp get`, its HOME pointed at
     the temporary home; skipped when `claude` is missing).
   - `tests/sessions_tests.rs`: the real binary's hooks, `import --sessions` and `summaries` on a
     temporary home with fixture transcripts (their time set a day back) and a fake `claude`
-    shell script that records its calls; asserts zero calls without consent.
+    shell script that records its calls; asserts zero calls without consent (Unix only: the
+    fake harnesses are shell scripts, as in the summaries tests of `src/sessions.rs`).
   - `tests/bench_tests.rs`: the real binary's `bench` with a fake `claude` on `PATH` that records
     its calls (dry run: zero calls; a run through the harness: the flags of every call, the live
-    store and the sources unchanged, the spend in the report).
+    store and the sources unchanged, the spend in the report; Unix only, shell-script fakes).
+- Windows: paths a harness recorded are text of maybe another platform
+  (`transcript::is_windows_path`, `join_text`, `relative_file`: either separator, no case); the
+  home directory is `store::home_dir` (`USERPROFILE` first on Windows); a Unix-style fixture
+  path in a unit test goes through `mcp_tests::abs` (a leading `/` is not absolute on Windows);
+  build compared paths with `Path::join`, never `join("a/b")`.
 - `install.rs` holds Claude Code and the shared wizard; each other harness has its own
   `<harness>/install.rs`.
 
