@@ -110,8 +110,9 @@ or `GRAPHERSAL_MEMORY_DIR` gets `<data dir>/run`, so each data directory has a d
   language rule of the `use` server's instructions and of the rule block; the daemon reads it for
   every new connection. `embedding.model` (a Hugging Face repository, or `hash-ngram/1` for the
   built-in embedder) is the model the daemon makes every store use; without it a store keeps the
-  embedder it has. A missing file means the defaults; keys this version does not know are
-  ignored, and `doctor` names them.
+  embedder it has. `store.checkpoint_after` and `store.keep_history` set the store maintenance
+  (below). A missing file means the defaults; keys this version does not know are ignored, and
+  `doctor` names them.
 - **The embedding model.** Every memory, session, turn and fact has a vector (`emb`) the search
   compares, kept in step with its text by a vector rule of the schema. The built-in
   `hash-ngram/1` compares character n-grams: it finds shared words and spellings, not meaning.
@@ -145,6 +146,65 @@ or `GRAPHERSAL_MEMORY_DIR` gets `<data dir>/run`, so each data directory has a d
   under NDA, for handing a project to a team, or for an experiment. Your global memory is copied
   into it one way. Every MCP connection goes to exactly one store, and nothing references across
   stores.
+- **Checkpoints.** A store is a snapshot plus the write-ahead log (WAL) of every commit after
+  it; opening the store replays that WAL. The engine writes a new snapshot by itself once the WAL
+  since the last one passes `store.checkpoint_after` in `config.json` (default `"16MiB"`; a size
+  or a number of bytes; `0` = never automatically). The engine's own default, 256 MiB, is more
+  than a memory store may ever write, so without this every start would replay the whole
+  history. A checkpoint is merged from the last snapshot and the WAL after it, in the background
+  (measured: 220 ms for the 5,000-turn store below, commits go on meanwhile). The embedding model
+  is a blob the snapshots reference: it is stored once, never copied per snapshot.
+- **History kept.** Old snapshots and WAL stay until they are pruned (the engine never deletes
+  implicitly). The daemon prunes what is older than `store.keep_history` (default 30 days; a
+  number of days, a duration such as `"12h"`, or `"forever"`/`0` for never): it checks each open
+  store once a day and after each new snapshot, prunes up to the newest snapshot that is older
+  than the kept window (so every moment of the window can still be recovered), and logs what it
+  removed. The engine always keeps the last two snapshots and the WAL between them (the donors a
+  repair rebuilds damaged data from) and verifies every kept snapshot before it deletes anything.
+  A prune never stops a session. The bench copies the live store while the daemon serves it; the
+  copy holds `stores/<name>.copy.lock`, and a prune that finds it held skips and tries again at
+  the next check. `stores/<name>.maintenance.json` records the last check and prune.
+- **`status` and `doctor`.** `status` shows each store's size on disk (snapshots, WAL, models),
+  the WAL since the last snapshot (while the daemon runs: only the open store knows it), the last
+  snapshot and prune, and the history kept. `doctor` reports a problem when the WAL since the
+  last snapshot is more than four times `store.checkpoint_after` (checkpoints are not happening)
+  or the last automatic checkpoint failed.
+- **Start time.** Measured on 2026-11-10 (Apple Silicon laptop under other load, release build of
+  this repository at M8, engine 0.6.0; median of 3 starts each; synthetic stores generated
+  through the product's own paths in temporary directories: `import --sessions` of 100 Claude
+  Code transcripts with 100 records each = 5,000 turns, plus 300 memories through `remember`). The
+  time is from starting the shim (`graphersal-memory mcp`, which starts the daemon) to the answer;
+  "open" is the engine's own figure for opening the store, which includes loading the embedding
+  model the schema names; "replayed" is the WAL commits replayed at the open.
+
+  | Store | Model | open (replayed) | `initialize` | first `memories` | first `recall` | next `recall` |
+  |---|---|---|---|---|---|---|
+  | empty | built-in `hash-ngram/1` | 19 ms (14) | 0.08 s | 0.08 s | 0.08 s | 1 ms |
+  | empty | potion-retrieval-32M (125 MiB) | 448 ms (17) | 0.50 s | 0.50 s | 0.50 s | 1 ms |
+  | empty | potion-multilingual-128M (506 MiB) | 1.71 s (17) | 1.76 s | 1.76 s | 1.76 s | 1 ms |
+  | 5,000 turns + 300 memories, no checkpoint (WAL 16 MiB) | built-in | 63 ms (614) | 0.12 s | 0.12 s | 0.21 s | 85 ms |
+  | same, no checkpoint (WAL 29 MiB) | retrieval-32M | 500 ms (618) | 0.55 s | 0.56 s | 0.56 s | 1 ms |
+  | same, no checkpoint (WAL 24 MiB) | multilingual-128M | 1.82 s (618) | 1.87 s | 1.87 s | 1.87 s | 1 ms |
+  | same, after the checkpoint | retrieval-32M | 442 ms (0) | 0.46 s | 0.46 s | 0.46 s | 1 ms |
+  | same, after the checkpoint | multilingual-128M | 1.72 s (0) | 1.74 s | 1.74 s | 1.74 s | 1 ms |
+  | same, the daemon already running | retrieval-32M | (open) | 0.04 s | 0.04 s | 0.04 s | |
+  | same, the daemon already running | multilingual-128M | (open) | 0.04 s | 0.04 s | 0.04 s | |
+
+  What this says: the model load is most of a cold start (about 0.43 s for retrieval-32M and
+  1.7 s for multilingual-128M); replaying 600 commits and 16-29 MiB of WAL costs 40-100 ms, so
+  the 16 MiB checkpoint threshold bounds the replay at about that; the first query embedding
+  costs nothing noticeable once the model is loaded. A cold start happens once per daemon life
+  (it stays up for `daemon.idle`, two hours by default). Caveats: one machine, a busy one; the
+  synthetic turns are random words of realistic length, not real conversations.
+- **When the model loads.** The engine loads the model a store's schema names while it opens the
+  store (so a store whose model cannot load is refused at the open, not at the first search),
+  and every MCP call, also one that needs no vectors, needs the open store. So the daemon opens
+  the default store as soon as it starts, beside the first handshake: a session whose daemon a
+  hook (or `graphersal-memory daemon`) started a moment earlier finds the store open, and a call
+  that arrives while it opens waits for it and then answers from the complete store (never a
+  partial answer). Answering calls that need no vectors before the model is loaded would need an
+  engine option to load schema models at the first embedding instead of at the open, which
+  engine 0.6.0 does not have.
 - Background work (backups, checkpoints, session indexing, summaries, imports) runs off the thread
   that answers the agent, so a long job never makes a memory lookup wait. The daemon ticks each
   store's scheduled jobs and runs them on worker threads of their own; the session indexing runs

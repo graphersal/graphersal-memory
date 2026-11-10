@@ -31,6 +31,9 @@ mod install_tests;
 mod ipc;
 mod jsonedit;
 mod language;
+mod maintenance;
+#[cfg(test)]
+mod maintenance_tests;
 mod mcp;
 #[cfg(test)]
 mod mcp_tests;

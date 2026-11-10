@@ -17,6 +17,12 @@
 //! spend per calendar month (UTC); `since` (optional, a date such as `2026-11-01`) leaves older
 //! sessions without a summary.
 //!
+//! `store.checkpoint_after` (a size such as `"16MiB"` or a number of bytes; default 16 MiB,
+//! `0` = only by hand) is the WAL volume after which the engine writes a checkpoint, so a daemon
+//! start never replays more than about that; `store.keep_history` (days as a number, a duration
+//! such as `"30d"`, or `"forever"`; default 30 days, `0` = forever) is how far back the daemon
+//! keeps the store's history (older snapshots and WAL are pruned, `crate::maintenance`).
+//!
 //! A missing file means the defaults; `install` writes one with the defaults when there is none,
 //! so its shape is visible. Precedence for every setting: the command-line flag, then the
 //! environment variable, then this file, then the built-in default. Unknown keys are kept and
@@ -34,7 +40,7 @@ pub const CONFIG_FILE: &str = "config.json";
 const FORMAT: u64 = 1;
 
 /// The keys this version knows, as dotted paths.
-const KNOWN: [&str; 12] = [
+const KNOWN: [&str; 15] = [
     "version",
     "memory",
     "memory.language",
@@ -47,6 +53,9 @@ const KNOWN: [&str; 12] = [
     "summaries.harness_command",
     "summaries.monthly_budget_usd",
     "summaries.since",
+    "store",
+    "store.checkpoint_after",
+    "store.keep_history",
 ];
 
 /// The default harness command of the summaries.
@@ -137,6 +146,10 @@ pub struct Config {
     pub model: Option<String>,
     /// The session summaries settings.
     pub summaries: Summaries,
+    /// `store.checkpoint_after` in bytes, when the file sets it.
+    pub checkpoint_after: Option<u64>,
+    /// `store.keep_history`, when the file sets it: `Some(None)` keeps everything.
+    pub keep_history: Option<Option<Duration>>,
     /// Keys this version does not know (dotted paths).
     pub unknown: Vec<String>,
 }
@@ -220,6 +233,19 @@ impl Config {
                 );
             }
         }
+        if let Some(store) = object.get("store") {
+            let store = store.as_object().ok_or("'store' must be an object")?;
+            if let Some(size) = store.get("checkpoint_after") {
+                config.checkpoint_after = Some(parse_size(size).map_err(|err| {
+                    format!("store.checkpoint_after: {err} (examples: \"16MiB\", 16777216, 0)")
+                })?);
+            }
+            if let Some(keep) = store.get("keep_history") {
+                config.keep_history = Some(parse_keep(keep).map_err(|err| {
+                    format!("store.keep_history: {err} (examples: 30, \"30d\", \"forever\")")
+                })?);
+            }
+        }
         let mut unknown = Vec::new();
         collect_unknown(&value, "", &mut unknown);
         config.unknown = unknown;
@@ -241,6 +267,61 @@ impl Config {
         });
         format!("{}\n", crate::jsonedit::render(&value, Some("  "), 0))
     }
+}
+
+/// A size: a whole number of bytes, or a string of a number and a unit (`B`, `KB`/`MB`/`GB`
+/// in powers of 1000, `KiB`/`MiB`/`GiB` in powers of 1024).
+pub fn parse_size(value: &Value) -> Result<u64, String> {
+    if let Some(bytes) = value.as_u64() {
+        return Ok(bytes);
+    }
+    let text = value
+        .as_str()
+        .ok_or("expected a number of bytes or a size such as \"16MiB\"")?
+        .trim();
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let number: f64 = number
+        .parse()
+        .map_err(|_| format!("'{text}' does not start with a number"))?;
+    let factor: f64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "kb" => 1e3,
+        "mb" => 1e6,
+        "gb" => 1e9,
+        "kib" | "k" => 1024.0,
+        "mib" | "m" => 1024.0 * 1024.0,
+        "gib" | "g" => 1024.0 * 1024.0 * 1024.0,
+        other => return Err(format!("unknown unit '{other}' in '{text}'")),
+    };
+    let bytes = number * factor;
+    if !bytes.is_finite() || bytes < 0.0 || bytes > u64::MAX as f64 {
+        return Err(format!("'{text}' is out of range"));
+    }
+    Ok(bytes.round() as u64)
+}
+
+/// How long the history is kept: a number of days, a duration such as `"30d"`, or `"forever"`
+/// (also `0`); `None` keeps everything.
+pub fn parse_keep(value: &Value) -> Result<Option<Duration>, String> {
+    if let Some(days) = value.as_u64() {
+        return Ok((days > 0).then(|| Duration::from_secs(days.saturating_mul(86_400))));
+    }
+    let text = value
+        .as_str()
+        .ok_or("expected a number of days, a duration or \"forever\"")?
+        .trim();
+    if text == "forever" {
+        return Ok(None);
+    }
+    // A bare number is days here, as the number form is (not the seconds of a duration).
+    if let Ok(days) = text.parse::<u64>() {
+        return parse_keep(&Value::from(days));
+    }
+    let keep = crate::daemon::parse_duration(text)?;
+    Ok((!keep.is_zero()).then_some(keep))
 }
 
 fn parse_summaries(value: &Value) -> Result<Summaries, String> {
@@ -496,6 +577,66 @@ mod tests {
         assert!(
             Config::parse(br#"{"version": 1, "embedding": {"model": "hash-ngram/1"}}"#).is_ok()
         );
+    }
+
+    #[test]
+    fn store_maintenance_settings_parse() {
+        let config = Config::parse(Config::default_text().as_bytes()).unwrap();
+        assert_eq!(config.checkpoint_after, None);
+        assert_eq!(config.keep_history, None);
+        let day = Duration::from_secs(86_400);
+        for (text, size, keep) in [
+            (
+                r#"{"checkpoint_after": "16MiB", "keep_history": 30}"#,
+                16 << 20,
+                Some(day * 30),
+            ),
+            (
+                r#"{"checkpoint_after": 1000, "keep_history": "7d"}"#,
+                1000,
+                Some(day * 7),
+            ),
+            (
+                r#"{"checkpoint_after": "2 MB", "keep_history": "12h"}"#,
+                2_000_000,
+                Some(day / 2),
+            ),
+            (
+                r#"{"checkpoint_after": "512KiB", "keep_history": "45"}"#,
+                512 << 10,
+                Some(day * 45),
+            ),
+            (
+                r#"{"checkpoint_after": 0, "keep_history": "forever"}"#,
+                0,
+                None,
+            ),
+            (
+                r#"{"checkpoint_after": "1.5GiB", "keep_history": 0}"#,
+                3 << 29,
+                None,
+            ),
+        ] {
+            let file = format!(r#"{{"version": 1, "store": {text}}}"#);
+            let config = Config::parse(file.as_bytes()).unwrap();
+            assert_eq!(config.checkpoint_after, Some(size), "{text}");
+            assert_eq!(config.keep_history, Some(keep), "{text}");
+            assert!(config.unknown.is_empty(), "{:?}", config.unknown);
+        }
+        for bad in [
+            r#"{"version": 1, "store": []}"#,
+            r#"{"version": 1, "store": {"checkpoint_after": "lots"}}"#,
+            r#"{"version": 1, "store": {"checkpoint_after": "16 parsecs"}}"#,
+            r#"{"version": 1, "store": {"checkpoint_after": -1}}"#,
+            r#"{"version": 1, "store": {"keep_history": "a while"}}"#,
+            r#"{"version": 1, "store": {"keep_history": -3}}"#,
+            r#"{"version": 1, "store": {"keep_history": true}}"#,
+        ] {
+            let err = Config::parse(bad.as_bytes()).unwrap_err();
+            assert!(err.contains("store"), "{bad}: {err}");
+        }
+        let config = Config::parse(br#"{"version": 1, "store": {"keep": 1}}"#).unwrap();
+        assert_eq!(config.unknown, vec!["store.keep".to_string()]);
     }
 
     #[test]
