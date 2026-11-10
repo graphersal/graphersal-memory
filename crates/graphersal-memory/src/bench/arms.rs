@@ -80,28 +80,24 @@ impl Sources {
 }
 
 impl Sources {
-    /// opencode's instruction files of `project`: the global `AGENTS.md` (else Claude Code's
-    /// `~/.claude/CLAUDE.md`, as opencode falls back to it) and the project's `AGENTS.md` (else
-    /// its `CLAUDE.md`), those that exist, each without graphersal-memory's managed block.
+    /// opencode's instruction files of `project`: the global `AGENTS.md` and the project's
+    /// `AGENTS.md` (1.x falls back to Claude Code's `~/.claude/CLAUDE.md` and the project's
+    /// `CLAUDE.md`; 2.x has no such fallback), those that exist, each without
+    /// graphersal-memory's managed block.
     pub fn opencode_instructions_of(
         paths: &crate::opencode::OpenCodePaths,
         project: &str,
     ) -> Vec<(String, String)> {
         let root = Path::new(project);
         let mut out = Vec::new();
-        for (label, candidates) in [
-            (
-                "global AGENTS.md",
-                vec![
-                    paths.config_dir.join("AGENTS.md"),
-                    paths.home.join(".claude").join("CLAUDE.md"),
-                ],
-            ),
-            (
-                "project AGENTS.md",
-                vec![root.join("AGENTS.md"), root.join("CLAUDE.md")],
-            ),
-        ] {
+        let fallback = paths.major() == crate::opencode::Major::V1;
+        let mut global = vec![paths.config_dir.join("AGENTS.md")];
+        let mut local = vec![root.join("AGENTS.md")];
+        if fallback {
+            global.push(paths.home.join(".claude").join("CLAUDE.md"));
+            local.push(root.join("CLAUDE.md"));
+        }
+        for (label, candidates) in [("global AGENTS.md", global), ("project AGENTS.md", local)] {
             let Some(text) = candidates
                 .iter()
                 .find_map(|path| std::fs::read_to_string(path).ok())
@@ -476,5 +472,32 @@ mod tests {
         let out = without_block(&text);
         assert_eq!(out, "# Mine\n\nkeep this\nafter\n");
         assert_eq!(without_block("plain\n"), "plain\n");
+    }
+
+    #[test]
+    fn only_opencode_1x_falls_back_to_claude_md() {
+        use crate::opencode::{Major, OpenCodePaths};
+        let home = crate::mcp_tests::TempDir::new("arms-oc");
+        let project = home.path().join("work");
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(home.path().join(".claude/CLAUDE.md"), "claude rules\n").unwrap();
+        std::fs::write(project.join("AGENTS.md"), "project rules\n").unwrap();
+        let project = project.display().to_string();
+        let v1 = OpenCodePaths::of_home_for(home.path(), Major::V1);
+        let labels =
+            |found: Vec<(String, String)>| found.into_iter().map(|(l, _)| l).collect::<Vec<_>>();
+        assert_eq!(
+            labels(Sources::opencode_instructions_of(&v1, &project)),
+            vec!["global AGENTS.md", "project AGENTS.md"]
+        );
+        let v2 = OpenCodePaths::of_home_for(home.path(), Major::V2);
+        assert_eq!(
+            Sources::opencode_instructions_of(&v2, &project),
+            vec![(
+                "project AGENTS.md".to_string(),
+                "project rules\n".to_string()
+            )]
+        );
     }
 }

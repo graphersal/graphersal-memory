@@ -2,7 +2,8 @@
 
 > Pre-release: Claude Code is supported by `install`, `uninstall`, `status`, `doctor` and
 > `import` (stage M3), the indexing of its past sessions with opt-in summaries (stage M4) and the
-> A/B `bench` (stage M5); opencode by all of them since stage M7a. Both can be installed at once
+> A/B `bench` (stage M5); opencode 1.x by all of them since stage M7a, opencode 2.x since M7b.
+> Both harnesses can be installed at once
 > and share one store and one daemon. The other harnesses are targets, listed with what each one
 > needs.
 
@@ -13,7 +14,7 @@ transcripts, and whether it has hooks.
 | Harness | Status | MCP registration | Rules exported to | Past sessions from | Hooks |
 |---|---|---|---|---|---|
 | Claude Code | install, import, hooks, rule block (M3); past sessions, opt-in summaries (M4); bench (M5) | a member of `mcpServers` in `~/.claude.json` (user scope), edited in place with a backup | a marked block in `~/.claude/CLAUDE.md` | local transcripts (`~/.claude/projects/`) | SessionStart / SessionEnd |
-| opencode (1.x) | install, rule file, session plugin, past sessions, opt-in summaries, bench (M7a) | members of `mcp` in `~/.config/opencode/opencode.json(c)` (JSONC kept), edited in place with a backup | a rules file of our own, listed in `instructions` | its SQLite database (`~/.local/share/opencode/opencode.db`), read-only | a plugin file: `session.created`, and shutdown (`dispose`) |
+| opencode 1.x and 2.x | install, rule file, session plugin, past sessions, opt-in summaries, bench (M7a: 1.x; M7b: 2.x) | 1.x: members of `mcp`, 2.x: members of `mcp.servers`, in `~/.config/opencode/opencode.json(c)` (JSONC kept), edited in place with a backup | a rules file of our own, listed in `instructions` | its SQLite database (`~/.local/share/opencode/opencode.db`, both lines' tables), read-only | one plugin file for both lines: a session's start, and shutdown |
 | OpenAI Codex CLI | planned (M7) | its MCP config | `AGENTS.md` (to be checked) | its local store (format to be checked) | to be checked |
 | Cursor | planned (M7) | its MCP config | Cursor rules (to be checked) | its local store (format to be checked) | to be checked |
 
@@ -157,48 +158,112 @@ context in a file). See [Measuring it](ab-testing.md) for the method.
 
 ## opencode
 
-Verified against opencode 1.x (source of v1.19.5, github.com/anomalyco/opencode, formerly
-sst/opencode; smoke-tested with 1.18.35). OpenCode 2 is a rewrite with other paths and is not
-supported yet.
+Both release lines are supported: opencode 1.x (verified against the source of v1.19.5,
+github.com/anomalyco/opencode, formerly sst/opencode; smoke-tested with 1.18.35) and opencode 2.x
+(verified against the source of v2.2.4; smoke-tested with 2.2.4). OpenCode 2 is largely a
+rewrite, but it keeps the configuration directory, the plugin directory, `instructions` and the
+session database file; what differs is listed below and handled by graphersal-memory.
+
+### Which line is installed
+
+`install`, `uninstall`, `status` and `doctor` ask `opencode --version` (the `opencode` on your
+`PATH`, else `~/.opencode/bin/opencode`, where opencode's install script puts it). opencode
+creates its directories even for `--version`, so it is asked with a home and XDG directories of
+its own in a temporary directory, which is removed afterwards. Without the binary, opencode's
+database says it: 2.x's tables mean 2.x has run (it upgrades the file in place), 1.x's tables
+alone mean 1.x. With neither, the current line (2.x) is assumed. `status` and `doctor` show the
+result and where it came from (`version: opencode 2.x (2.2.4, from `.../opencode --version`)`).
+The hooks do not ask: they only need the database.
+
+### What differs between 1.x and 2.x
+
+| | opencode 1.x | opencode 2.x |
+|---|---|---|
+| configuration files read in `~/.config/opencode/` | `config.json`, `opencode.json`, `opencode.jsonc` ([v1.19.5 `config/config.ts`](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/config/config.ts)) | `opencode.json`, `opencode.jsonc` only; `$OPENCODE_CONFIG_DIR` replaces the directory ([v2.2.4 `config/discovery.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/core/src/config/discovery.ts), [`util/src/global.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/util/src/global.ts)) |
+| a local MCP server | `mcp.<name>`: `{"type": "local", "command": [...], "enabled": true}` | `mcp.servers.<name>`: `{"type": "local", "command": [...], "disabled": false}` ([`schema/src/mcp.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/schema/src/mcp.ts)); the 1.x shape is still read as a legacy entry ([`config/normalize.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/core/src/config/normalize.ts), `normalizeMcp`) |
+| MCP tools | direct tools named `<server>_<tool>` | the same names ([`tool/mcp.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/core/src/tool/mcp.ts)), but by default reachable only as JavaScript inside its `execute` tool ("Code Mode", [`codemode/instructions.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/core/src/codemode/instructions.ts)) unless the server sets `"codemode": false` |
+| rules | the first of `~/.config/opencode/AGENTS.md` and `~/.claude/CLAUDE.md`, plus every file in `instructions` | `~/.config/opencode/AGENTS.md` and the project's `AGENTS.md` files (no `CLAUDE.md` fallback), plus every file in `instructions` ([`config/plugin/instruction.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/core/src/config/plugin/instruction.ts)) |
+| plugins | every `{plugin,plugins}/*.{js,ts}` of the configuration directory; a function export, or a default export with `server` | the same directories ([`plugin/source-directory.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/core/src/plugin/source-directory.ts)); a default export with `id` and `setup(ctx)` ([`plugin/module.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/core/src/plugin/module.ts), [Promise plugin API](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/plugin/src/README.md)) |
+| session events a plugin sees | `session.created`; `dispose` at shutdown; a TUI toast | `ctx.event.subscribe`: `session.created` (not seen for a session `opencode run` creates), `session.execution.started` per prompt; the cleanup `setup` returns; no toast for server plugins |
+| sessions | tables `session`, `message`, `part` in `opencode.db` | tables `session_v2`, `session_message`, `session_part` in the same file ([`session/sql.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/core/src/session/sql.ts)); an upgrade copies every 1.x session with its id and keeps the 1.x rows ([`database/v1-migration.bun.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/core/src/database/v1-migration.bun.ts)) |
+| headless run | `opencode run --model <provider/model> --format json` | the same flags and the same JSON event lines (`text`, `step_finish` with `cost` and `tokens`, `error`; [`cli/src/run/noninteractive.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/cli/src/run/noninteractive.ts)), but `run` talks to a shared background server unless given `--standalone` ([`services/server-connection.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/cli/src/services/server-connection.ts)) |
+| logins | `~/.local/share/opencode/auth.json` | imported from `auth.json` into the database once ([migration `import_legacy_credentials`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/core/src/database/migration/20260805200742_import_legacy_credentials.ts)); new logins live in the database only |
+| memory feature of its own | none | none |
+| free models | `opencode/big-pickle`, `opencode/*-free` | the same; `big-pickle` is still the first preferred free model ([`model.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/core/src/model.ts)) |
 
 ### Where opencode keeps things
 
 - **Configuration**: `$XDG_CONFIG_HOME/opencode/`, else `~/.config/opencode/` (also on Windows,
-  under the home directory). opencode merges `config.json`, `opencode.json` and
-  `opencode.jsonc` from it; all are JSONC (comments, trailing commas). Install edits the first
-  that exists (`opencode.jsonc`, `opencode.json`, `config.json`) as text, keeping every comment,
-  or creates `opencode.json` with only its `$schema`.
-- **Rules**: opencode loads the first of `~/.config/opencode/AGENTS.md` and
-  `~/.claude/CLAUDE.md` that exists, plus every file listed in `instructions`. Creating
-  `AGENTS.md` would make opencode stop loading a Claude Code user's `CLAUDE.md` without a word,
-  so install never touches `AGENTS.md`: the managed block goes into a file of its own,
-  `~/.config/opencode/graphersal-memory.md`, listed in `instructions`.
-- **Session start and end**: opencode has no hooks in its configuration, but it auto-loads every
-  `plugins/*.js` (and `plugin/`) file of the configuration directory. Install writes
-  `plugins/graphersal-memory.js`, which starts `graphersal-memory hook session-start --harness
-  opencode` (detached) on `session.created` and `session-end` for the sessions it saw when
-  opencode shuts down (opencode has no session-end event; `dispose` is the nearest). The start
-  hook's line is shown as a toast (`client.tui.showToast`): opencode has no status line a plugin
-  can set. opencode has no file memory, so nothing is imported.
+  under the home directory; 2.x: `$OPENCODE_CONFIG_DIR` when set). All files are JSONC
+  (comments, trailing commas). Install edits the first of the line's files that exists (1.x:
+  `opencode.jsonc`, `opencode.json`, `config.json`; 2.x: `opencode.jsonc`, `opencode.json`) as
+  text, keeping every comment, or creates `opencode.json` with only its `$schema`.
+- **Rules**: both lines load every file listed in `instructions`. 1.x loads the first of
+  `~/.config/opencode/AGENTS.md` and `~/.claude/CLAUDE.md` that exists, so creating `AGENTS.md`
+  would make it stop loading a Claude Code user's `CLAUDE.md` without a word. Install therefore
+  never touches `AGENTS.md`: the managed block goes into a file of its own,
+  `~/.config/opencode/graphersal-memory.md`, listed in `instructions`. 2.x has no `CLAUDE.md`
+  fallback, but the same file and the same entry work there, so nothing changes with the line
+  (user decision, 2026-11-10).
+- **Session start and end**: opencode has no hooks in its configuration, but both lines
+  auto-load every `plugins/*.js` (and `plugin/`) file of the configuration directory. Install
+  writes `plugins/graphersal-memory.js`, one file for both lines: its default export carries
+  1.x's `server` and 2.x's `setup` (each line ignores the other's member), so it keeps working
+  when opencode is upgraded. It starts `graphersal-memory hook session-start --harness opencode`
+  (detached) when a session starts (1.x: `session.created`; 2.x: the session's first
+  `session.execution.started`) and `session-end` for the sessions it saw when opencode shuts down
+  (1.x `dispose`, 2.x the plugin's cleanup; neither line has a session-end event, and 2.x's
+  background server may keep running between your sessions, so a session also counts as finished
+  after 30 unchanged minutes). On 1.x the start hook's line is shown as a toast
+  (`client.tui.showToast`); 2.x has no toast for server plugins, so it is not shown there. opencode
+  has no file memory, so nothing is imported.
 - **Sessions**: a SQLite database (`$XDG_DATA_HOME/opencode/opencode.db`, default
-  `~/.local/share/opencode/`; `OPENCODE_DB` when set), tables `session`, `message` and `part`.
-  It is opened read-only; sub-agent sessions (`parent_id`) are left out; a session is finished
-  when unchanged for 30 minutes or when the plugin's end hook names it.
-- **Memory**: opencode has no memory feature of its own, so there is nothing to switch off and no
-  such wizard step.
+  `~/.local/share/opencode/`; `OPENCODE_DB` when set). It is opened read-only. 1.x keeps its
+  sessions in the tables `session`, `message` and `part`; 2.x in `session_v2`, `session_message`
+  and `session_part` of the same file. When 2.x upgrades a 1.x database it copies every session
+  with its id and keeps the 1.x rows, so graphersal-memory reads both and takes each session
+  once: from 2.x's tables when 2.x changed it after the copy, else from 1.x's (a session that was
+  only copied is therefore not indexed or summarized again). Sub-agent sessions (`parent_id`) are
+  left out; a session is finished when unchanged for 30 minutes or when the plugin's end hook
+  names it. 2.x release builds use `opencode.db`; its other channels (beta, dev builds) keep
+  their own `opencode-<channel>.db`, which is not read.
+- **Memory**: neither line has a memory feature of its own, so there is nothing to switch off and
+  no such wizard step.
 
 ### What `install` writes
 
 | File | What | How it is recognised |
 |---|---|---|
-| `~/.config/opencode/opencode.json` (or the `.jsonc`/`config.json` there) | `mcp.graphersal-memory`: `{"type": "local", "command": ["<this binary>", "mcp", "--profile", "use"], "enabled": true}` | a command whose program is `graphersal-memory` with `mcp` first |
-| the same | `mcp.graphersal-memory-develop` with `--profile develop` and `"enabled": false` (opencode has a switched-off state; `--enable-develop` sets `true`, `uninstall --disable-develop` sets `false` again) | the same |
+| `~/.config/opencode/opencode.json` (or the `.jsonc` there; 1.x also `config.json`) | 1.x: `mcp.graphersal-memory`: `{"type": "local", "command": ["<this binary>", "mcp", "--profile", "use"], "enabled": true}`; 2.x: `mcp.servers.graphersal-memory`: `{"type": "local", "command": [...], "disabled": false, "codemode": false}` | a command whose program is `graphersal-memory` with `mcp` first |
+| the same | `graphersal-memory-develop` with `--profile develop`, switched off (1.x `"enabled": false`, 2.x `"disabled": true`; `--enable-develop` switches it on, `uninstall --disable-develop` off again) | the same |
 | the same | the rules file's path as one element of `instructions` | its path |
 | `~/.config/opencode/graphersal-memory.md` | the managed rule block (fingerprinted begin line; a hand edit is a conflict) | the marker lines |
-| `~/.config/opencode/plugins/graphersal-memory.js` | the session plugin | its first line |
+| `~/.config/opencode/plugins/graphersal-memory.js` | the session plugin (both lines) | its first line |
+
+On 2.x the entries set `"codemode": false`: without it, 2.x would let the agent reach the memory
+tools only by writing JavaScript inside its `execute` tool. With it they stay direct tools named
+`graphersal-memory_<function>`, as on 1.x and as the rule block names them, so a memory search
+before an answer is one plain call.
 
 Backups, the state (`<data dir>/install/opencode.json`), the byte-identical `uninstall` of an
-untouched file and the structural removal from a changed one work as for Claude Code.
+untouched file and the structural removal from a changed one work as for Claude Code. Uninstall
+removes our entries in either shape from every configuration file that holds them.
+
+### Upgrading opencode from 1.x to 2.x
+
+graphersal-memory keeps working right after the upgrade: 2.x still reads the 1.x shape of our
+MCP entries, and the plugin file serves both lines. Two things are in the wrong place or shape,
+though, and `doctor` reports them as outdated, naming the fix:
+
+- entries install wrote into `config.json`, which 2.x no longer reads (the memory tools are then
+  missing in 2.x);
+- entries in the 1.x shape (`mcp.graphersal-memory`), which 2.x reads only as legacy
+  configuration.
+
+Run `graphersal-memory install` again: it removes our parts from `config.json` (the rest of the
+file stays) and from `mcp.<name>`, and writes them as `mcp.servers.<name>` into `opencode.json`
+(or `opencode.jsonc`). A later `uninstall` still gives every file back as it was before the first
+install.
 
 ### `uninstall` and the export
 
@@ -208,27 +273,36 @@ memory into readable Markdown files under `~/graphersal-memory-export/opencode/`
 nothing is deleted) and prints the path. The export is **not** loaded into opencode
 automatically: listing it in `instructions` would load every memory into every session (the
 growing context graphersal-memory exists to avoid) and would change opencode's configuration
-after the uninstall that promises to give it back unchanged. The report says how to list a file
-yourself. `graphersal-memory export --to-files --harness opencode` writes the same export at any
-time.
+after the uninstall that promises to give it back unchanged (user decision, 2026-11-10, for both
+lines). The report says how to list a file yourself. `graphersal-memory export --to-files
+--harness opencode` writes the same export at any time.
 
 ### Summaries and `bench` through `opencode run`
 
 With opencode installed alone, install sets `summaries.harness_command` to `opencode run --model
 opencode/big-pickle`, a model of opencode Zen that is free for a limited time and needs no login
 (any `opencode run ...` command works). Every run gets `--format json` (one JSON event per line;
-cost and tokens from the `step_finish` events) and runs in a sandbox of its own:
-`XDG_CONFIG_HOME` and `XDG_DATA_HOME` point into the data directory, so none of your
-configuration, plugins, rules or MCP servers are loaded and the run is not stored in your session
-database; `OPENCODE_DISABLE_PROJECT_CONFIG=1`, `OPENCODE_DISABLE_CLAUDE_CODE=1`,
-`OPENCODE_DISABLE_AUTOUPDATE=1`; every permission is denied (the bench's graph arm allows only the
-read functions `graphersal-memory_memories`, `_memory`, `_sessions`, `_session`, `_recall`); a copy
-of your `auth.json` (your provider logins) is put into the sandbox, the original is never changed.
-With a free model the estimates say $0.00; the monthly budget and the bench budget still stop at
-what opencode reports. The bench arms for opencode: none (no context, no tools), files (your
-opencode instruction files, `AGENTS.md` or the `CLAUDE.md` it falls back to: opencode has no
-memory files), graph (the use tools on a fork of the store). opencode has no per-call cost cap
-like `--max-budget-usd`; the run stops when its spend reaches the budget.
+cost and tokens from the `step_finish` events, the same on both lines) and, on 2.x,
+`--standalone` (asked from the program with `--version`): 2.x's `run` otherwise connects to its
+shared background server, which has your configuration and your session database. Every run is
+in a sandbox of its own: `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` point into the
+data directory, so none of your configuration, plugins, rules or MCP servers are loaded and the
+run is not stored in your session database; `OPENCODE_DISABLE_PROJECT_CONFIG=1`,
+`OPENCODE_DISABLE_CLAUDE_CODE=1`, `OPENCODE_DISABLE_AUTOUPDATE=1`; every permission is denied
+(the bench's graph arm allows only the read functions `graphersal-memory_memories`, `_memory`,
+`_sessions`, `_session`, `_recall`; denying everything also switches 2.x's Code Mode off there);
+a copy of your `auth.json` (your provider logins) is put into the sandbox, the original is never
+changed. 2.x imports that file into the sandbox's new database, but logins you made in 2.x itself
+are kept only in your 2.x database (2.x no longer writes `auth.json`) and are not copied yet: on
+2.x, the summaries and the bench can use a free model or a provider whose login came from 1.x
+(an open point). With a free model the estimates say $0.00; the monthly budget and the bench
+budget still stop at what opencode reports. opencode Zen limits free use: in the 2.x smoke run
+the free model refused further calls after a handful of runs within a day ("Free usage limit
+reached"); such a summary is reported as failed and tried again at a later indexing run (at most
+2 attempts until the session changes). The bench arms for opencode: none (no context, no tools),
+files (your opencode instruction files: `AGENTS.md`, and on 1.x the `CLAUDE.md` it falls back
+to; opencode has no memory files), graph (the use tools on a fork of the store). opencode has no
+per-call cost cap like `--max-budget-usd`; the run stops when its spend reaches the budget.
 
 ## Without a terminal (later)
 

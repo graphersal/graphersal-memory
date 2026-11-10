@@ -369,7 +369,12 @@ impl Daemon {
             let (summarizer, problem) = crate::summaries::Summarizer::new(&self.options.data_dir);
             // A sandboxed opencode run may use the user's opencode logins (a copy).
             let mut summarizer = summarizer.map(|summarizer| {
-                match crate::opencode::OpenCodePaths::resolve(&|name| std::env::var(name).ok()) {
+                // Only the database is needed: no `opencode --version`.
+                let given = crate::opencode::Detected::given(crate::opencode::Major::V2);
+                match crate::opencode::OpenCodePaths::resolve_for(
+                    &|name| std::env::var(name).ok(),
+                    given,
+                ) {
                     Ok(paths) => summarizer.with_opencode_db(paths.db),
                     Err(_) => summarizer,
                 }

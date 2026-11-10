@@ -25,14 +25,21 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     configuration file, its servers key and entry shape, settings and instruction files, the
     sessions location, the export directories, the auto-memory key, the headless command;
     `is_our_entry` for both entry shapes) and `ClaudeCode`; `Setup::detected`/`installed`;
-  - `src/opencode.rs` + `src/opencode/`: opencode 1.x (paths `OpenCodePaths`: XDG config/data,
-    the JSONC config file install edits, our rules file listed in `instructions` (never
-    AGENTS.md, which would shadow opencode's `~/.claude/CLAUDE.md` fallback), the plugin
-    `plugins/graphersal-memory.js` (`plugin_text`), the sandbox of headless runs
-    (`build_sandbox`, `normalize_run_output` of `opencode run --format json`), `free_model`);
-    `opencode/install.rs` the plan/removal/inspect/status/doctor of its parts and its rule block
-    texts; `opencode/sessions.rs` the read-only SQLite reader (`units`, `read`; a unit path is
-    `<db>#<session id>`) with the fixture schema in its tests;
+  - `src/opencode.rs` + `src/opencode/`: opencode 1.x and 2.x, one `OpenCode` agent with the
+    line as data (`Major`, `Detected`, `detect`: `opencode --version` in a scratch home, else the
+    database's tables, else 2.x; the hooks never ask the binary). Paths `OpenCodePaths`: XDG
+    config/data, the JSONC config file install edits (2.x: no `config.json`, which becomes a
+    `stale_config_files` entry), `servers_path` (1.x `mcp`, 2.x `mcp.servers`), our rules file
+    listed in `instructions` (never AGENTS.md, which would shadow 1.x's `~/.claude/CLAUDE.md`
+    fallback), the plugin `plugins/graphersal-memory.js` (`plugin_text`: one default export
+    with 1.x's `server` and 2.x's `setup`), the sandbox of headless runs (`build_sandbox`,
+    `headless_args`: `--standalone` for 2.x, `normalize_run_output` of `opencode run --format
+    json`), `free_model`; `opencode/install.rs` the plan/removal/inspect/status/doctor of its
+    parts (2.x entries `"disabled"` + `"codemode": false`; after an upgrade it moves our 1.x
+    entries out of `config.json` and `mcp.<name>`) and its rule block texts;
+    `opencode/sessions.rs` the read-only SQLite reader of both lines' tables (`units`, `read`;
+    a session in both is read from 2.x only when 2.x changed it after the copy; a unit path is
+    `<db>#<session id>`) with both fixture schemas in its tests;
   - `src/prompt.rs`: the wizard's console (`Console`: "Step N of M", numbered choices, the
     default on Enter, re-ask; colour only on a terminal without `NO_COLOR`);
   - `src/language.rs`: the memory language (`english` | `any`) and its rule text, filled into

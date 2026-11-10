@@ -1,22 +1,39 @@
-//! opencode's stored sessions -> [`Transcript`]s, read from its SQLite database (opencode 1.x:
-//! `opencode.db`, tables `session`, `message` and `part`, `packages/core/src/session/sql.ts`;
-//! the columns read here exist since its first migration).
+//! opencode's stored sessions -> [`Transcript`]s, read from its SQLite database `opencode.db`.
+//! Both lines keep it in the same file: 1.x in the tables `session`, `message` and `part`
+//! (`packages/core/src/session/sql.ts` at v1.19.5; the columns read here exist since its first
+//! migration), 2.x in `session_v2`, `session_message` and `session_part`
+//! (`packages/core/src/session/sql.ts` at v2.2.4). 2.x upgrades a 1.x file in place: it copies
+//! every 1.x session into its tables with the same id and leaves the 1.x rows as they were
+//! (`packages/core/src/database/v1-migration.bun.ts`), so after an upgrade a session can be in
+//! both. Each session is read once ([`Source`]): from 2.x's tables when 2.x changed it after
+//! the copy (its `time_updated` is newer than the 1.x row's), else from 1.x's (a copy that only
+//! migrated keeps the 1.x row's time, so its fingerprint, and the graph's session, stay as they
+//! were).
 //!
-//! - **Sessions**: the rows of `session` without `parent_id` (sub-agent sessions are left out,
-//!   as Claude Code's sidechains are). Working directory `directory`, title `title`, times
-//!   `time_created`/`time_updated` (milliseconds).
-//! - **Turns**: a user message's `text` parts (not `synthetic` or `ignored`) start a turn; the
-//!   assistant messages up to the next prompt add their `text` parts, the names of their `tool`
-//!   parts, and the files their `edit`/`write` tools (`state.input.filePath`) and `patch` parts
-//!   (`files`) changed. Reasoning, tool input and tool output are not kept. A `compaction`
-//!   part's summary (the next assistant text of a `summary` message) is kept as a compaction
-//!   summary.
+//! - **Sessions**: the rows without `parent_id` (sub-agent sessions are left out, as Claude
+//!   Code's sidechains are). Working directory `directory`, title `title` (2.x: may be empty),
+//!   times `time_created`/`time_updated` (milliseconds).
+//! - **1.x turns**: a user message's `text` parts (not `synthetic` or `ignored`) start a turn;
+//!   the assistant messages up to the next prompt add their `text` parts, the names of their
+//!   `tool` parts, and the files their `edit`/`write` tools (`state.input.filePath`) and
+//!   `patch` parts (`files`) changed. A `compaction` part's summary (the next assistant text of
+//!   a `summary` message) is kept as a compaction summary.
+//! - **2.x turns**: the `session_message` rows in `seq` order, typed by their `type` column. A
+//!   `user` row's `text` starts a turn; an `assistant` row's content (its `session_part` rows
+//!   when it has any, else the `content` array in its data, as 2.x itself reads it,
+//!   `session/history.ts`, `withParts`) adds its `text` parts, its tool names, and the files of
+//!   the `edit`/`write` tools (`state.input.path`, relative to the session's directory) and of
+//!   `patch` (`state.metadata.files[].file`); a completed `compaction` row's `summary` is kept
+//!   as a compaction summary. Other rows (switches, shell, synthetic, system, idle) are left
+//!   out.
+//! - Reasoning, tool input and tool output are never kept.
 //! - **Change detection**: a session's unit size is the bytes of its message and part data, its
-//!   modification time the newest of the session's and its parts' `time_updated`; the
-//!   fingerprint covers exactly the data the transcript is built from, in order.
+//!   modification time the newest `time_updated` of the session and its parts (2.x: and its
+//!   messages); the fingerprint covers exactly the data the transcript is built from, in order.
 //! - The database is opened read-only (opencode keeps it in WAL mode and may write while it is
 //!   read); a database that does not exist yet means no sessions.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -55,15 +72,65 @@ fn sql_error(db: &Path) -> impl Fn(rusqlite::Error) -> String + '_ {
     move |err| format!("cannot read opencode's database {}: {err}", db.display())
 }
 
-/// The top-level sessions of `db` as indexing units (none when the database does not exist).
-pub fn units(db: &Path) -> Result<Vec<Unit>, String> {
-    if !db.is_file() {
-        return Ok(Vec::new());
-    }
+/// The table names of `db`.
+pub fn tables(db: &Path) -> Result<Vec<String>, String> {
     let connection = open(db)?;
+    table_names(&connection, db)
+}
+
+fn table_names(connection: &Connection, db: &Path) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .map_err(sql_error(db))?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(sql_error(db))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error(db))?;
+    Ok(names)
+}
+
+/// Which tables of a database hold sessions.
+#[derive(Debug, Clone, Copy, Default)]
+struct Layout {
+    /// 1.x: `session`, `message`, `part`.
+    v1: bool,
+    /// 2.x: `session_v2`, `session_message`.
+    v2: bool,
+    /// 2.x: `session_part` (added in 2.2).
+    v2_parts: bool,
+}
+
+fn layout(connection: &Connection, db: &Path) -> Result<Layout, String> {
+    let names = table_names(connection, db)?;
+    let has = |name: &str| names.iter().any(|n| n == name);
+    Ok(Layout {
+        v1: has("session") && has("message") && has("part"),
+        v2: has("session_v2") && has("session_message"),
+        v2_parts: has("session_part"),
+    })
+}
+
+/// Which tables a session is read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    V1,
+    V2,
+}
+
+/// One top-level session row: id, directory, time_updated, size, newest part/message time.
+struct Row {
+    id: String,
+    directory: String,
+    updated: i64,
+    size: i64,
+    newest: i64,
+}
+
+fn v1_rows(connection: &Connection, db: &Path) -> Result<Vec<Row>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT s.id, s.time_updated,
+            "SELECT s.id, s.directory, s.time_updated,
                     COALESCE((SELECT SUM(LENGTH(m.data)) FROM message m WHERE m.session_id = s.id), 0)
                   + COALESCE((SELECT SUM(LENGTH(p.data)) FROM part p WHERE p.session_id = s.id), 0),
                     COALESCE((SELECT MAX(p.time_updated) FROM part p WHERE p.session_id = s.id), 0)
@@ -72,24 +139,91 @@ pub fn units(db: &Path) -> Result<Vec<Unit>, String> {
         .map_err(sql_error(db))?;
     let rows = statement
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
+            Ok(Row {
+                id: row.get(0)?,
+                directory: row.get(1)?,
+                updated: row.get(2)?,
+                size: row.get(3)?,
+                newest: row.get(4)?,
+            })
         })
+        .map_err(sql_error(db))?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(sql_error(db))?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (id, updated, size, part_updated) = row.map_err(sql_error(db))?;
-        out.push(Unit {
-            path: unit_path(db, &id),
-            size: u64::try_from(size).unwrap_or(0),
-            modified: u64::try_from(updated.max(part_updated) / 1000).unwrap_or(0),
-        });
+    Ok(rows)
+}
+
+fn v2_rows(connection: &Connection, db: &Path, layout: Layout) -> Result<Vec<Row>, String> {
+    let (part_size, part_newest) = if layout.v2_parts {
+        (
+            "COALESCE((SELECT SUM(LENGTH(p.data)) FROM session_part p WHERE p.session_id = s.id), 0)",
+            "COALESCE((SELECT MAX(p.time_updated) FROM session_part p WHERE p.session_id = s.id), 0)",
+        )
+    } else {
+        ("0", "0")
+    };
+    let sql = format!(
+        "SELECT s.id, s.directory, s.time_updated,
+                COALESCE((SELECT SUM(LENGTH(m.data)) FROM session_message m WHERE m.session_id = s.id), 0)
+              + {part_size},
+                MAX(COALESCE((SELECT MAX(m.time_updated) FROM session_message m WHERE m.session_id = s.id), 0),
+                    {part_newest})
+         FROM session_v2 s WHERE s.parent_id IS NULL ORDER BY s.id"
+    );
+    let mut statement = connection.prepare(&sql).map_err(sql_error(db))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(Row {
+                id: row.get(0)?,
+                directory: row.get(1)?,
+                updated: row.get(2)?,
+                size: row.get(3)?,
+                newest: row.get(4)?,
+            })
+        })
+        .map_err(sql_error(db))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error(db))?;
+    Ok(rows)
+}
+
+/// Every top-level session of `db` once, with the tables it is read from, ordered by id.
+fn sessions(connection: &Connection, db: &Path) -> Result<Vec<(Row, Source)>, String> {
+    let layout = layout(connection, db)?;
+    let mut out: BTreeMap<String, (Row, Source)> = BTreeMap::new();
+    if layout.v1 {
+        for row in v1_rows(connection, db)? {
+            out.insert(row.id.clone(), (row, Source::V1));
+        }
     }
-    Ok(out)
+    if layout.v2 {
+        for row in v2_rows(connection, db, layout)? {
+            // A copy 2.x has not changed since the upgrade is read from 1.x's rows.
+            let keep_v1 = out
+                .get(&row.id)
+                .is_some_and(|(v1, _)| row.updated <= v1.updated);
+            if !keep_v1 {
+                out.insert(row.id.clone(), (row, Source::V2));
+            }
+        }
+    }
+    Ok(out.into_values().collect())
+}
+
+/// The top-level sessions of `db` as indexing units (none when the database does not exist).
+pub fn units(db: &Path) -> Result<Vec<Unit>, String> {
+    if !db.is_file() {
+        return Ok(Vec::new());
+    }
+    let connection = open(db)?;
+    Ok(sessions(&connection, db)?
+        .into_iter()
+        .map(|(row, _)| Unit {
+            path: unit_path(db, &row.id),
+            size: u64::try_from(row.size).unwrap_or(0),
+            modified: u64::try_from(row.updated.max(row.newest) / 1000).unwrap_or(0),
+        })
+        .collect())
 }
 
 /// The session ids of `db` whose working directory is `directory` (or below it), newest first:
@@ -99,29 +233,16 @@ pub fn of_project(db: &Path, directory: &Path) -> Result<Vec<(String, u64)>, Str
         return Ok(Vec::new());
     }
     let connection = open(db)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT id, directory, time_updated FROM session WHERE parent_id IS NULL \
-             ORDER BY time_updated DESC, id",
-        )
-        .map_err(sql_error(db))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })
-        .map_err(sql_error(db))?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (id, dir, updated) = row.map_err(sql_error(db))?;
-        if Path::new(&dir).starts_with(directory) {
-            out.push((id, u64::try_from(updated / 1000).unwrap_or(0)));
-        }
-    }
-    Ok(out)
+    let mut out: Vec<(String, i64)> = sessions(&connection, db)?
+        .into_iter()
+        .filter(|(row, _)| Path::new(&row.directory).starts_with(directory))
+        .map(|(row, _)| (row.id, row.updated))
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok(out
+        .into_iter()
+        .map(|(id, updated)| (id, u64::try_from(updated / 1000).unwrap_or(0)))
+        .collect())
 }
 
 /// Milliseconds since the epoch as an RFC 3339 UTC timestamp (empty for 0).
@@ -139,9 +260,37 @@ fn timestamp(ms: i64) -> String {
     }
 }
 
-/// Reads session `id` of `db` into a transcript.
+/// Reads session `id` of `db` into a transcript (from the tables [`units`] chose for it).
 pub fn read(db: &Path, id: &str) -> Result<Transcript, String> {
     let connection = open(db)?;
+    let layout = layout(&connection, db)?;
+    let updated = |table: &str| -> Result<Option<i64>, String> {
+        connection
+            .query_row(
+                &format!("SELECT time_updated FROM {table} WHERE id = ?1"),
+                [id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(sql_error(db))
+    };
+    let v1 = if layout.v1 { updated("session")? } else { None };
+    let v2 = if layout.v2 {
+        updated("session_v2")?
+    } else {
+        None
+    };
+    match (v1, v2) {
+        (_, Some(new)) if v1.is_none_or(|old| new > old) => read_v2(&connection, db, id, layout),
+        (Some(_), _) => read_v1(&connection, db, id),
+        _ => Err(format!(
+            "opencode session {id} is no longer in {}",
+            db.display()
+        )),
+    }
+}
+
+fn read_v1(connection: &Connection, db: &Path, id: &str) -> Result<Transcript, String> {
     let session = connection
         .query_row(
             "SELECT directory, title, time_created, time_updated FROM session WHERE id = ?1",
@@ -172,7 +321,7 @@ pub fn read(db: &Path, id: &str) -> Result<Transcript, String> {
     let mut parts = connection
         .prepare("SELECT message_id, data FROM part WHERE session_id = ?1 ORDER BY message_id, id")
         .map_err(sql_error(db))?;
-    let mut by_message: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut by_message: BTreeMap<String, Vec<String>> = Default::default();
     for row in parts
         .query_map([id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -194,6 +343,206 @@ pub fn read(db: &Path, id: &str) -> Result<Transcript, String> {
     ))
 }
 
+/// One 2.x message row: id, type, time_created, data.
+type V2Message = (String, String, i64, String);
+
+fn read_v2(
+    connection: &Connection,
+    db: &Path,
+    id: &str,
+    layout: Layout,
+) -> Result<Transcript, String> {
+    let session = connection
+        .query_row(
+            "SELECT directory, COALESCE(title, ''), time_created, time_updated FROM session_v2 \
+             WHERE id = ?1",
+            [id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(sql_error(db))?
+        .ok_or_else(|| format!("opencode session {id} is no longer in {}", db.display()))?;
+    let mut messages = connection
+        .prepare(
+            "SELECT id, type, time_created, data FROM session_message WHERE session_id = ?1 \
+             ORDER BY seq",
+        )
+        .map_err(sql_error(db))?;
+    let messages: Vec<V2Message> = messages
+        .query_map([id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(sql_error(db))?
+        .collect::<Result<_, _>>()
+        .map_err(sql_error(db))?;
+    let mut by_message: HashMap<String, Vec<String>> = HashMap::new();
+    if layout.v2_parts {
+        let mut parts = connection
+            .prepare(
+                "SELECT message_id, data FROM session_part WHERE session_id = ?1 \
+                 ORDER BY message_id, ordinal",
+            )
+            .map_err(sql_error(db))?;
+        for row in parts
+            .query_map([id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sql_error(db))?
+        {
+            let (message, data) = row.map_err(sql_error(db))?;
+            by_message.entry(message).or_default().push(data);
+        }
+    }
+    let (directory, title, created, updated) = session;
+    Ok(build_v2(
+        id,
+        &directory,
+        &title,
+        created,
+        updated,
+        &messages,
+        &by_message,
+    ))
+}
+
+/// The transcript of one 2.x session's rows (see the module docs).
+fn build_v2(
+    id: &str,
+    directory: &str,
+    title: &str,
+    created: i64,
+    updated: i64,
+    messages: &[V2Message],
+    parts: &HashMap<String, Vec<String>>,
+) -> Transcript {
+    let mut out = Transcript {
+        session_id: id.to_string(),
+        cwd: (!directory.is_empty()).then(|| directory.to_string()),
+        title: title.to_string(),
+        started_at: timestamp(created),
+        ended_at: timestamp(updated),
+        ..Transcript::default()
+    };
+    let mut hashed: Vec<u8> = Vec::new();
+    let absolute = |file: &str| -> String {
+        if file.is_empty() || Path::new(file).is_absolute() || directory.is_empty() {
+            file.to_string()
+        } else {
+            Path::new(directory).join(file).display().to_string()
+        }
+    };
+    for (message_id, kind, at, data) in messages {
+        hashed.extend_from_slice(data.as_bytes());
+        hashed.push(b'\n');
+        out.records += 1;
+        let Ok(message) = serde_json::from_str::<Value>(data) else {
+            out.skipped_lines += 1;
+            continue;
+        };
+        match kind.as_str() {
+            "user" => {
+                let prompt = message["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if prompt.is_empty() {
+                    continue;
+                }
+                let n = out.turns.len();
+                out.turns.push(Turn {
+                    n,
+                    at: timestamp(*at),
+                    user: prompt,
+                    assistant: String::new(),
+                    tools: Vec::new(),
+                });
+            }
+            "assistant" => {
+                let stored: Vec<Value> = parts
+                    .get(message_id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|data| {
+                        hashed.extend_from_slice(data.as_bytes());
+                        hashed.push(b'\n');
+                        serde_json::from_str::<Value>(data).ok()
+                    })
+                    .collect();
+                let content: Vec<Value> = if stored.is_empty() {
+                    message["content"].as_array().cloned().unwrap_or_default()
+                } else {
+                    stored
+                };
+                let text = content
+                    .iter()
+                    .filter(|p| p["type"] == "text")
+                    .filter_map(|p| p["text"].as_str())
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                for part in content.iter().filter(|p| p["type"] == "tool") {
+                    let Some(tool) = part["name"].as_str() else {
+                        continue;
+                    };
+                    if let Some(turn) = out.turns.last_mut()
+                        && !turn.tools.iter().any(|t| t == tool)
+                    {
+                        turn.tools.push(tool.to_string());
+                    }
+                    let state = &part["state"];
+                    let mut files: Vec<String> = Vec::new();
+                    if matches!(tool, "edit" | "write")
+                        && let Some(file) = state["input"]["path"].as_str()
+                    {
+                        files.push(absolute(file));
+                    }
+                    if tool == "patch" {
+                        for file in state["metadata"]["files"].as_array().into_iter().flatten() {
+                            if let Some(file) = file["file"].as_str() {
+                                files.push(absolute(file));
+                            }
+                        }
+                    }
+                    for file in files {
+                        if !file.is_empty() && !out.files.contains(&file) {
+                            out.files.push(file);
+                        }
+                    }
+                }
+                if let Some(turn) = out.turns.last_mut()
+                    && !text.is_empty()
+                {
+                    if !turn.assistant.is_empty() {
+                        turn.assistant.push_str("\n\n");
+                    }
+                    turn.assistant.push_str(&text);
+                }
+            }
+            "compaction" => {
+                if message["status"] == "completed"
+                    && let Some(summary) = message["summary"].as_str()
+                    && !summary.trim().is_empty()
+                {
+                    out.compact.push(clip(summary.trim(), 20_000));
+                }
+            }
+            _ => {}
+        }
+    }
+    out.bytes = hashed.len();
+    out.fingerprint = crate::fsutil::fingerprint(&hashed);
+    out
+}
+
 /// The transcript of one session's rows.
 fn build(
     id: &str,
@@ -202,7 +551,7 @@ fn build(
     created: i64,
     updated: i64,
     messages: &[(String, i64, String)],
-    parts: &std::collections::BTreeMap<String, Vec<String>>,
+    parts: &BTreeMap<String, Vec<String>>,
 ) -> Transcript {
     let mut out = Transcript {
         session_id: id.to_string(),
@@ -464,6 +813,325 @@ pub(crate) mod tests {
             [json!({"type": "text", "text": "One more thing."}).to_string()],
         )
         .unwrap();
+    }
+
+    /// The session tables of opencode 2.x (v2.2.4 `packages/core/src/database/schema.gen.ts`,
+    /// the columns as there; `project` comes from [`SCHEMA`] or [`PROJECT_V2`]).
+    pub(crate) const SCHEMA_V2: &str = "
+        CREATE TABLE `session_v2` (`id` text PRIMARY KEY, `project_id` text NOT NULL,
+          `workspace_id` text, `parent_id` text, `fork_session_id` text, `fork_boundary` text,
+          `slug` text NOT NULL, `directory` text NOT NULL, `path` text, `title` text,
+          `version` text NOT NULL, `share_url` text, `summary_additions` integer,
+          `summary_deletions` integer, `summary_files` integer, `summary_diffs` text,
+          `metadata` text, `cost` real DEFAULT 0 NOT NULL, `tokens_input` integer DEFAULT 0 NOT NULL,
+          `tokens_output` integer DEFAULT 0 NOT NULL, `tokens_reasoning` integer DEFAULT 0 NOT NULL,
+          `tokens_cache_read` integer DEFAULT 0 NOT NULL,
+          `tokens_cache_write` integer DEFAULT 0 NOT NULL, `revert` text, `permission` text,
+          `agent` text, `model` text, `time_created` integer NOT NULL,
+          `time_updated` integer NOT NULL, `time_busy` integer, `time_idle` integer,
+          `time_viewed` integer, `idle_outcome` text, `time_compacting` integer,
+          `time_archived` integer, `time_suspended` integer,
+          `resume_attempts` integer DEFAULT 0 NOT NULL,
+          CONSTRAINT `fk_session_v2_project_id_project_id_fk` FOREIGN KEY (`project_id`)
+            REFERENCES `project`(`id`) ON DELETE CASCADE);
+        CREATE TABLE `session_message` (`id` text PRIMARY KEY, `session_id` text NOT NULL,
+          `type` text NOT NULL, `seq` integer NOT NULL, `time_created` integer NOT NULL,
+          `time_updated` integer NOT NULL, `data` text NOT NULL,
+          CONSTRAINT `fk_session_message_session_id_session_v2_id_fk` FOREIGN KEY (`session_id`)
+            REFERENCES `session_v2`(`id`) ON DELETE CASCADE);
+        CREATE TABLE `session_part` (`message_id` text NOT NULL, `session_id` text NOT NULL,
+          `ordinal` integer NOT NULL, `type` text NOT NULL, `call_id` text,
+          `time_created` integer NOT NULL, `time_updated` integer NOT NULL, `data` text NOT NULL,
+          CONSTRAINT `session_part_pk` PRIMARY KEY(`message_id`, `ordinal`));";
+
+    /// 2.x's `project` table (the columns a row needs).
+    const PROJECT_V2: &str = "
+        CREATE TABLE `project` (`id` text PRIMARY KEY, `worktree` text NOT NULL, `vcs` text,
+          `name` text, `time_created` integer NOT NULL, `time_updated` integer NOT NULL,
+          `sandboxes` text NOT NULL DEFAULT '[]');
+        PRAGMA journal_mode = WAL;";
+
+    /// Inserts a 2.x session row.
+    fn insert_v2_session(c: &Connection, id: &str, parent: Option<&str>, directory: &str) {
+        c.execute(
+            "INSERT INTO session_v2 (id, project_id, parent_id, slug, directory, title, version, \
+             time_created, time_updated) VALUES (?1, 'p1', ?2, 'calm-fox', ?3, NULL, '2.2.4', \
+             1767520800000, 1767524400000)",
+            rusqlite::params![id, parent, directory],
+        )
+        .unwrap();
+    }
+
+    /// Inserts a 2.x message row (as 2.x stores it: no `type` or `id` in the data).
+    fn insert_v2_message(
+        c: &Connection,
+        session: &str,
+        id: &str,
+        kind: &str,
+        seq: i64,
+        data: Value,
+    ) {
+        let at = 1767520800000 + seq * 1000;
+        c.execute(
+            "INSERT INTO session_message VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+            rusqlite::params![id, session, kind, seq, at, data.to_string()],
+        )
+        .unwrap();
+    }
+
+    /// Adds 2.x's tables to `db` (a new file, or a 1.x one being upgraded) with one session
+    /// `ses_v2a` in `directory`: a turn whose assistant content is inline (reasoning, an edit
+    /// with a relative path, text), a turn whose content is in `session_part` (a patch),
+    /// a compaction, a model switch, a turn, and a sub-agent session.
+    pub(crate) fn fixture_v2(db: &Path, directory: &str) {
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let c = Connection::open(db).unwrap();
+        let has_project = c
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'project'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0;
+        if !has_project {
+            c.execute_batch(PROJECT_V2).unwrap();
+            c.execute(
+                "INSERT INTO project VALUES ('p1', ?1, 'git', NULL, 1, 1, '[]')",
+                [directory],
+            )
+            .unwrap();
+        }
+        c.execute_batch(SCHEMA_V2).unwrap();
+        insert_v2_session(&c, "ses_v2a", None, directory);
+        insert_v2_session(&c, "ses_v2sub", Some("ses_v2a"), directory);
+        let model = json!({"id": "big-pickle", "providerID": "opencode", "variant": "default"});
+        let user =
+            |text: &str, at: i64| json!({"time": {"created": at}, "text": text, "files": []});
+        insert_v2_message(
+            &c,
+            "ses_v2a",
+            "msg_10",
+            "user",
+            4,
+            user("Rename the config flag.", 1),
+        );
+        insert_v2_message(
+            &c,
+            "ses_v2a",
+            "msg_11",
+            "assistant",
+            5,
+            json!({
+            "time": {"created": 2, "completed": 3}, "agent": "build", "model": model,
+            "content": [
+                {"type": "reasoning", "text": "secret thinking"},
+                {"type": "tool", "id": "c1", "name": "edit", "time": {"created": 2},
+                 "state": {"status": "completed",
+                   "input": {"path": "src/flags.rs", "oldString": "a", "newString": "b"},
+                   "content": [{"type": "text", "text": "test output"}]}},
+                {"type": "text", "text": "Renamed it."}],
+            "finish": "stop", "cost": 0,
+            "tokens": {"input": 10, "output": 5, "reasoning": 0, "cache": {"read": 0, "write": 0}}}),
+        );
+        insert_v2_message(
+            &c,
+            "ses_v2a",
+            "msg_12",
+            "idle",
+            6,
+            json!({"time": {"created": 4}, "outcome": "succeeded"}),
+        );
+        insert_v2_message(
+            &c,
+            "ses_v2a",
+            "msg_13",
+            "user",
+            7,
+            user("Apply the patch too.", 5),
+        );
+        insert_v2_message(
+            &c,
+            "ses_v2a",
+            "msg_14",
+            "assistant",
+            8,
+            json!({
+            "time": {"created": 6}, "agent": "build", "model": model, "content": []}),
+        );
+        for (ordinal, part) in [
+            json!({"type": "tool", "id": "c2", "name": "patch", "time": {"created": 6},
+                   "state": {"status": "completed", "input": {"patchText": "secret patch"},
+                     "content": [{"type": "text", "text": "test output"}],
+                     "metadata": {"files": [{"file": "/elsewhere/x.rs", "patch": "", "additions": 1,
+                       "deletions": 0, "status": "modified"}]}}}),
+            json!({"type": "text", "text": "Patched."}),
+        ]
+        .iter()
+        .enumerate()
+        {
+            c.execute(
+                "INSERT INTO session_part VALUES ('msg_14', 'ses_v2a', ?1, ?2, NULL, 1767520808000, \
+                 1767520808000, ?3)",
+                rusqlite::params![ordinal as i64, part["type"].as_str().unwrap(), part.to_string()],
+            )
+            .unwrap();
+        }
+        insert_v2_message(
+            &c,
+            "ses_v2a",
+            "msg_15",
+            "compaction",
+            9,
+            json!({
+            "time": {"created": 7}, "status": "completed", "reason": "auto",
+            "summary": "Earlier: the flag was renamed and a patch applied."}),
+        );
+        insert_v2_message(
+            &c,
+            "ses_v2a",
+            "msg_16",
+            "model-switched",
+            10,
+            json!({"time": {"created": 8}, "model": model}),
+        );
+        insert_v2_message(
+            &c,
+            "ses_v2a",
+            "msg_17",
+            "user",
+            11,
+            user("Thanks, done.", 9),
+        );
+        insert_v2_message(
+            &c,
+            "ses_v2sub",
+            "msg_s2",
+            "user",
+            1,
+            user("Sub-agent task", 1),
+        );
+    }
+
+    #[test]
+    fn a_2x_session_becomes_turns_from_inline_content_and_parts() {
+        let tmp = crate::mcp_tests::TempDir::new("oc2-sess");
+        let db = tmp.path().join("opencode.db");
+        fixture_v2(&db, "/w/app");
+        assert!(!tables(&db).unwrap().contains(&"session".to_string()));
+        let units = units(&db).unwrap();
+        assert_eq!(units.len(), 1, "the sub-agent session is left out");
+        assert_eq!(units[0].path, unit_path(&db, "ses_v2a"));
+        let t = read(&db, "ses_v2a").unwrap();
+        assert_eq!(t.title, "", "2.x titles may be empty");
+        assert_eq!(t.cwd.as_deref(), Some("/w/app"));
+        assert_eq!(t.started_at, "2026-01-04T10:00:00.000Z");
+        let users: Vec<&str> = t.turns.iter().map(|turn| turn.user.as_str()).collect();
+        assert_eq!(
+            users,
+            vec![
+                "Rename the config flag.",
+                "Apply the patch too.",
+                "Thanks, done."
+            ]
+        );
+        assert_eq!(t.turns[0].assistant, "Renamed it.");
+        assert_eq!(t.turns[0].tools, vec!["edit"]);
+        assert_eq!(t.turns[1].assistant, "Patched.");
+        assert_eq!(t.turns[1].tools, vec!["patch"]);
+        assert_eq!(t.files, vec!["/w/app/src/flags.rs", "/elsewhere/x.rs"]);
+        assert_eq!(
+            t.compact,
+            vec!["Earlier: the flag was renamed and a patch applied."]
+        );
+        let all = format!("{t:?}");
+        assert!(
+            !all.contains("secret") && !all.contains("test output"),
+            "{all}"
+        );
+        // A part that changes changes the fingerprint and the unit.
+        let before = (t.fingerprint.clone(), units[0].size);
+        let c = Connection::open(&db).unwrap();
+        c.execute(
+            "UPDATE session_part SET data = ?1, time_updated = 1767530000000 WHERE message_id = \
+             'msg_14' AND ordinal = 1",
+            [json!({"type": "text", "text": "Patched, and tested."}).to_string()],
+        )
+        .unwrap();
+        let after = read(&db, "ses_v2a").unwrap();
+        assert_eq!(after.turns[1].assistant, "Patched, and tested.");
+        assert_ne!(after.fingerprint, before.0);
+        let grown = super::units(&db).unwrap();
+        assert!(grown[0].size > before.1);
+        assert_eq!(grown[0].modified, 1767530000);
+        assert_eq!(of_project(&db, Path::new("/w/app")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn after_an_upgrade_each_session_is_read_once_from_the_right_tables() {
+        let tmp = crate::mcp_tests::TempDir::new("oc12-sess");
+        let db = tmp.path().join("opencode.db");
+        fixture(&db, "/w/app");
+        let v1_only = read(&db, "ses_abc").unwrap();
+        // 2.x upgrades the file: its tables appear, the 1.x session is copied with its id and
+        // time, the 1.x rows stay; a new session is made in 2.x.
+        fixture_v2(&db, "/w/app");
+        let c = Connection::open(&db).unwrap();
+        c.execute(
+            "INSERT INTO session_v2 (id, project_id, slug, directory, title, version, \
+             time_created, time_updated) SELECT id, project_id, slug, directory, title, version, \
+             time_created, time_updated FROM session WHERE id = 'ses_abc'",
+            [],
+        )
+        .unwrap();
+        insert_v2_message(
+            &c,
+            "ses_abc",
+            "msg_m1",
+            "user",
+            1,
+            json!({"time": {"created": 1}, "text": "Add a cache to the parser.", "files": []}),
+        );
+        let ids: Vec<PathBuf> = units(&db).unwrap().into_iter().map(|u| u.path).collect();
+        assert_eq!(
+            ids,
+            vec![unit_path(&db, "ses_abc"), unit_path(&db, "ses_v2a")],
+            "no duplicate for the copied session"
+        );
+        let migrated = read(&db, "ses_abc").unwrap();
+        assert_eq!(
+            migrated.fingerprint, v1_only.fingerprint,
+            "a copy 2.x did not change is read from 1.x: nothing to index again"
+        );
+        assert_eq!(migrated.turns.len(), 3);
+        assert_eq!(read(&db, "ses_v2a").unwrap().turns.len(), 3);
+        assert_eq!(of_project(&db, Path::new("/w/app")).unwrap().len(), 2);
+        // The session is continued in 2.x: read from 2.x's tables from now on.
+        c.execute(
+            "UPDATE session_v2 SET time_updated = 1767600000000 WHERE id = 'ses_abc'",
+            [],
+        )
+        .unwrap();
+        insert_v2_message(
+            &c,
+            "ses_abc",
+            "msg_m2",
+            "user",
+            2,
+            json!({"time": {"created": 2}, "text": "Continued in 2.x.", "files": []}),
+        );
+        let continued = read(&db, "ses_abc").unwrap();
+        assert_eq!(
+            continued
+                .turns
+                .iter()
+                .map(|t| t.user.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Add a cache to the parser.", "Continued in 2.x."]
+        );
+        assert_ne!(continued.fingerprint, v1_only.fingerprint);
+        let unit = units(&db).unwrap().into_iter().next().unwrap();
+        assert_eq!(unit.modified, 1767600000);
     }
 
     #[test]

@@ -122,7 +122,13 @@ impl Harness for Process {
         let mut env = vec![(crate::summaries::HOOK_ENV, "off")];
         env.extend(call.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let opencode = crate::opencode::is_opencode(&call.args);
-        match crate::harness::run(&call.args, &call.input, &call.cwd, &env, CALL_TIMEOUT) {
+        // opencode 2.x gets `--standalone` (its own server, in the sandbox's environment).
+        let args = if opencode {
+            crate::opencode::headless_args(&call.args)
+        } else {
+            call.args.clone()
+        };
+        match crate::harness::run(&args, &call.input, &call.cwd, &env, CALL_TIMEOUT) {
             Ok(output) if opencode => crate::opencode::normalize_run_output(&output.stdout),
             Ok(output) => json_in(&output.stdout).unwrap_or_else(|| {
                 json!({"is_error": true, "result": format!(
