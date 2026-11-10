@@ -291,17 +291,7 @@ pub fn build(arm: BenchArm, arms_dir: &Path, sources: &Sources) -> Result<Sandbo
         BenchArm::Graph => {
             let data = dir.join("data");
             let fork = crate::store::default_store_dir(&data);
-            graphersal::persist::Store::fork_dir(
-                sources.store_dir.as_path(),
-                graphersal::persist::RecoveryTarget::Latest,
-                fork.as_path(),
-            )
-            .map_err(|err| {
-                format!(
-                    "cannot copy the memory store {} for the graph arm: {err}",
-                    sources.store_dir.display()
-                )
-            })?;
+            fork_store(&sources.store_dir, &fork)?;
             scratch = Some(data.clone());
             args.extend([
                 "--tools".to_string(),
@@ -398,17 +388,7 @@ pub fn build_opencode(
         BenchArm::Graph => {
             let data = dir.join("data-store");
             let fork = crate::store::default_store_dir(&data);
-            graphersal::persist::Store::fork_dir(
-                sources.store_dir.as_path(),
-                graphersal::persist::RecoveryTarget::Latest,
-                fork.as_path(),
-            )
-            .map_err(|err| {
-                format!(
-                    "cannot copy the memory store {} for the graph arm: {err}",
-                    sources.store_dir.display()
-                )
-            })?;
+            fork_store(&sources.store_dir, &fork)?;
             scratch = Some(data.clone());
             (
                 json!({SERVER: {
@@ -521,17 +501,7 @@ pub fn build_codex(
         BenchArm::Graph => {
             let data = dir.join("data-store");
             let fork = crate::store::default_store_dir(&data);
-            graphersal::persist::Store::fork_dir(
-                sources.store_dir.as_path(),
-                graphersal::persist::RecoveryTarget::Latest,
-                fork.as_path(),
-            )
-            .map_err(|err| {
-                format!(
-                    "cannot copy the memory store {} for the graph arm: {err}",
-                    sources.store_dir.display()
-                )
-            })?;
+            fork_store(&sources.store_dir, &fork)?;
             scratch = Some(data.clone());
             let args = [
                 "mcp".to_string(),
@@ -623,6 +593,26 @@ pub fn tool_free(dir: &Path) -> Result<(PathBuf, Vec<String>), String> {
     let mut args = common_args(&settings_file, &mcp_file);
     args.extend(["--tools".to_string(), String::new()]);
     Ok((cwd, args))
+}
+
+/// Copies the live store in `store_dir` into `fork` (`Store::fork_dir`, read without the
+/// store's lock while the daemon serves it), holding the store's copy lock so the daemon does
+/// not prune files the copy still reads (`crate::maintenance::hold_for_copy`).
+pub(crate) fn fork_store(store_dir: &Path, fork: &Path) -> Result<(), String> {
+    crate::maintenance::hold_for_copy(store_dir, || {
+        graphersal::persist::Store::fork_dir(
+            store_dir,
+            graphersal::persist::RecoveryTarget::Latest,
+            fork,
+        )
+        .map(|_| ())
+        .map_err(|err| {
+            format!(
+                "cannot copy the memory store {} for the graph arm: {err}",
+                store_dir.display()
+            )
+        })
+    })
 }
 
 #[cfg(test)]

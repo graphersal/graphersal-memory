@@ -640,3 +640,45 @@ fn the_socket_and_run_directory_are_private() {
     assert_eq!(mode(&env.socket()), 0o600);
     close_ok(shim);
 }
+
+#[test]
+fn the_daemon_opens_the_store_at_its_start_and_status_shows_its_maintenance() {
+    let env = Env::new("10m");
+    let mut shim = env.shim("/w/warm");
+    shim.remember("warm-note", "The release runs on Mondays", "project");
+    close_ok(shim);
+    let _ = env.control("stop");
+    env.wait_for("the daemon to stop", || env.status().is_none());
+
+    // A started daemon opens the default store by itself; a search right away waits for it and
+    // answers from the stored memory.
+    let output = env.command().arg("daemon").output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut shim = env.shim("/w/warm");
+    let found = shim.ok("memories", json!({"text": "when does the release run"}));
+    assert!(found.contains("warm-note"), "{found}");
+    close_ok(shim);
+    let log = env.log();
+    assert_eq!(
+        log.matches("opened the store default").count(),
+        2,
+        "one open per daemon life: {log}"
+    );
+
+    let output = env.command().arg("status").output().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("store default: "), "{text}");
+    assert!(text.contains("WAL since the last snapshot: "), "{text}");
+    assert!(text.contains("checkpoint after 16.0 MiB"), "{text}");
+    assert!(text.contains("history kept: 30 days"), "{text}");
+    let output = env.command().arg("doctor").output().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains("store default: ") && text.contains("of WAL since the last snapshot"),
+        "{text}"
+    );
+}

@@ -116,7 +116,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     transcript active/ended, the start answer `{"additional_context": ...}`); `read_input` and
     `is_cursor_input` (a Claude Code hook run by Cursor's third-party hooks does nothing);
   - `src/config.rs`: `<data dir>/config.json` (`daemon.idle`, `memory.language`,
-    `embedding.model`, `summaries.enabled|harness_command|monthly_budget_usd|since`;
+    `embedding.model`, `summaries.enabled|harness_command|monthly_budget_usd|since`,
+    `store.checkpoint_after|keep_history`;
     `with_summaries` and `with_values` edit in place); flag > env > file > default;
   - `src/transcript.rs`: the Claude Code transcript parser (turns, title, times, branches, edited
     files, compaction summaries; sidechains and generated records left out; unknown records,
@@ -157,6 +158,14 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     indexed session by git remote (normalized, origin first), then path; a root commit shared
     with an older project is only a hint (`look_alike_lines`, `projects merge` through the
     daemon's `merge_projects` control line and the internal function `merge_project`);
+  - `src/maintenance.rs`: store maintenance (`Settings`: the checkpoint threshold the stores
+    open with, default 16 MiB, and the history kept, default 30 days; `prune_bound` and
+    `prune_old_history` through the engine's `Store::prune`, which the daemon's maintenance
+    thread runs daily and after each new snapshot; the copy lock `stores/<name>.copy.lock` the
+    bench's fork holds (`hold_for_copy`) and a prune takes without waiting; the state file
+    `stores/<name>.maintenance.json`; the `status` lines and the `doctor` WAL finding);
+  - `src/maintenance_tests.rs`: the automatic checkpoint at a small threshold, the prune with an
+    injected clock, the copy lock, a bench fork that opens after a prune;
   - `src/fsutil.rs`: atomic writes and the FNV-1a fingerprint;
   - `src/ipc.rs`: the run directory (`--run-dir`, `GRAPHERSAL_MEMORY_RUN_DIR`, `<data dir>/run`
     for an explicit data directory, the platform's default), its files (`daemon.sock`,
@@ -168,7 +177,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     free `daemon.pid`, detached spawn, timeout naming the log), the handshake with retries on
     `restarting`/`stopping`, then a byte relay; `control` (status/stop);
   - `src/daemon.rs`: the daemon: pid lock, socket, one thread per connection, routing by the
-    handshake to a `StoreRuntime` (opened on first use) and its profile, idle exit (no exit while
+    handshake to a `StoreRuntime` (the default store opened at the start, beside the first
+    handshake; others on first use) and its profile, the maintenance thread, idle exit (no exit while
     the indexer or a store's scheduled-job runs work), drain/restart for a newer shim, clean
     shutdown (socket first, then the stores; the process exit afterwards only ends the blocked
     accept loop);

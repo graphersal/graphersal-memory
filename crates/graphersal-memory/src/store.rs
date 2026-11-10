@@ -93,9 +93,15 @@ pub fn default_store_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("stores").join("default")
 }
 
-/// Opens the store in `dir`, creating it (and its parent directories) when it does not exist
-/// or is an empty directory.
+/// Opens the store in `dir` with the default options, creating it (and its parent directories)
+/// when it does not exist or is an empty directory.
+#[cfg(test)]
 pub fn open_or_create(dir: &Path) -> Result<Arc<Store>, String> {
+    open_or_create_with(dir, StoreOptions::new())
+}
+
+/// [`open_or_create`] with `options` (the product's: `crate::maintenance::Settings`).
+pub fn open_or_create_with(dir: &Path, options: StoreOptions) -> Result<Arc<Store>, String> {
     let fresh = match std::fs::read_dir(dir) {
         Ok(mut entries) => entries.next().is_none(),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
@@ -110,10 +116,10 @@ pub fn open_or_create(dir: &Path) -> Result<Arc<Store>, String> {
                 )
             })?;
         }
-        Store::create(dir, StoreOptions::new())
+        Store::create(dir, options)
             .map_err(|err| format!("cannot create the store {}: {err}", dir.display()))?
     } else {
-        Store::open(dir, StoreOptions::new())
+        Store::open(dir, options)
             .map_err(|err| format!("cannot open the store {}: {err}", dir.display()))?
     };
     Ok(Arc::new(store))

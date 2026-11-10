@@ -3370,7 +3370,7 @@ pub fn shared_doctor(setup: &Setup) -> Vec<Finding> {
                     ),
                     "check their spelling (known: daemon.idle, memory.language, embedding.model, \
                      summaries.enabled, summaries.harness_command, summaries.monthly_budget_usd, \
-                     summaries.since)",
+                     summaries.since, store.checkpoint_after, store.keep_history)",
                 ));
             }
         }
@@ -3414,6 +3414,7 @@ pub fn shared_doctor(setup: &Setup) -> Vec<Finding> {
             },
         }
     }
+    findings.extend(crate::commands::store_findings(&setup.run_dir));
     for (what, how) in crate::projects::look_alike_lines(&setup.data_dir) {
         findings.push(note(what, how));
     }

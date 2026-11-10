@@ -1360,13 +1360,15 @@ pub fn status_text(
     run_dir: &Path,
     setup: Result<&Setup, &str>,
 ) -> Result<String, String> {
-    let daemon = match shim::control(run_dir, "status")? {
-        Some(status) => describe(&status),
+    let running = shim::control(run_dir, "status")?;
+    let daemon = match &running {
+        Some(status) => describe(status),
         None => format!(
             "daemon: not running (run directory {}; the next agent session starts it)",
             run_dir.display()
         ),
     };
+    let stores = store_lines(data_dir, running.as_ref());
     let settings = match Config::load(data_dir) {
         Ok(settings) => {
             let idle = config::idle(None, std::env::var(daemon::IDLE_ENV).ok(), &settings)
@@ -1406,6 +1408,10 @@ pub fn status_text(
         "{daemon}\ndata directory: {}\n{settings}\n{sessions}\n",
         data_dir.display()
     );
+    for line in stores {
+        text.push_str(&line);
+        text.push('\n');
+    }
     match setup {
         Ok(setup) => {
             let kinds = setup.installed();
@@ -1448,6 +1454,51 @@ pub fn status_text(
         Err(err) => text.push_str(&format!("Claude Code: cannot check ({err})\n")),
     }
     Ok(text)
+}
+
+/// The maintenance lines of the stores: each open store's numbers from the running daemon's
+/// status, else the default store's from its files (when it exists).
+fn store_lines(data_dir: &Path, daemon: Option<&serde_json::Value>) -> Vec<String> {
+    let mut lines = Vec::new();
+    let open = daemon
+        .and_then(|status| status["maintenance"].as_object())
+        .filter(|stores| !stores.is_empty());
+    match open {
+        Some(stores) => {
+            for (name, status) in stores {
+                lines.extend(crate::maintenance::status_lines(name, status));
+            }
+        }
+        None => {
+            let dir = crate::store::default_store_dir(data_dir);
+            if dir.join("GRAPH").exists() {
+                let settings = crate::maintenance::Settings::load(data_dir);
+                let status = crate::maintenance::files_status(&dir, &settings);
+                lines.extend(crate::maintenance::status_lines(
+                    crate::registry::DEFAULT_STORE,
+                    &status,
+                ));
+            }
+        }
+    }
+    lines
+}
+
+/// The `doctor` findings about the stores' WAL (only the running daemon knows the WAL since
+/// the last snapshot).
+pub fn store_findings(run_dir: &Path) -> Vec<install::Finding> {
+    let Ok(Some(status)) = shim::control(run_dir, "status") else {
+        return Vec::new();
+    };
+    status["maintenance"]
+        .as_object()
+        .map(|stores| {
+            stores
+                .iter()
+                .filter_map(|(name, status)| crate::maintenance::wal_finding(name, status))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Runs a command that is not implemented yet: writes its stage to `stderr` and returns the

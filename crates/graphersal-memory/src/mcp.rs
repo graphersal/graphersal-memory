@@ -161,10 +161,11 @@ pub fn serve(
     read: impl BufRead,
     write: impl Write + Send,
 ) -> Result<(), String> {
-    let runtime = StoreRuntime::open(
+    let runtime = StoreRuntime::open_with(
         registry::DEFAULT_STORE,
         &store::default_store_dir(&options.data_dir),
         Arc::new(endpoint()),
+        &crate::maintenance::Settings::load(&options.data_dir),
     )?;
     // The project's stable id (a moved repository keeps its memories); without a projects file
     // that can be read, the path itself.
@@ -190,6 +191,10 @@ pub fn endpoint() -> Mcp {
 /// single writer.
 pub struct StoreRuntime {
     name: String,
+    /// The store's directory.
+    dir: PathBuf,
+    /// The maintenance settings it was opened with.
+    settings: crate::maintenance::Settings,
     store: Arc<Store>,
     using: Arc<Context>,
     developing: Arc<Context>,
@@ -204,10 +209,22 @@ pub struct StoreRuntime {
 }
 
 impl StoreRuntime {
-    /// Opens (creates on first use) the store `name` in `dir`, applies the product catalog and
-    /// starts its session thread; `mcp` is the process's endpoint.
+    /// Opens (creates on first use) the store `name` in `dir` with the default maintenance
+    /// settings, applies the product catalog and starts its session thread; `mcp` is the
+    /// process's endpoint.
+    #[cfg(test)]
     pub fn open(name: &str, dir: &Path, mcp: Arc<Mcp>) -> Result<Self, String> {
-        let store = store::open_or_create(dir)?;
+        Self::open_with(name, dir, mcp, &crate::maintenance::Settings::default())
+    }
+
+    /// [`Self::open`] with the maintenance `settings` (the checkpoint threshold).
+    pub fn open_with(
+        name: &str,
+        dir: &Path,
+        mcp: Arc<Mcp>,
+        settings: &crate::maintenance::Settings,
+    ) -> Result<Self, String> {
+        let store = store::open_or_create_with(dir, settings.store_options())?;
         let served = store.clone();
         let (jobs, use_policy) = graphersal_serve::spawn_session(
             SessionPresets::new(),
@@ -233,6 +250,8 @@ impl StoreRuntime {
         };
         Ok(Self {
             name: name.to_string(),
+            dir: dir.to_path_buf(),
+            settings: *settings,
             using: context(ProfileKind::Use)?,
             developing: context(ProfileKind::Develop)?,
             use_policy,
@@ -245,6 +264,39 @@ impl StoreRuntime {
     /// The store's name in the registry.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The store's directory.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The open store.
+    #[cfg(test)]
+    pub fn store(&self) -> &Arc<Store> {
+        &self.store
+    }
+
+    /// The store's maintenance numbers (`crate::maintenance::open_store_status`).
+    pub fn maintenance_status(&self) -> Value {
+        crate::maintenance::open_store_status(&self.store, &self.dir, &self.settings)
+    }
+
+    /// Prunes the history older than `keep` at `now_us` (`crate::maintenance::prune_old_history`).
+    pub fn prune_old_history(
+        &self,
+        keep: Duration,
+        now_us: i64,
+    ) -> Result<Option<crate::maintenance::Pruned>, String> {
+        crate::maintenance::prune_old_history(&self.store, &self.dir, keep, now_us)
+    }
+
+    /// The newest snapshot's commit.
+    pub fn newest_snapshot(&self) -> Result<Option<u64>, String> {
+        self.store
+            .snapshots()
+            .map(|snapshots| snapshots.last().map(|snapshot| snapshot.commit_seq))
+            .map_err(|err| format!("cannot list the snapshots of {}: {err}", self.name))
     }
 
     /// The context of the profile `kind`.

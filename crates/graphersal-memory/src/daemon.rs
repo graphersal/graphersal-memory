@@ -18,6 +18,12 @@
 //! small session-thread jobs, and `sessions_status` reports its progress. The daemon does not
 //! exit idle while the indexer works or a store's scheduled-job runs are in progress (the idle
 //! time counts from the end of that work).
+//!
+//! Store maintenance (`crate::maintenance`): every store opens with the checkpoint threshold of
+//! `store.checkpoint_after`; the default store opens at the daemon's start (beside the first
+//! handshake: opening loads the embedding model); a maintenance thread prunes each open store's
+//! history older than `store.keep_history` (daily and after each new snapshot); `status` reports
+//! each open store's sizes, WAL since the last snapshot and last prune.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -41,6 +47,9 @@ pub const IDLE_ENV: &str = "GRAPHERSAL_MEMORY_IDLE";
 
 /// The default idle time: two hours (user decision 2026-11-09).
 pub const DEFAULT_IDLE: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// How often the maintenance thread looks at the open stores (a check runs only when due).
+const MAINTENANCE_TICK: Duration = Duration::from_secs(60);
 
 /// How long a client may take to send its first line.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -263,6 +272,27 @@ pub fn run(options: DaemonOptions) -> Result<(), String> {
         .name("idle".into())
         .spawn(move || idle.watch_idle())
         .map_err(|err| format!("cannot start the idle watcher: {err}"))?;
+    let maintenance = daemon.clone();
+    std::thread::Builder::new()
+        .name("maintenance".into())
+        .spawn(move || maintenance.maintenance_loop())
+        .map_err(|err| format!("cannot start the maintenance thread: {err}"))?;
+    // The default store opens now, beside the first handshake: opening it loads the embedding
+    // model (most of a start: docs/how-it-works.md), so a session that connects a little later
+    // (a hook started the daemon) finds it open; one that connects meanwhile waits for it.
+    let warm = daemon.clone();
+    let warming = std::thread::Builder::new()
+        .name("open".into())
+        .spawn(move || {
+            if let Err(err) = warm.open_store(crate::registry::DEFAULT_STORE) {
+                log(&err);
+            }
+        });
+    if let Err(err) = warming {
+        log(&format!(
+            "cannot open the default store in the background: {err}"
+        ));
+    }
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -628,7 +658,12 @@ impl Daemon {
 
     /// The runtime of the store that serves `project`, opened on first use.
     fn store_for(&self, project: &str) -> Result<Arc<StoreRuntime>, String> {
-        let name = self.registry.store_for(project);
+        let name = self.registry.store_for(project).to_string();
+        self.open_store(&name)
+    }
+
+    /// The runtime of the store `name`, opened on first use.
+    fn open_store(&self, name: &str) -> Result<Arc<StoreRuntime>, String> {
         let mut stores = self
             .stores
             .lock()
@@ -637,11 +672,23 @@ impl Daemon {
             return Ok(store.clone());
         }
         let dir = Registry::store_dir(&self.options.data_dir, name);
-        let store = Arc::new(StoreRuntime::open(name, &dir, self.mcp.clone())?);
+        let settings = crate::maintenance::Settings::load(&self.options.data_dir);
+        let started = Instant::now();
+        let store = Arc::new(StoreRuntime::open_with(
+            name,
+            &dir,
+            self.mcp.clone(),
+            &settings,
+        )?);
+        let opened_in = started.elapsed();
         if let Err(err) = store.start_jobs() {
             log(&err);
         }
-        log(&format!("opened the store {name} ({})", dir.display()));
+        log(&format!(
+            "opened the store {name} ({}) in {:.2}s",
+            dir.display(),
+            opened_in.as_secs_f64()
+        ));
         stores.insert(name.to_string(), store.clone());
         drop(stores);
         self.apply_embedder(store.clone());
@@ -649,14 +696,19 @@ impl Daemon {
     }
 
     fn status(&self) -> serde_json::Value {
-        let state = self.lock_state();
-        let stores: Vec<String> = self
+        let open: Vec<Arc<StoreRuntime>> = self
             .stores
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .keys()
+            .values()
             .cloned()
             .collect();
+        let stores: Vec<String> = open.iter().map(|store| store.name().to_string()).collect();
+        let maintenance: serde_json::Map<String, serde_json::Value> = open
+            .iter()
+            .map(|store| (store.name().to_string(), store.maintenance_status()))
+            .collect();
+        let state = self.lock_state();
         json!({
             "ok": true,
             "daemon_version": self.options.version,
@@ -670,7 +722,75 @@ impl Daemon {
             "run_dir": self.options.run_dir.display().to_string(),
             "idle_secs": self.options.idle.as_secs_f64(),
             "draining": state.draining,
+            "maintenance": maintenance,
         })
+    }
+
+    /// The maintenance thread: checks every open store's history each minute and prunes what
+    /// is older than `store.keep_history` when a check is due (`maintenance::State::due`: daily,
+    /// and after each new snapshot). Never on a connection's thread; a prune runs beside the
+    /// sessions (the engine prunes without the graph's lock).
+    fn maintenance_loop(&self) {
+        loop {
+            std::thread::sleep(MAINTENANCE_TICK);
+            if self.shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            let stores: Vec<Arc<StoreRuntime>> = self
+                .stores
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values()
+                .cloned()
+                .collect();
+            for store in stores {
+                self.maintain(&store);
+            }
+        }
+    }
+
+    /// One history check of `store`, when due.
+    fn maintain(&self, store: &StoreRuntime) {
+        let settings = crate::maintenance::Settings::load(&self.options.data_dir);
+        let Some(keep) = settings.keep_history else {
+            return;
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let newest = match store.newest_snapshot() {
+            Ok(newest) => newest,
+            Err(err) => {
+                log(&err);
+                return;
+            }
+        };
+        let mut state = crate::maintenance::State::load(store.dir());
+        if !state.due(now, newest) || self.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        match store.prune_old_history(keep, crate::maintenance::now_micros()) {
+            Ok(Some(pruned)) => {
+                let text = pruned.text();
+                log(&format!(
+                    "store {}: history older than {}: {text}",
+                    store.name(),
+                    crate::maintenance::duration_text(keep)
+                ));
+                state.last_prune = Some((now, text));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                // Checked again at the next tick (the state stays as it was).
+                log(&format!("store {}: {err}", store.name()));
+                return;
+            }
+        }
+        state.last_check = Some(now);
+        state.newest_snapshot = newest;
+        if let Err(err) = state.save(store.dir()) {
+            log(&err);
+        }
     }
 
     /// Serves one accepted connection.
