@@ -1,9 +1,8 @@
 name: CI
 
+# Manual runs only (Actions minutes are limited while the repository is private):
+# Actions tab -> CI -> Run workflow, or `gh workflow run ci.yml --ref <branch>`.
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
