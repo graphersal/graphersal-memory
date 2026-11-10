@@ -2,7 +2,7 @@
 //!
 //! Pre-release: `install` (a wizard in a terminal), `uninstall`, `status`, `doctor`, `import`
 //! (also `--sessions`), `export --to-files`, `projects` and `summaries` set graphersal-memory up
-//! in Claude Code and opencode, `mcp` serves the memory over stdio (through the shared daemon, or in this
+//! in Claude Code, opencode, Codex and Cursor, `mcp` serves the memory over stdio (through the shared daemon, or in this
 //! process with `--no-daemon`), `daemon` manages the daemon; every other command reports the
 //! roadmap stage that delivers it and exits with code 2.
 
@@ -16,6 +16,7 @@ mod client;
 mod codex;
 mod commands;
 mod config;
+mod cursor;
 mod daemon;
 mod download;
 mod engine;

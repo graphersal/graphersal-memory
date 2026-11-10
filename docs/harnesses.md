@@ -3,8 +3,9 @@
 > Pre-release: Claude Code is supported by `install`, `uninstall`, `status`, `doctor` and
 > `import` (stage M3), the indexing of its past sessions with opt-in summaries (stage M4) and the
 > A/B `bench` (stage M5); opencode 1.x by all of them since stage M7a, opencode 2.x since M7b,
-> OpenAI Codex CLI since M7c. Any of them can be installed at once
-> and share one store and one daemon. Cursor is a target, listed with what it needs.
+> OpenAI Codex CLI since M7c, Cursor since M7d (without summaries and `bench`; checked against
+> fixtures only, a live check is pending). Any of them can be installed at once and share one
+> store and one daemon.
 
 Every harness below supports MCP, so the memory tools work the same way everywhere. What differs is
 how graphersal-memory is installed into the harness, where the harness keeps its rules and
@@ -15,7 +16,7 @@ transcripts, and whether it has hooks.
 | Claude Code | install, import, hooks, rule block (M3); past sessions, opt-in summaries (M4); bench (M5) | a member of `mcpServers` in `~/.claude.json` (user scope), edited in place with a backup | a marked block in `~/.claude/CLAUDE.md` | local transcripts (`~/.claude/projects/`) | SessionStart / SessionEnd |
 | opencode 1.x and 2.x | install, rule file, session plugin, past sessions, opt-in summaries, bench (M7a: 1.x; M7b: 2.x) | 1.x: members of `mcp`, 2.x: members of `mcp.servers`, in `~/.config/opencode/opencode.json(c)` (JSONC kept), edited in place with a backup | a rules file of our own, listed in `instructions` | its SQLite database (`~/.local/share/opencode/opencode.db`, both lines' tables), read-only | one plugin file for both lines: a session's start, and shutdown |
 | OpenAI Codex CLI | install, rule block, hooks, past sessions, opt-in summaries, bench with a local model (M7c) | one managed block of `[mcp_servers.*]` tables in `~/.codex/config.toml` (`$CODEX_HOME`), edited as text with a backup | a marked block in `~/.codex/AGENTS.md` (or `AGENTS.override.md` when that is the one Codex loads) | its rollout files (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`), read-only | SessionStart / SessionEnd in `~/.codex/hooks.json` (run once you trust them in `/hooks`) |
-| Cursor | planned (M7) | its MCP config | Cursor rules (to be checked) | its local store (format to be checked) | to be checked |
+| Cursor | install, rule file, hooks, past sessions the hooks report (M7d; no summaries or bench through Cursor; not yet checked with a live Cursor) | a member of `mcpServers` in `~/.cursor/mcp.json`, edited in place with a backup | a rule file of our own, `~/.cursor/rules/graphersal-memory.mdc` (`alwaysApply: true`) | the transcripts its hooks name (`transcript_path`), read-only | sessionStart / sessionEnd in `~/.cursor/hooks.json` |
 
 Where a harness has no hooks, synchronisation runs from the MCP server itself or on demand.
 
@@ -448,6 +449,112 @@ qwen2.5-coder-14b-instruct`):
 - `uninstall --harness codex --yes` deleted the three files install had created; only Codex's own
   runtime files stayed in `~/.codex`. (The export itself is shown in
   [install.md](install.md#codex); this store had no memories.)
+
+## Cursor
+
+Checked against Cursor's documentation as of 2026-11-10 (links below). Cursor is not installed on
+the machine this was built on and needs a login, so everything is tested against hand-built files
+in the documented formats; [cursor-live-check.md](cursor-live-check.md) is the checklist for a
+live run, and until it is done this section says what is expected, not what was seen.
+
+### Where Cursor keeps things
+
+- **Home**: `~/.cursor` (`%USERPROFILE%\.cursor` on Windows). No environment variable moves it;
+  `CURSOR_CONFIG_DIR` moves only the CLI's `cli-config.json`
+  ([CLI configuration](https://cursor.com/docs/cli/reference/configuration)).
+- **MCP servers**: the global file `~/.cursor/mcp.json`, `{"mcpServers": {"<name>": {"type":
+  "stdio", "command", "args", "env"}}}` ([MCP](https://cursor.com/docs/mcp), "Using mcp.json",
+  "STDIO server configuration", "Configuration locations"). The file has no documented
+  switched-off state: a server is switched off in the app (Customize, "Can I temporarily disable
+  an MCP server?") or with `agent mcp disable`, which keep their own list
+  ([CLI parameters](https://cursor.com/docs/cli/reference/parameters)). So, as for Claude Code,
+  the develop server is not registered until `install --enable-develop`. Servers of the global
+  file load without a per-workspace prompt ([CLI changelog](https://cursor.com/docs/cli/changelog),
+  "Global MCP servers auto-approved"). **Cursor asks before each MCP tool call by default**
+  ("Tool approval"); install does not change that (the approval is yours, as for Codex): allow
+  the memory tools in the approval prompt or in your run mode if you do not want to be asked.
+  The docs do not say how a tool is named to the model; the rule file names the tools by their
+  plain names.
+- **Rules**: project rules are `.mdc` files in `.cursor/rules` with `description`, `globs` and
+  `alwaysApply` front matter ([Rules](https://cursor.com/docs/rules)). For the user level the
+  help page says: "User rule files in `~/.cursor/rules` (Windows: `%USERPROFILE%\.cursor\rules`)
+  stay on the machine and do not sync"
+  ([Rules help](https://cursor.com/help/customization/rules), "Where are rules stored?"). The
+  User Rules of Customize are stored in your Cursor account, not in a file; graphersal-memory
+  never touches them. install writes its own file `~/.cursor/rules/graphersal-memory.mdc`
+  (`alwaysApply: true` and the managed rule block) and edits no file of yours. The MCP server's
+  instructions carry the same guidance (whether Cursor gives them to the model is not
+  documented). Caveat: a [forum report](https://forum.cursor.com/t/rules-in-home-folder-cursor-rules-are-not-applied/147236)
+  of December 2025 (Cursor 2.2.43) says files in `~/.cursor/rules` were not applied, and Cursor
+  staff called it a likely bug; the live check asks whether the rule reaches the model. Cursor
+  also reads a project's `AGENTS.md` and `CLAUDE.md`, but not `~/.claude/CLAUDE.md` (not
+  documented), so Claude Code's rule block does not reach Cursor.
+- **Session start and end**: hooks in `~/.cursor/hooks.json`, `{"version": 1, "hooks":
+  {"sessionStart": [{"command", "timeout"}], "sessionEnd": [...]}}`
+  ([Hooks](https://cursor.com/docs/hooks)). User hooks run from `~/.cursor/` and need no
+  approval (only project hooks need a trusted workspace); Cursor reloads the file on save
+  (restart Cursor if they do not load). Every agent hook gets `conversation_id`,
+  `workspace_roots`, `cursor_version` and `transcript_path` (the conversation's transcript, null
+  when transcripts are off); `sessionStart` adds `session_id` and may answer
+  `{"additional_context": "..."}`, which Cursor adds to the conversation's initial context. Both
+  are fire-and-forget: the chat never waits for them.
+- **Claude Code's hooks in Cursor**: Cursor also runs the hooks of `~/.claude/settings.json`
+  ([Third Party Hooks](https://cursor.com/docs/reference/third-party-hooks), "Include Third-Party
+  Plugins, Skills, and Other Configs", on by default). With graphersal-memory installed for
+  Claude Code, its hooks would run on Cursor's sessions too; they recognise Cursor's input
+  (`cursor_version`) and do nothing, so a Cursor session is never imported or indexed as a Claude
+  Code one (install it for Cursor to get Cursor's sessions).
+- **Sessions**: Cursor keeps its chat history in an internal database whose format is not
+  documented and changes between versions; graphersal-memory does not read it. The documented
+  way in is the hooks' `transcript_path`, a JSON Lines file under `agent-transcripts/` (sub-agent
+  transcripts under `agent-transcripts/<parent>/subagents/`, [CLI
+  changelog](https://cursor.com/docs/cli/changelog) of 2026-10-17). Our hooks record each
+  transcript with its workspace (`workspace_roots`) in `<data dir>/sessions/
+  cursor-transcripts.json`; only those transcripts are indexed (once unchanged for 30 minutes,
+  or at `sessionEnd`), as `session:<conversation id>`. So sessions from before install, or while
+  the hooks did not run, are not indexed. The line format of a transcript is not documented
+  either: the reader takes what it recognises (a `role` or `type` of `user`/`assistant`, the
+  `text` parts of `message.content`, the prompt inside `<user_query>` tags, `tool_use` names)
+  and skips the rest; a transcript it cannot read counts as empty and is not indexed. The live
+  check confirms this.
+- **Memory**: the documentation of 2026-11 describes no memory feature of Cursor's own. Cursor's
+  earlier "Memories" lost its settings UI in 2.1 (forum answers of Cursor staff, for example
+  [this thread](https://forum.cursor.com/t/custom-modes-and-memories-gone-in-2-1/143744)), and no
+  file switches it, so the wizard has no step for it and nothing is changed. If you still have
+  old ones, Cursor's command palette entry "Export memories" saves them as a rule file; to bring
+  them into the graph, ask the agent to `remember` them.
+
+### What `install` writes
+
+| File | What | How it is recognised |
+|---|---|---|
+| `~/.cursor/mcp.json` | `mcpServers.graphersal-memory` (`{"type": "stdio", "command": <this binary>, "args": ["mcp", "--profile", "use"]}`); `graphersal-memory-develop` only with `--enable-develop` | the command |
+| `~/.cursor/hooks.json` | one entry in `hooks.sessionStart` and one in `hooks.sessionEnd` (timeout 30 s), each `"<this binary>" hook session-start\|session-end ... --harness cursor`; a new file starts with `"version": 1` | the command |
+| `~/.cursor/rules/graphersal-memory.mdc` | front matter (`description`, `alwaysApply: true`) and the managed rule block | the marker lines; a hand edit inside is a conflict; a file of another program under this name is a conflict and kept |
+
+`mcp.json` and `hooks.json` are edited as text (comments kept); backups, the state
+(`<data dir>/install/cursor.json`) and the byte-identical `uninstall` of an untouched file work as
+for Claude Code. Files install created are deleted again (with `~/.cursor` itself when install
+created it and nothing else is in it); servers and hooks you add later stay.
+
+### `uninstall` and the export
+
+Cursor has no memory files to write back into. Uninstall exports every memory as readable Markdown
+under `~/graphersal-memory-export/cursor/` (per project `MEMORY.md` and one file per memory,
+`global.md`; default yes, nothing is deleted). It is not loaded into Cursor automatically; paste
+what you need into a project's `AGENTS.md` or into a rule file under `~/.cursor/rules`.
+`graphersal-memory export --to-files --harness cursor` writes it again.
+
+### Summaries and `bench`: not through Cursor
+
+Cursor's CLI (`agent -p --output-format json`) reports no cost
+([output format](https://cursor.com/docs/cli/reference/output-format)), needs its own login or a
+`CURSOR_API_KEY` ([authentication](https://cursor.com/docs/cli/reference/authentication)), and
+reads your `~/.cursor` (MCP servers, hooks) with no documented way to isolate a run. The monthly
+budget could not be kept and a run could not be sandboxed, so summaries and `bench` refuse a
+Cursor command. With Cursor alone, summaries stay off unless another harness's command
+(`claude -p`, `opencode run`, `codex exec`) is installed and set as `summaries.harness_command`;
+the raw turns are indexed either way.
 
 ## Without a terminal (later)
 

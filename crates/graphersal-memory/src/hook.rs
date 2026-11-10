@@ -21,6 +21,17 @@
 //! queues the indexing (the rollout active at the start, ended at the end) and prints the start
 //! line, which Codex adds to the session's context.
 //!
+//! Cursor's hooks (`crate::cursor`) run it with `--harness cursor` ([`run_cursor`]): its input
+//! names the conversation's transcript (`transcript_path`) and the workspace
+//! (`workspace_roots`); the hook records the pair in the registry of Cursor's transcripts
+//! (`crate::cursor::sessions::record`), queues the indexing (the transcript active at the
+//! start, ended at the end) and answers the start with `{"additional_context": ...}`.
+//!
+//! Cursor also runs Claude Code's hooks (its "Third Party Hooks", on by default). A Claude Code
+//! hook whose input carries Cursor's `cursor_version` does nothing ([`is_cursor_input`]): the
+//! Cursor hooks do Cursor's part, and a Claude Code import or indexing must not run on a Cursor
+//! session.
+//!
 //! A hook never blocks or fails the session: the work runs on a thread with a time limit, every
 //! error becomes a note on stderr, and the exit code is always 0. With
 //! `GRAPHERSAL_MEMORY_HOOK=off` (set for the summaries' own harness runs) a hook does nothing.
@@ -39,7 +50,7 @@ use crate::install::ClaudePaths;
 pub const BUDGET: Duration = Duration::from_secs(15);
 
 /// The largest hook input read from stdin.
-const MAX_INPUT: u64 = 1024 * 1024;
+pub const MAX_INPUT: u64 = 1024 * 1024;
 
 /// The hook events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -362,10 +373,137 @@ pub fn run_codex(
     )
 }
 
+/// The session start line for Cursor (its `sessionStart` hook adds `additional_context` to
+/// the conversation).
+pub const CURSOR_START_LINE: &str = "graphersal-memory: your memory is served by the MCP server \
+    graphersal-memory (tools memories, recall, memory, remember, forget; past sessions: \
+    sessions, session).";
+
+/// Reads a hook's input (at most [`MAX_INPUT`] bytes) within [`BUDGET`]; what came until then
+/// when the harness keeps stdin open longer.
+pub fn read_input(stdin: impl Read + Send + 'static) -> Vec<u8> {
+    let (done, result) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("hook-input".into())
+        .spawn(move || {
+            let mut input = Vec::new();
+            let _ = stdin.take(MAX_INPUT).read_to_end(&mut input);
+            let _ = done.send(input);
+        });
+    match spawned {
+        Ok(_) => result.recv_timeout(BUDGET).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Whether a hook's input comes from Cursor (its common input field `cursor_version`,
+/// cursor.com/docs/hooks).
+pub fn is_cursor_input(input: &str) -> bool {
+    serde_json::from_str::<Value>(input).is_ok_and(|v| v.get("cursor_version").is_some())
+}
+
+/// The workspace of a Cursor hook's input: the first of `workspace_roots`, else `fallback`
+/// (`CURSOR_PROJECT_DIR`).
+pub fn cursor_workspace(value: &Value, fallback: Option<&str>) -> Option<String> {
+    value["workspace_roots"]
+        .as_array()
+        .and_then(|roots| {
+            roots
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|r| !r.is_empty())
+        })
+        .or(fallback.filter(|d| !d.is_empty()))
+        .map(str::to_string)
+}
+
+/// What Cursor's hook does with its input: records the transcript with its workspace in
+/// `registry` and returns the indexing request (the transcript active at the start, ended at
+/// the end), with a note when the recording failed.
+pub fn cursor_request(
+    event: HookEvent,
+    registry: &Path,
+    value: &Value,
+    project_dir: Option<&str>,
+) -> (crate::sessions::Request, Vec<String>) {
+    let mut request = crate::sessions::Request::for_harness(crate::agents::Kind::Cursor, registry);
+    let mut notes = Vec::new();
+    let transcript = value["transcript_path"].as_str().map(PathBuf::from);
+    let session = value["session_id"]
+        .as_str()
+        .or_else(|| value["conversation_id"].as_str())
+        .unwrap_or_default();
+    match (transcript, cursor_workspace(value, project_dir)) {
+        (Some(path), Some(workspace)) if crate::cursor::sessions::is_transcript(&path) => {
+            if let Err(err) = crate::cursor::sessions::record(registry, &path, &workspace, session)
+            {
+                notes.push(format!("cannot record the transcript: {err}"));
+            }
+            match event {
+                HookEvent::SessionStart => request.active.insert(path),
+                HookEvent::SessionEnd => request.ended.insert(path),
+            };
+        }
+        (None, _) => notes.push(
+            "Cursor sent no transcript_path (transcripts are off?): this session is not indexed"
+                .to_string(),
+        ),
+        _ => {}
+    }
+    (request, notes)
+}
+
+/// `hook session-start|session-end --harness cursor` (Cursor's hooks, input
+/// `{"conversation_id", "session_id", "transcript_path", "workspace_roots", ...}`): records the
+/// transcript, queues the indexing within the time limit, answers the start with
+/// `{"additional_context": ...}`; never fails (exit code 0). Cursor keeps no memory files, so
+/// nothing is imported.
+pub fn run_cursor(
+    event: HookEvent,
+    registry: PathBuf,
+    project_dir: Option<String>,
+    enqueue: Option<Enqueue>,
+    stdin: impl Read + Send + 'static,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
+    let start = serde_json::json!({ "additional_context": CURSOR_START_LINE }).to_string();
+    run_queued_with(
+        event,
+        move |value: &Value| cursor_request(event, &registry, value, project_dir.as_deref()),
+        &start,
+        enqueue,
+        stdin,
+        stdout,
+        stderr,
+    )
+}
+
 /// A hook that only queues the indexing: `request` of the input, `start_line` at the start.
 fn run_queued(
     event: HookEvent,
     request: impl FnOnce(&Value) -> crate::sessions::Request + Send + 'static,
+    start_line: &str,
+    enqueue: Option<Enqueue>,
+    stdin: impl Read + Send + 'static,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
+    run_queued_with(
+        event,
+        move |value: &Value| (request(value), Vec::new()),
+        start_line,
+        enqueue,
+        stdin,
+        stdout,
+        stderr,
+    )
+}
+
+/// [`run_queued`] with notes from `request` (written to stderr like the hook's own).
+fn run_queued_with(
+    event: HookEvent,
+    request: impl FnOnce(&Value) -> (crate::sessions::Request, Vec<String>) + Send + 'static,
     start_line: &str,
     enqueue: Option<Enqueue>,
     stdin: impl Read + Send + 'static,
@@ -379,8 +517,7 @@ fn run_queued(
             let mut input = String::new();
             let _ = stdin.take(MAX_INPUT).read_to_string(&mut input);
             let value: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
-            let request = request(&value);
-            let mut notes = Vec::new();
+            let (request, mut notes) = request(&value);
             if let Some(enqueue) = enqueue
                 && let Err(err) = enqueue(request)
             {
@@ -545,6 +682,80 @@ mod tests {
             deadline,
         );
         assert_eq!(end, Outcome::default());
+    }
+
+    #[test]
+    fn the_cursor_hook_records_its_transcript_and_answers_json_at_the_start() {
+        use std::sync::{Arc, Mutex};
+        let tmp = crate::mcp_tests::TempDir::new("cursor-hook");
+        let registry = tmp.path().join("data/sessions/cursor-transcripts.json");
+        let transcript = tmp
+            .path()
+            .join("cursor/projects/w-app/agent-transcripts/c1/c1.jsonl");
+        // Cursor's input: the common fields and sessionStart's own (cursor.com/docs/hooks).
+        let input = serde_json::json!({
+            "conversation_id": "c1", "generation_id": "g1", "model": "auto",
+            "hook_event_name": "sessionStart", "cursor_version": "2.6.0",
+            "workspace_roots": ["/w/app"], "user_email": null,
+            "transcript_path": transcript.display().to_string(),
+            "session_id": "c1", "is_background_agent": false, "composer_mode": "agent",
+        })
+        .to_string();
+        assert!(is_cursor_input(&input));
+        assert!(!is_cursor_input(r#"{"session_id": "x", "cwd": "/w"}"#));
+        for (event, lines) in [(HookEvent::SessionStart, 1), (HookEvent::SessionEnd, 0)] {
+            let seen: Arc<Mutex<Option<crate::sessions::Request>>> = Arc::default();
+            let keep = seen.clone();
+            let enqueue: Enqueue = Box::new(move |request| {
+                *keep.lock().unwrap() = Some(request);
+                Ok(())
+            });
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = run_cursor(
+                event,
+                registry.clone(),
+                None,
+                Some(enqueue),
+                std::io::Cursor::new(input.clone().into_bytes()),
+                &mut out,
+                &mut err,
+            );
+            assert_eq!(code, 0);
+            let out = String::from_utf8(out).unwrap();
+            assert_eq!(out.lines().count(), lines, "{out}");
+            if lines == 1 {
+                let answer: Value = serde_json::from_str(&out).unwrap();
+                assert_eq!(answer["additional_context"], CURSOR_START_LINE);
+            }
+            assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+            let request = seen.lock().unwrap().clone().unwrap();
+            assert_eq!(request.harness, crate::agents::Kind::Cursor);
+            assert_eq!(request.projects_dir, registry);
+            match event {
+                HookEvent::SessionStart => assert!(request.active.contains(&transcript)),
+                HookEvent::SessionEnd => assert!(request.ended.contains(&transcript)),
+            }
+        }
+        let recorded = crate::cursor::sessions::load(&registry).unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[&transcript].project, "/w/app");
+        assert_eq!(recorded[&transcript].session, "c1");
+        // Transcripts off: nothing recorded, a note; CURSOR_PROJECT_DIR when no workspace root.
+        let off = serde_json::json!({"cursor_version": "2.6.0", "transcript_path": null,
+                                     "workspace_roots": ["/w/app"]});
+        let (request, notes) = cursor_request(HookEvent::SessionEnd, &registry, &off, None);
+        assert!(request.ended.is_empty());
+        assert!(notes[0].contains("no transcript_path"), "{notes:?}");
+        let other = tmp.path().join("t/c2.jsonl");
+        let bare = serde_json::json!({"transcript_path": other.display().to_string(),
+                                      "conversation_id": "c2"});
+        let (request, notes) =
+            cursor_request(HookEvent::SessionEnd, &registry, &bare, Some("/w/env"));
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(request.ended.contains(&other));
+        let recorded = crate::cursor::sessions::load(&registry).unwrap();
+        assert_eq!(recorded[&other].project, "/w/env");
+        assert_eq!(recorded[&other].session, "c2");
     }
 
     #[test]

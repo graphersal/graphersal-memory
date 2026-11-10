@@ -987,7 +987,7 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
     ));
     lines.push(format!(
         "  headless command (summaries, bench): `{}` by default",
-        setup.codex_agent().headless_command()
+        setup.codex_agent().headless_command().unwrap_or_default()
     ));
     lines.push(format!(
         "  sessions: read from {}{}",

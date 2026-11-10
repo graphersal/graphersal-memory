@@ -808,3 +808,143 @@ Report:
   changed /tmp/gmc/h/.codex/AGENTS.md
   Your memories stay in /tmp/gmc/d (`uninstall --purge` deletes them).
 ```
+
+## Cursor
+
+Cursor is not run here (it needs a login); these outputs come from the M7d build on throwaway
+homes. The wizard was captured from the in-process wizard test
+(`the_wizard_lists_cursor_among_the_detected_agents`, paths shortened to `/tmp/gmu/h` for the
+home and `/tmp/gmu/d` for the data directory): a home with `~/.claude` and `~/.cursor`, so both
+harnesses were found and the wizard asked which agents. Answers: `3` (Cursor only), Enter
+(English), `3` (built-in model), `2` (no summaries), `2` (no develop server), Enter (apply). The
+step count drops from 7 to 6 after the choice: the Claude Code auto-memory step does not apply to
+Cursor.
+
+```text
+graphersal-memory install (Claude Code, Cursor)
+A few questions; Enter takes the default. Nothing changes before the last step.
+
+Step 1 of 7 · Which agents
+  graphersal-memory found these agent harnesses on this machine. Every one you
+  choose gets the same memory: one store and one background daemon, so a project's
+  memory is the same from each agent.
+
+  1) All of them       Claude Code and Cursor  (default)
+  2) Claude Code only
+  3) Cursor only
+Choose [1]: 3
+
+Step 2 of 6 · Memory language
+  ...
+Step 3 of 6 · Embedding model
+  ...
+Step 4 of 6 · Session summaries
+  Past sessions are indexed locally (their raw turns, no model call). Optionally each
+  finished session is summarized through your own `claude -p --model sonnet`
+  (decisions, corrections, outcomes, open threads). That costs model usage:
+  0 finished sessions, 0 without a summary: about $0.00 at list price (an estimate: ~4
+  characters per token, $3/$15 per million input/output tokens, plus the harness's own
+  prompt; your harness reports the real cost)
+  Cursor's own CLI is not used for summaries (it reports no cost); say yes only if
+  the command above is installed and logged in.
+
+  1) Yes  summarize, at most $5.00 per month
+  2) No   raw turns only (`graphersal-memory summaries enable` later)
+Choose 1-2: 2
+
+Step 5 of 6 · The develop server
+  ...
+Choose 1-2: 2
+
+Step 6 of 6 · Summary
+  This is what install will do:
+
+  1. Agents
+     - Cursor (one store and one daemon serve every agent chosen)
+  2. Memory language
+     - English only (stored and searched in English) (in the MCP instructions and the rule block; config.json memory.language)
+  3. Embedding model
+     - the built-in embedder hash-ngram/1 (no download; finds shared words and spellings, not meaning)
+  4. Register the MCP servers in Cursor's /tmp/gmu/h/.cursor/mcp.json (key mcpServers)
+     - graphersal-memory (use profile): add
+     - graphersal-memory-develop: not registered (off; `graphersal-memory install --harness cursor --enable-develop` registers it)
+     - Cursor asks before each MCP tool call by default; to stop being asked for the memory tools, allow them in the approval prompt or in your run mode settings (your choice; install does not change it)
+  5. Add the sessionStart and sessionEnd hooks in /tmp/gmu/h/.cursor/hooks.json
+     - sessionStart: add `"/opt/gm/bin/graphersal-memory" hook session-start --data-dir "/tmp/gmu/d" --harness cursor`
+     - sessionEnd: add `"/opt/gm/bin/graphersal-memory" hook session-end --data-dir "/tmp/gmu/d" --harness cursor`
+     - user hooks need no approval; Cursor reloads the file on save (restart Cursor if they do not load)
+  6. Write the rule file /tmp/gmu/h/.cursor/rules/graphersal-memory.mdc
+     - create it (front matter alwaysApply: true, and the rule block)
+  7. Index past sessions (raw turns, locally, in the background)
+     - Cursor: 0 sessions in /tmp/gmu/d/sessions/cursor-transcripts.json: 0 to index, 0 still being written (indexed later)
+     - summaries: off (raw turns only; `graphersal-memory summaries enable` later)
+  8. Settings file /tmp/gmu/d/config.json
+     - write the defaults (daemon idle time 2h) and the answers
+
+Apply these changes? [Enter = apply, n = cancel]:
+
+Report:
+  created /tmp/gmu/h/.cursor/mcp.json
+  created /tmp/gmu/h/.cursor/hooks.json
+  created /tmp/gmu/h/.cursor/rules/graphersal-memory.mdc
+  created /tmp/gmu/d/config.json
+  embedding model: the built-in hash-ngram/1 (the daemon re-embeds the memory with it in the background)
+  summaries: off (raw turns are indexed; `graphersal-memory summaries enable` switches them on)
+  past sessions: indexed at the next session start (or now: `graphersal-memory import --sessions`)
+
+Restart running Cursor sessions to load the MCP server and the hooks. `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` removes it.
+```
+
+### `graphersal-memory status` afterwards
+
+From the real binary (`install --harness cursor --yes --model builtin` on a home holding only an
+empty `~/.cursor`):
+
+```text
+daemon: not running (run directory /tmp/gmu/r; the next agent session starts it)
+data directory: /tmp/gmu/d
+settings: /tmp/gmu/d/config.json (daemon idle time 7200s)
+sessions: 0 indexed, 0 summarized; summaries off
+Memory:
+  memory language: English only (stored and searched in English)
+  embedding model: hash-ngram/1 (built-in, no download; finds shared words, not meaning)
+Cursor (configuration /tmp/gmu/h/.cursor):
+  MCP server graphersal-memory (use, /tmp/gmu/h/.cursor/mcp.json): installed
+  MCP server graphersal-memory-develop: not registered (`graphersal-memory install --harness cursor --enable-develop` registers it)
+  hook sessionStart (/tmp/gmu/h/.cursor/hooks.json): installed
+  hook sessionEnd (/tmp/gmu/h/.cursor/hooks.json): installed
+  rule file (/tmp/gmu/h/.cursor/rules/graphersal-memory.mdc): installed
+  Cursor memories: none in a file (nothing to switch off)
+  headless command (summaries, bench): none (Cursor's CLI is not used; summaries run through Claude Code, opencode or Codex when one is installed)
+  sessions: 0 transcript(s) reported by the hooks (0 on disk), registry /tmp/gmu/d/sessions/cursor-transcripts.json
+```
+
+### `graphersal-memory uninstall`
+
+One memory was saved first (through `mcp --no-daemon` in the git repository `/tmp/gmu/proj`; on
+macOS `/tmp` is `/private/tmp`). Afterwards `~/.cursor` held nothing of graphersal-memory (the
+empty directory was there before install); the only new files are the export.
+
+```text
+graphersal-memory uninstall (Cursor)
+
+  - export 1 memory of 1 project (0 global) into readable Markdown files under /tmp/gmu/h/graphersal-memory-export/cursor (Cursor has no file memory; nothing is deleted)
+  - /tmp/gmu/h/.cursor/mcp.json: delete the file (install created it)
+  - /tmp/gmu/h/.cursor/hooks.json: delete the file (install created it)
+  - /tmp/gmu/h/.cursor/rules/graphersal-memory.mdc: delete the file (install created it)
+
+Proceed? [y/N] y
+
+Report:
+  exported 1 memory of 1 project (plus the global ones): 2 files written, 0 unchanged
+    wrote /tmp/gmu/h/graphersal-memory-export/cursor/-private-tmp-gmu-proj/tabs-not-spaces.md
+    wrote /tmp/gmu/h/graphersal-memory-export/cursor/-private-tmp-gmu-proj/MEMORY.md
+  Cursor has no file memory: the export is plain Markdown (per project MEMORY.md and one file per memory, the global ones in /tmp/gmu/h/graphersal-memory-export/cursor/global.md). It is not loaded automatically; to give the agent a file, paste it into a project's AGENTS.md or into a rule file under ~/.cursor/rules (a .mdc file with `alwaysApply: true`). `graphersal-memory export --to-files --harness cursor` writes it again.
+  removed /tmp/gmu/h/.cursor/mcp.json
+  removed /tmp/gmu/h/.cursor/hooks.json
+  removed /tmp/gmu/h/.cursor/rules/graphersal-memory.mdc
+  removed the directory /tmp/gmu/h/.cursor/rules
+  Your memories stay in /tmp/gmu/d (`uninstall --purge` deletes them).
+```
+
+A live run with Cursor is still to be done: [cursor-live-check.md](cursor-live-check.md).

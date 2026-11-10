@@ -16,7 +16,8 @@ graphersal-memory is built in stages, strictly in order. Each stage ships with t
 | **M7a** Done | opencode (1.x): install/uninstall, session plugin, past sessions, summaries and bench through `opencode run`; both harnesses on one store. |
 | **M7b** Done | opencode 2.x beside 1.x: the line detected with `opencode --version`, 2.x's configuration shape, one plugin file for both lines, sessions from both lines' tables, `--standalone` headless runs; `doctor` and `install` move our entries after an upgrade from 1.x. |
 | **M7c** Done | OpenAI Codex CLI: MCP servers in `~/.codex/config.toml`, the rule block in `AGENTS.md`, SessionStart/SessionEnd hooks, past sessions from its rollout files, summaries through `codex exec`, bench with a local model, Codex's own memories switched off on request. |
-| **M7** Later | Cursor; the browser UI for develop mode; isolated project stores; a path for people who don't use a terminal, such as a desktop app and a Claude Desktop extension. |
+| **M7d** Done | Cursor: the MCP server in `~/.cursor/mcp.json`, a rule file of our own in `~/.cursor/rules`, sessionStart/sessionEnd hooks, past sessions from the transcripts the hooks name; no summaries or bench through Cursor's CLI. Tested against fixtures; the live check ([cursor-live-check.md](cursor-live-check.md)) is pending. |
+| **M7** Later | The browser UI for develop mode; isolated project stores; a path for people who don't use a terminal, such as a desktop app and a Claude Desktop extension. |
 
 Ideas beyond M7: a code knowledge base as a second mode of the same tool, user-defined LLM tasks
 stored in the database (for example "extract open TODOs from sessions"), and sharing a successful

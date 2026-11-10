@@ -1,6 +1,7 @@
 //! The harness abstraction: what `install`, `uninstall`, `import` and `export` need to know
 //! about one AI agent harness, behind one interface. Claude Code ([`ClaudeCode`]), opencode
-//! (`crate::opencode::OpenCode`) and Codex (`crate::codex::Codex`) implement it; `crate::install` asks the [`Agent`] for the
+//! (`crate::opencode::OpenCode`), Codex (`crate::codex::Codex`) and Cursor
+//! (`crate::cursor::Cursor`) implement it; `crate::install` asks the [`Agent`] for the
 //! files it edits, the JSON keys of its MCP registrations and the names the wizard shows.
 
 use std::path::{Path, PathBuf};
@@ -19,11 +20,13 @@ pub enum Kind {
     OpenCode,
     /// OpenAI Codex CLI.
     Codex,
+    /// Cursor.
+    Cursor,
 }
 
 impl Kind {
     /// Every supported harness, in the order the wizard lists them.
-    pub const ALL: [Kind; 3] = [Kind::ClaudeCode, Kind::OpenCode, Kind::Codex];
+    pub const ALL: [Kind; 4] = [Kind::ClaudeCode, Kind::OpenCode, Kind::Codex, Kind::Cursor];
 
     /// The id of the command line and the state files (`claude-code`, `opencode`).
     pub fn id(self) -> &'static str {
@@ -31,6 +34,7 @@ impl Kind {
             Kind::ClaudeCode => "claude-code",
             Kind::OpenCode => "opencode",
             Kind::Codex => "codex",
+            Kind::Cursor => "cursor",
         }
     }
 
@@ -40,6 +44,7 @@ impl Kind {
             Kind::ClaudeCode => "Claude Code",
             Kind::OpenCode => "opencode",
             Kind::Codex => "Codex",
+            Kind::Cursor => "Cursor",
         }
     }
 
@@ -90,8 +95,9 @@ pub trait Agent {
     /// The settings key that switches the harness's own memory off (`false` = off), when it
     /// has one.
     fn auto_memory_key(&self) -> Option<&'static str>;
-    /// The headless command line the summaries and the A/B run (a prompt on stdin).
-    fn headless_command(&self) -> &'static str;
+    /// The headless command line the summaries and the A/B run (a prompt on stdin); `None`
+    /// when the harness has none graphersal-memory can use (Cursor).
+    fn headless_command(&self) -> Option<&'static str>;
 }
 
 /// Whether an MCP entry is one of ours: it starts a `graphersal-memory` binary with `mcp`
@@ -195,8 +201,8 @@ impl Agent for ClaudeCode {
         Some("autoMemoryEnabled")
     }
 
-    fn headless_command(&self) -> &'static str {
-        crate::config::DEFAULT_HARNESS_COMMAND
+    fn headless_command(&self) -> Option<&'static str> {
+        Some(crate::config::DEFAULT_HARNESS_COMMAND)
     }
 }
 

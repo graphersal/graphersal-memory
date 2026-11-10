@@ -850,7 +850,10 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
     lines.push("  auto-memory: opencode has none (nothing to switch off)".to_string());
     lines.push(format!(
         "  headless command (summaries, bench): `{}` by default",
-        setup.opencode_agent().headless_command()
+        setup
+            .opencode_agent()
+            .headless_command()
+            .unwrap_or_default()
     ));
     lines.push(format!(
         "  sessions: read from {}{}",

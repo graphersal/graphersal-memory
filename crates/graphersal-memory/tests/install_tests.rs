@@ -512,3 +512,80 @@ fn uninstall_writes_every_memory_back_into_the_file_memory_through_the_daemon() 
     // install created the settings file, so it is gone again, auto-memory switch included.
     assert!(!env.home().join(".claude/settings.json").exists());
 }
+
+#[test]
+fn cursor_install_hooks_status_and_uninstall_through_the_binary() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.home().join(".cursor")).unwrap();
+    let before = env.home_snapshot();
+    let install = env.run(&[
+        "install",
+        "--harness",
+        "cursor",
+        "--yes",
+        "--model",
+        "builtin",
+    ]);
+    assert!(install.status.success(), "{}", text(&install));
+    assert!(env.home().join(".cursor/mcp.json").is_file());
+    assert!(
+        env.home()
+            .join(".cursor/rules/graphersal-memory.mdc")
+            .is_file()
+    );
+    let status = env.run(&["status"]);
+    let out = text(&status);
+    assert!(out.contains("Cursor (configuration"), "{out}");
+    assert!(out.contains("hook sessionStart"), "{out}");
+
+    // Cursor's sessionStart input (cursor.com/docs/hooks) with a transcript in its home.
+    let transcript = env
+        .home()
+        .join(".cursor/projects/w/agent-transcripts/c1/c1.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(
+        &transcript,
+        "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"<user_query>hi</user_query>\"}]}}\n",
+    )
+    .unwrap();
+    let input = json!({"conversation_id": "c1", "session_id": "c1",
+        "hook_event_name": "sessionStart", "cursor_version": "2.6.0",
+        "workspace_roots": [env.root.display().to_string()],
+        "transcript_path": transcript.display().to_string()})
+    .to_string();
+    let registry = env.data_dir().join("sessions/cursor-transcripts.json");
+    // Claude Code's hook run by Cursor (third-party hooks): nothing happens.
+    let claude_hook = env.run_with_input(&["hook", "session-start"], &input);
+    assert!(claude_hook.status.success(), "{}", text(&claude_hook));
+    assert!(claude_hook.stdout.is_empty(), "{}", text(&claude_hook));
+    assert!(
+        String::from_utf8_lossy(&claude_hook.stderr).contains("run by Cursor"),
+        "{}",
+        text(&claude_hook)
+    );
+    assert!(!registry.exists());
+    // Our Cursor hook: JSON with the start line, the transcript recorded.
+    let hook = env.run_with_input(&["hook", "session-start", "--harness", "cursor"], &input);
+    assert!(hook.status.success(), "{}", text(&hook));
+    let answer: Value = serde_json::from_slice(&hook.stdout).unwrap();
+    assert!(
+        answer["additional_context"]
+            .as_str()
+            .unwrap()
+            .starts_with("graphersal-memory:")
+    );
+    let recorded: Value =
+        serde_json::from_str(&std::fs::read_to_string(&registry).unwrap()).unwrap();
+    assert!(
+        recorded["transcripts"][transcript.display().to_string()]["project"].is_string(),
+        "{recorded}"
+    );
+    let end = env.run_with_input(&["hook", "session-end", "--harness", "cursor"], &input);
+    assert!(end.status.success(), "{}", text(&end));
+    assert!(end.stdout.is_empty(), "{}", text(&end));
+
+    std::fs::remove_dir_all(env.home().join(".cursor/projects")).unwrap();
+    let uninstall = env.run(&["uninstall", "--harness", "cursor", "--yes", "--no-export"]);
+    assert!(uninstall.status.success(), "{}", text(&uninstall));
+    assert_eq!(env.home_snapshot(), before, "{}", text(&uninstall));
+}

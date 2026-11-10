@@ -209,6 +209,7 @@ fn setup_with(home: &Path, data: &Path, endpoint: &str) -> Setup {
         paths,
         opencode: crate::opencode::OpenCodePaths::of_home(home),
         codex: crate::codex::CodexPaths::of_home(home),
+        cursor: crate::cursor::CursorPaths::of_home(home, data),
         search_path: Some(std::ffi::OsString::new()),
         data_dir: data.to_path_buf(),
         run_dir: std::env::temp_dir().join(format!("gmm{}", std::process::id())),

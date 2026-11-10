@@ -182,6 +182,8 @@ pub struct Setup {
     pub opencode: crate::opencode::OpenCodePaths,
     /// Codex's files.
     pub codex: crate::codex::CodexPaths,
+    /// Cursor's files (and the registry of its transcripts in the data directory).
+    pub cursor: crate::cursor::CursorPaths,
     /// The program search path the harness detection looks in (`None`: this process's `PATH`;
     /// tests pass an empty one).
     pub search_path: Option<std::ffi::OsString>,
@@ -215,12 +217,18 @@ impl Setup {
         crate::codex::Codex::new(self.codex.clone())
     }
 
+    /// Cursor with this setup's paths.
+    pub fn cursor_agent(&self) -> crate::cursor::Cursor {
+        crate::cursor::Cursor::new(self.cursor.clone())
+    }
+
     /// The agent of a harness.
     pub fn agent_of(&self, kind: Kind) -> Box<dyn Agent> {
         match kind {
             Kind::ClaudeCode => Box::new(self.agent()),
             Kind::OpenCode => Box::new(self.opencode_agent()),
             Kind::Codex => Box::new(self.codex_agent()),
+            Kind::Cursor => Box::new(self.cursor_agent()),
         }
     }
 
@@ -257,6 +265,10 @@ impl Setup {
                                 || self.opencode.home.join(".opencode/bin").is_dir()
                         }
                         Kind::Codex => self.on_path("codex") || self.codex.codex_home.is_dir(),
+                        Kind::Cursor => {
+                            crate::cursor::find_program(self.search_path.as_deref()).is_some()
+                                || self.cursor.cursor_dir.is_dir()
+                        }
                     }
             })
             .collect()
@@ -275,6 +287,7 @@ impl Setup {
                             !crate::opencode::install::inspect(self).nothing_installed()
                         }
                         Kind::Codex => !crate::codex::install::inspect(self).nothing_installed(),
+                        Kind::Cursor => !crate::cursor::install::inspect(self).nothing_installed(),
                     }
             })
             .collect()
@@ -327,7 +340,7 @@ pub fn is_our_entry(entry: &Value) -> bool {
 }
 
 /// Whether a hook command is one of ours.
-fn is_our_command(command: &str) -> bool {
+pub(crate) fn is_our_command(command: &str) -> bool {
     command.contains("graphersal-memory") && command.contains(" hook session-")
 }
 
@@ -649,6 +662,8 @@ struct InstallPlan {
     codex_changes: Vec<Change>,
     /// What happens to Codex's memories (`crate::codex::install::Plan::memories`).
     codex_memories: Option<bool>,
+    /// Cursor's file changes.
+    cursor_changes: Vec<Change>,
     conflicts: Vec<String>,
     imports: Vec<DirPlan>,
     write_config: bool,
@@ -1136,6 +1151,8 @@ fn ask(
         defaults.harnesses.clone()
     };
     let claude = harnesses.contains(&Kind::ClaudeCode);
+    // Steps counted while another harness could be chosen but not asked for this choice.
+    let total = total - skipped_steps(current, claude_possible, codex_possible, &harnesses);
 
     console.step(
         next(),
@@ -1290,24 +1307,29 @@ fn ask(
         defaults.auto_memory_off
     };
 
-    console.step(
-        next(),
-        total,
-        "Session summaries",
-        &[
-            "Past sessions are indexed locally (their raw turns, no model call). Optionally each",
-            &format!(
-                "finished session is summarized through your own `{}`",
-                summaries_command(&current.config, &harnesses).join(" ")
-            ),
-            if crate::harness::costs_nothing(&summaries_command(&current.config, &harnesses)) {
-                "(decisions, corrections, outcomes, open threads). With this free model:"
-            } else {
-                "(decisions, corrections, outcomes, open threads). That costs model usage:"
-            },
-            &summaries_estimate(setup, &current.config, &harnesses),
-        ],
-    );
+    let mut summary_lines = vec![
+        "Past sessions are indexed locally (their raw turns, no model call). Optionally each"
+            .to_string(),
+        format!(
+            "finished session is summarized through your own `{}`",
+            summaries_command(&current.config, &harnesses).join(" ")
+        ),
+        if crate::harness::costs_nothing(&summaries_command(&current.config, &harnesses)) {
+            "(decisions, corrections, outcomes, open threads). With this free model:".to_string()
+        } else {
+            "(decisions, corrections, outcomes, open threads). That costs model usage:".to_string()
+        },
+        summaries_estimate(setup, &current.config, &harnesses),
+    ];
+    if harnesses == [Kind::Cursor] {
+        summary_lines.push(
+            "Cursor's own CLI is not used for summaries (it reports no cost); say yes only if"
+                .to_string(),
+        );
+        summary_lines.push("the command above is installed and logged in.".to_string());
+    }
+    let summary_lines: Vec<&str> = summary_lines.iter().map(String::as_str).collect();
+    console.step(next(), total, "Session summaries", &summary_lines);
     let summaries = console.yes_no(
         &format!(
             "summarize, at most ${:.2} per month",
@@ -1356,6 +1378,23 @@ fn wizard_steps(
     let import = claude_possible && current.import_pending.1 > 0;
     let auto = current.ask_auto_memory(claude_possible, codex_possible);
     4 + usize::from(ask_harnesses) + usize::from(import) + usize::from(auto) + 1
+}
+
+/// The steps [`wizard_steps`] counted that the choice of `chosen` harnesses leaves out: the
+/// import and the auto-memory question when Claude Code (or, for the memories, Codex) is not
+/// chosen.
+fn skipped_steps(
+    current: &Current,
+    claude_possible: bool,
+    codex_possible: bool,
+    chosen: &[Kind],
+) -> usize {
+    let claude = chosen.contains(&Kind::ClaudeCode);
+    let import_counted = claude_possible && current.import_pending.1 > 0;
+    let auto_counted = current.ask_auto_memory(claude_possible, codex_possible);
+    let auto_asked = (claude && !current.auto_memory_off_by_user)
+        || (chosen.contains(&Kind::Codex) && current.codex_memories_on);
+    usize::from(import_counted && !claude) + usize::from(auto_counted && !auto_asked)
 }
 
 /// The command the summaries run through for `harnesses`: the settings file's, except that
@@ -1527,6 +1566,13 @@ fn plan_install(
         codex_memories = plan.memories;
         conflicts.extend(plan.conflicts);
     }
+    let mut cursor_changes = Vec::new();
+    if answers.harnesses.contains(&Kind::Cursor) {
+        let plan = crate::cursor::install::plan(setup, answers.language, answers.develop)?;
+        steps.extend(plan.steps);
+        cursor_changes = plan.changes;
+        conflicts.extend(plan.conflicts);
+    }
     steps.push(plan_sessions(setup, options, answers, current)?);
     let config_path = crate::config::path(&setup.data_dir);
     let write_config = !config_path.exists();
@@ -1554,6 +1600,7 @@ fn plan_install(
         opencode_changes,
         codex_changes,
         codex_memories,
+        cursor_changes,
         conflicts,
         imports,
         write_config,
@@ -1855,7 +1902,13 @@ pub fn install(
         let ask_harnesses = options.harnesses.is_none() && current.detected.len() > 1;
         let claude_possible = ask_harnesses || offered.contains(&Kind::ClaudeCode);
         let codex_possible = ask_harnesses || offered.contains(&Kind::Codex);
-        let total = wizard_steps(options, &current, claude_possible, codex_possible);
+        let total = wizard_steps(options, &current, claude_possible, codex_possible)
+            - skipped_steps(
+                &current,
+                claude_possible,
+                codex_possible,
+                &answers.harnesses,
+            );
         console.step(total, total, "Summary", &["This is what install will do:"]);
         print_steps(console.out(), &plan.steps);
         for conflict in &plan.conflicts {
@@ -1965,6 +2018,10 @@ pub fn install(
                     None => {}
                 }
                 kind_state.save(setup)?;
+            }
+            Kind::Cursor => {
+                kind_state.save(setup)?;
+                apply_changes(setup, &plan.cursor_changes, &mut kind_state, &mut report)?;
             }
         }
     }
@@ -2196,6 +2253,7 @@ pub fn install(
     if plan.changes.is_empty()
         && plan.opencode_changes.is_empty()
         && plan.codex_changes.is_empty()
+        && plan.cursor_changes.is_empty()
         && plan.conflicts.is_empty()
     {
         let _ = writeln!(
@@ -2216,7 +2274,9 @@ pub fn install(
             .collect::<Vec<_>>()
             .join(" and "),
         match (
-            claude || answers.harnesses.contains(&Kind::Codex),
+            claude
+                || answers.harnesses.contains(&Kind::Codex)
+                || answers.harnesses.contains(&Kind::Cursor),
             answers.harnesses.contains(&Kind::OpenCode)
         ) {
             (true, true) => "hooks and the plugin",
@@ -2457,6 +2517,7 @@ pub fn uninstall_with(
     let state = State::load(setup)?;
     let opencode_state = State::load_of(setup, Kind::OpenCode)?;
     let codex_state = State::load_of(setup, Kind::Codex)?;
+    let cursor_state = State::load_of(setup, Kind::Cursor)?;
     let mut conflicts = Vec::new();
     let mut changes: Vec<(Kind, Change, &'static str)> = Vec::new();
     if kinds.contains(&Kind::ClaudeCode) {
@@ -2482,6 +2543,16 @@ pub fn uninstall_with(
             &mut conflicts,
         )? {
             changes.push((Kind::Codex, change, what));
+        }
+    }
+    if kinds.contains(&Kind::Cursor) {
+        for (change, what) in crate::cursor::install::removal(
+            setup,
+            &cursor_state,
+            options.disable_develop_only,
+            &mut conflicts,
+        )? {
+            changes.push((Kind::Cursor, change, what));
         }
     }
     let title = if options.disable_develop_only {
@@ -2652,6 +2723,7 @@ pub fn uninstall_with(
         (Kind::ClaudeCode, state),
         (Kind::OpenCode, opencode_state),
         (Kind::Codex, codex_state),
+        (Kind::Cursor, cursor_state),
     ];
     for (kind, change, _) in &changes {
         match &change.after {
