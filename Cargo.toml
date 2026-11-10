@@ -64,7 +64,9 @@ lto = "fat"
 strip = true
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny`, not `forbid`: one Windows function allows it (`shim::keep_std_handles_from_children`,
+# a kernel32 call std offers only unstably). Every other `unsafe` is an error.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
