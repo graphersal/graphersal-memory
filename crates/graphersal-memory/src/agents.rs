@@ -59,7 +59,8 @@ pub trait Agent {
     }
     /// The file holding the user-scope MCP server registrations.
     fn mcp_config_file(&self) -> &Path;
-    /// The object of the MCP registrations in that file (`mcpServers`, `mcp`).
+    /// The object of the MCP registrations in that file (`mcpServers`, `mcp`; opencode 2.x
+    /// keeps them one level deeper, in `mcp.servers`).
     fn mcp_servers_key(&self) -> &'static str;
     /// The MCP registration that starts `exe` with `args` (a local stdio server).
     fn mcp_entry(&self, exe: &Path, args: &[String]) -> Value;

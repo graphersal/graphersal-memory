@@ -377,7 +377,7 @@ pub fn harness_args(command: &[String]) -> Vec<String> {
 
 /// Runs the harness once: the prompt on stdin, the answer on stdout (`crate::harness::run`:
 /// `claude.cmd` on Windows is found through `PATHEXT`). An opencode command (`opencode run
-/// ...`) runs with `--format json` in a sandbox in `work_dir` (its own configuration and data directories: no tools, no MCP
+/// ...`) runs with `--format json` (2.x: and `--standalone`) in a sandbox in `work_dir` (its own configuration and data directories: no tools, no MCP
 /// servers, none of the user's plugins or rules, its session not stored in the user's
 /// database; a copy of the logins beside `opencode_db`), and its events are read as the answer.
 pub fn run_harness_with(
@@ -394,6 +394,7 @@ pub fn run_harness_with(
     let opencode = crate::opencode::is_opencode(command);
     let mut env: Vec<(String, String)> = vec![(HOOK_ENV.to_string(), "off".to_string())];
     if opencode {
+        args = crate::opencode::headless_args(&args);
         args.extend(["--format".to_string(), "json".to_string()]);
         let sandbox = work_dir.join("opencode");
         let _ = std::fs::remove_dir_all(&sandbox);

@@ -187,6 +187,8 @@ Report:
 
 ## opencode
 
+### opencode 1.x
+
 Captured on 2026-11-10 like the outputs above, on a throwaway home (`/tmp/gmo/h`, shown with that
 path) holding only an empty `~/.config/opencode/` directory, so opencode was the one harness found
 and the wizard did not ask which agents. Answers: Enter (English), `3` (built-in model, no
@@ -277,7 +279,7 @@ Report:
 Restart running opencode sessions to load the MCP server and the plugin. `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` removes it.
 ```
 
-### `graphersal-memory status` afterwards
+#### `graphersal-memory status` afterwards
 
 ```text
 daemon: not running (run directory /tmp/gm-wiz1; the next agent session starts it)
@@ -298,7 +300,7 @@ opencode (configuration /tmp/gmo/h/.config/opencode/opencode.json):
   sessions: read from /tmp/gmo/h/.local/share/opencode/opencode.db (not there yet)
 ```
 
-### `graphersal-memory uninstall`
+#### `graphersal-memory uninstall`
 
 The store held no memories, so the export wrote nothing; with memories it writes readable
 Markdown under `~/graphersal-memory-export/opencode/` (per project `MEMORY.md` and one file per
@@ -324,6 +326,165 @@ Report:
   removed the directory /tmp/gmo/h/.config/opencode/plugins
   Your memories stay in /tmp/gmo/d (`uninstall --purge` deletes them).
 ```
+
+### opencode 2.x
+
+Captured on 2026-11-10 with opencode 2.2.4 (`@opencode/cli-darwin-arm64@2.2.4`, unpacked into a
+temporary directory, shown here as `/tmp/oc2/bin/opencode`, first on `PATH`; removed afterwards)
+on a throwaway home (`/tmp/gmo2/h`, shown with that path) holding only an empty
+`~/.config/opencode/` directory, with no `claude` on `PATH`. Install asked `opencode --version`
+and found 2.x, so step 4 of the summary writes 2.x's shape (`mcp.servers`, see below) and the
+plugin step mentions no toast. Answers as for 1.x: Enter (English), `3` (built-in model), `2` (no
+summaries), `2` (no develop server), Enter (apply).
+
+```text
+graphersal-memory install (opencode)
+A few questions; Enter takes the default. Nothing changes before the last step.
+
+Step 1 of 5 · Memory language
+  Memories are found by meaning. Keeping them in one language lets a search find a
+  memory whatever language you wrote in; or keep each memory in your own words.
+
+  1) English only  the agent stores and searches in English  (default)
+                   (it translates a query before searching)
+  2) Any language  the agent stores in the language of the conversation
+                   (and searches in it and in English)
+Choose [1]: 
+
+Step 2 of 5 · Embedding model
+  The model turns every memory into a vector, so a search finds related wording,
+  not only the same words. Downloaded once from Hugging Face; it then runs locally.
+
+  1) potion-retrieval-32M      English, ~130 MB, MIT  (default)
+  2) potion-multilingual-128M  100+ languages, ~530 MB, MIT
+  3) Built-in (no download)    works offline, but finds only shared words and spellings,
+                               not meaning; weaker search
+Choose [1]: 3
+
+Step 3 of 5 · Session summaries
+  Past sessions are indexed locally (their raw turns, no model call). Optionally each
+  finished session is summarized through your own `opencode run --model
+  opencode/big-pickle`
+  (decisions, corrections, outcomes, open threads). With this free model:
+  0 finished sessions, 0 without a summary: $0.00 (`opencode run --model
+  opencode/big-pickle` uses a free model of opencode Zen, free for a limited time; the
+  monthly budget still applies)
+
+  1) Yes  summarize, at most $5.00 per month
+  2) No   raw turns only (`graphersal-memory summaries enable` later)
+Choose 1-2: 2
+
+Step 4 of 5 · The develop server
+  A second MCP server with tools to inspect and reshape the memory's structure
+  (schema, saved queries, indexes). Most people do not need it; its tool
+  descriptions are paid on every agent turn.
+
+  1) Yes  register graphersal-memory-develop
+  2) No   not now (`graphersal-memory install --enable-develop` later)
+Choose 1-2: 2
+
+Step 5 of 5 · Summary
+  This is what install will do:
+
+  1. Agents
+     - opencode (one store and one daemon serve every agent chosen)
+  2. Memory language
+     - English only (stored and searched in English) (in the MCP instructions and the rule block; config.json memory.language)
+  3. Embedding model
+     - the built-in embedder hash-ngram/1 (no download; finds shared words and spellings, not meaning)
+  4. Register the MCP servers and the rules file in opencode's /tmp/gmo2/h/.config/opencode/opencode.json (opencode 2.x)
+     - graphersal-memory (use profile): add (enabled)
+     - graphersal-memory-develop (develop profile): add (disabled)
+     - instructions: add /tmp/gmo2/h/.config/opencode/graphersal-memory.md (loaded into every session)
+  5. Write the managed rule block into /tmp/gmo2/h/.config/opencode/graphersal-memory.md
+     - create it with the block
+  6. Add the session plugin /tmp/gmo2/h/.config/opencode/plugins/graphersal-memory.js
+     - create it (session start and end: indexing)
+  7. Index past sessions (raw turns, locally, in the background)
+     - opencode: 0 sessions in /tmp/gmo2/h/.local/share/opencode/opencode.db: 0 to index, 0 still being written (indexed later)
+     - summaries: off (raw turns only; `graphersal-memory summaries enable` later)
+  8. Settings file /tmp/gmo2/d/config.json
+     - write the defaults (daemon idle time 2h) and the answers
+
+Apply these changes? [Enter = apply, n = cancel]: 
+
+Report:
+  created /tmp/gmo2/h/.config/opencode/opencode.json
+  created /tmp/gmo2/h/.config/opencode/graphersal-memory.md
+  created /tmp/gmo2/h/.config/opencode/plugins/graphersal-memory.js
+  created /tmp/gmo2/d/config.json
+  summaries run through `opencode run --model opencode/big-pickle` when you switch them on (opencode only; a free model of opencode Zen; summaries.harness_command in config.json)
+  embedding model: the built-in hash-ngram/1 (the daemon re-embeds the memory with it in the background)
+  summaries: off (raw turns are indexed; `graphersal-memory summaries enable` switches them on)
+  past sessions: indexed at the next session start (or now: `graphersal-memory import --sessions`)
+
+Restart running opencode sessions to load the MCP server and the plugin. `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` removes it.
+```
+
+The configuration file it created:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "graphersal-memory": {
+        "codemode": false,
+        "command": ["/opt/gm/bin/graphersal-memory", "mcp", "--profile", "use", "--data-dir", "/tmp/gmo2/d", "--run-dir", "/tmp/gm-wiz2"],
+        "disabled": false,
+        "type": "local"
+      },
+      "graphersal-memory-develop": {
+        "codemode": false,
+        "command": ["/opt/gm/bin/graphersal-memory", "mcp", "--profile", "develop", "--data-dir", "/tmp/gmo2/d", "--run-dir", "/tmp/gm-wiz2"],
+        "disabled": true,
+        "type": "local"
+      }
+    }
+  },
+  "instructions": [
+    "/tmp/gmo2/h/.config/opencode/graphersal-memory.md"
+  ]
+}
+```
+
+(The commands are shortened to one line here and the binary's path to `/opt/gm/bin`; the data and
+run directories appear because they were chosen explicitly.)
+
+#### `graphersal-memory status` afterwards
+
+```text
+daemon: not running (run directory /tmp/gm-wiz2; the next agent session starts it)
+data directory: /tmp/gmo2/d
+settings: /tmp/gmo2/d/config.json (daemon idle time 7200s)
+sessions: 0 indexed, 0 summarized; summaries off
+Memory:
+  memory language: English only (stored and searched in English)
+  embedding model: hash-ngram/1 (built-in, no download; finds shared words, not meaning)
+opencode (configuration /tmp/gmo2/h/.config/opencode/opencode.json):
+  version: opencode 2.x (2.2.4, from `/tmp/oc2/bin/opencode --version`)
+  MCP server graphersal-memory (use): installed
+  MCP server graphersal-memory-develop: registered, disabled (`graphersal-memory install --harness opencode --enable-develop` enables it)
+  rules file in instructions: installed
+  rule block (/tmp/gmo2/h/.config/opencode/graphersal-memory.md): installed
+  session plugin (/tmp/gmo2/h/.config/opencode/plugins/graphersal-memory.js): installed
+  auto-memory: opencode has none (nothing to switch off)
+  headless command (summaries, bench): `opencode run --model opencode/big-pickle` by default
+  sessions: read from /tmp/gmo2/h/.local/share/opencode/opencode.db (not there yet)
+```
+
+#### The smoke run that followed
+
+On the same throwaway home: `opencode run --model opencode/big-pickle` was asked to save "We
+release on Fridays" with the remember tool (it called `graphersal-memory_memories`, then
+`graphersal-memory_remember`, as direct tools), and a second session was asked on which weekday
+we release (it called `graphersal-memory_memories` and answered "Friday."). The plugin's start
+hook queued both sessions as running; `opencode service stop` (2.x's background server) ran the
+plugin's cleanup, whose end hook got both indexed (`2 found, 2 indexed`). `uninstall --yes`
+exported the memory to `~/graphersal-memory-export/opencode/global.md` and deleted the three files
+install had created. A summary through `opencode run --standalone` ran in its sandbox and came
+back with opencode Zen's "Free usage limit reached" (the free model's daily limit was used up by
+the smoke run), reported as a failed summary.
 
 ## Claude Code and opencode together
 

@@ -1511,6 +1511,119 @@ mod tests {
         );
     }
 
+    #[test]
+    fn after_an_upgrade_to_2x_only_new_sessions_are_indexed() {
+        let tmp = crate::mcp_tests::TempDir::new("oc12-idx");
+        let data = crate::mcp_tests::TempDir::new("oc12-idx-data");
+        let (db, work) = opencode_setup(tmp.path());
+        let mut store = Direct::new();
+        let first = index(&opencode_request(&db), data.path(), &mut store);
+        assert_eq!((first.found, first.indexed), (1, 1), "{first:?}");
+        // 2.x upgrades the database: the 1.x session is copied (same id and time), a new
+        // session is made in 2.x.
+        crate::opencode::sessions::tests::fixture_v2(&db, &work.display().to_string());
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute(
+            "INSERT INTO session_v2 (id, project_id, slug, directory, title, version, \
+             time_created, time_updated) SELECT id, project_id, slug, directory, title, version, \
+             time_created, time_updated FROM session WHERE id = 'ses_abc'",
+            [],
+        )
+        .unwrap();
+        let second = index(&opencode_request(&db), data.path(), &mut store);
+        assert_eq!(second.problems, Vec::<String>::new());
+        assert_eq!(
+            (second.found, second.indexed, second.unchanged),
+            (2, 1, 1),
+            "the copied session is not indexed again: {second:?}"
+        );
+        let new = store.query(
+            "g.v(\"session:ses_v2a\").project(\"harness\", \"files\").by(\"harness\")\
+             .by(\"files_edited\").next()",
+        );
+        assert_eq!(new[0]["harness"], "opencode");
+        // Files outside the project are left out, as for every harness.
+        assert_eq!(new[0]["files"], json!(["src/flags.rs"]));
+        assert_eq!(
+            store.query("g.v(\"turn:ses_v2a:1\").values(\"tools\").next()"),
+            json!(["patch"])
+        );
+    }
+
+    /// A fake opencode 2.x: answers `--version` with `opencode v2.2.4`, everything else like
+    /// [`fake_opencode`].
+    #[cfg(unix)]
+    fn fake_opencode_v2(dir: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let (inner, log) = fake_opencode(&dir.join("inner"));
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = bin.join("opencode");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'opencode v2.2.4'; exit 0; fi\nexec '{}' \"$@\"\n",
+                inner.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (script, log)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn summaries_through_opencode_2x_run_standalone_in_the_sandbox() {
+        let tmp = crate::mcp_tests::TempDir::new("oc2-sum");
+        let data = crate::mcp_tests::TempDir::new("oc2-sum-data");
+        let work = crate::mcp::canonical(tmp.path()).join("work");
+        std::fs::create_dir_all(work.join(".git")).unwrap();
+        let db = tmp.path().join("share/opencode/opencode.db");
+        crate::opencode::sessions::tests::fixture_v2(&db, &work.display().to_string());
+        {
+            // Long enough for a summary.
+            let c = rusqlite::Connection::open(&db).unwrap();
+            c.execute(
+                "INSERT INTO session_message VALUES ('msg_99', 'ses_v2a', 'user', 99, 1, 1, ?1)",
+                [json!({"time": {"created": 1}, "files": [],
+                    "text": "Explain the flag design in detail. ".repeat(60)})
+                .to_string()],
+            )
+            .unwrap();
+        }
+        let (harness, log) = fake_opencode_v2(tmp.path());
+        std::fs::write(
+            crate::config::path(data.path()),
+            json!({"version": 1, "summaries": {"enabled": true,
+                "harness_command": format!("'{}' run --model opencode/big-pickle", harness.display()),
+                "monthly_budget_usd": 0.5}})
+            .to_string(),
+        )
+        .unwrap();
+        let mut store = Direct::new();
+        let report = with_summaries(&opencode_request(&db), data.path(), &mut store);
+        assert_eq!(report.problems, Vec::<String>::new());
+        assert_eq!((report.indexed, report.summarized), (1, 1));
+        let recorded = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            recorded.contains("CALL run --standalone --model opencode/big-pickle --format json"),
+            "{recorded}"
+        );
+        let sandbox = data.path().join("sessions/harness/opencode");
+        assert!(
+            recorded.contains(&format!(
+                "ENV {} {} off",
+                sandbox.join("config").display(),
+                sandbox.join("data").display()
+            )),
+            "{recorded}"
+        );
+        assert!(
+            recorded.contains("USER: Rename the config flag."),
+            "{recorded}"
+        );
+    }
+
     /// A fake `opencode`: records its arguments, environment and prompt, answers `--format
     /// json` events with a summary and a cost of 0 (a free model).
     #[cfg(unix)]

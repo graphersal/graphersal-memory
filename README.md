@@ -113,9 +113,10 @@ graphersal-memory install
 
 `install` sets up every agent harness it finds: Claude Code and opencode (`--harness
 claude-code|opencode|all` chooses). With both found, the wizard's first step asks which; every
-chosen agent gets the same memory (one store, one daemon). For opencode it registers the MCP
-servers in `~/.config/opencode/opencode.json`, a rules file listed in `instructions` and a small
-session plugin; `uninstall` exports the memories as Markdown (opencode has no file memory). The
+chosen agent gets the same memory (one store, one daemon). For opencode (1.x and 2.x; install
+asks `opencode --version` which one it is) it registers the MCP servers in
+`~/.config/opencode/opencode.json`, a rules file listed in `instructions` and a small session
+plugin; `uninstall` exports the memories as Markdown (opencode has no file memory). The
 details are in [docs/harnesses.md](docs/harnesses.md), the captured wizard for opencode and for
 both in [docs/install.md](docs/install.md). The Claude Code steps:
 
@@ -400,7 +401,7 @@ Details: [docs/privacy.md](docs/privacy.md).
 | Harness | Status |
 |---|---|
 | Claude Code | install, uninstall, import of the file memory, hooks, rule block (M3); past sessions and opt-in summaries (M4); the A/B, `bench` (M5) |
-| opencode (1.x) | install, uninstall (Markdown export), rule file, session plugin, past sessions from its database, opt-in summaries and `bench` through `opencode run` (free models cost $0) (M7a) |
+| opencode 1.x and 2.x | install, uninstall (Markdown export), rule file, session plugin, past sessions from its database, opt-in summaries and `bench` through `opencode run` (free models cost $0) (M7a: 1.x; M7b: 2.x, and the move of our entries after an upgrade from 1.x) |
 | OpenAI Codex CLI | planned (M7) |
 | Cursor | planned (M7) |
 | Desktop apps without a terminal (e.g. Claude Desktop) | later; the core is designed not to depend on a terminal or hooks |
@@ -420,7 +421,7 @@ Details: [docs/harnesses.md](docs/harnesses.md).
 | Indexing past sessions (`import --sessions`, the hooks), opt-in summaries and facts through your own harness (`summaries estimate`, `status`, `enable`, `disable`), cost estimate and monthly budget cap | available (M4; tested with a fake harness, no model was called in the tests) |
 | Built-in A/B (`bench`, `bench questions`): arms no memory / file memory / graphersal-memory, sandboxed, questions from raw transcripts, judge, report, cost guard, dry run | available (M5; Claude Code; tested with a fake harness, and one small real run). The arm with your whole current setup is planned |
 | Release binaries (macOS arm64/x86_64, Linux x86_64/aarch64 static, Windows x86_64), `install.sh` / `install.ps1` with checksum verification, `SHA256SUMS`, build provenance | built (M6: the release workflow builds and smoke-tests every platform; the installers are tested against a local copy of a release); available once the first release is published |
-| opencode: install/uninstall (`--harness opencode`, or both at once sharing one store), the session plugin, past sessions, summaries and `bench` through `opencode run` | available (M7a; tested on temporary homes with a hand-built database in opencode's format and a fake `opencode`; one real smoke run with opencode 1.18.35 and a free model) |
+| opencode: install/uninstall (`--harness opencode`, or both at once sharing one store), the session plugin, past sessions, summaries and `bench` through `opencode run` | available for 1.x (M7a) and 2.x (M7b): the line is detected with `opencode --version` (else from its database), an upgrade from 1.x is detected by `doctor` and moved by `install`, sessions are read from both lines' tables without duplicates. Tested on temporary homes with hand-built databases in each line's format and fake `opencode` binaries; real smoke runs with opencode 1.18.35 (M7a, and the M7b plugin) and 2.2.4 (M7b) on throwaway homes and a free model |
 | Other harnesses (Codex, Cursor), browser UI, desktop app | planned (M7) |
 
 ### Try it

@@ -29,7 +29,7 @@ const LONG_VERSION: &str = concat!(
         graph database and lets the agent search them through MCP, instead of loading a growing \
         memory file on every turn. Everything stays on your machine.\n\n\
         PRE-RELEASE: `install`, `uninstall`, `status`, `doctor`, `import`, `summaries` and \
-        `bench` (for Claude Code and opencode), `mcp` (the stdio server a harness starts; it shares one background daemon \
+        `bench` (for Claude Code and opencode 1.x and 2.x), `mcp` (the stdio server a harness starts; it shares one background daemon \
         with every other session) and `daemon` work. Every other command says which stage delivers it; \
         the plan is in docs/roadmap.md.",
     after_help = "Start with `graphersal-memory install`. \
@@ -397,7 +397,7 @@ fn parse_idle(text: &str) -> Result<std::time::Duration, String> {
 pub enum Harness {
     /// Claude Code.
     ClaudeCode,
-    /// opencode.
+    /// opencode (1.x or 2.x: `opencode --version` says which).
     Opencode,
     /// Every supported harness (install: those found on this machine).
     All,

@@ -337,10 +337,17 @@ fn absolute(path: &Path) -> PathBuf {
 
 /// What install, uninstall, status, doctor, import and the hooks work on.
 fn setup(cli: &Cli) -> Result<Setup, String> {
+    setup_with(cli, true)
+}
+
+/// [`setup`]; `probe`: ask `opencode --version` for opencode's line (the hooks do not: they
+/// need only its database, and a session start should not wait for a second program).
+fn setup_with(cli: &Cli, probe: bool) -> Result<Setup, String> {
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let (data_dir, run_dir) = dirs(cli)?;
     let paths = ClaudePaths::resolve(&env)?;
-    let opencode = crate::opencode::OpenCodePaths::resolve(&env)?;
+    let detected = crate::opencode::detect(&env, None, probe)?;
+    let opencode = crate::opencode::OpenCodePaths::resolve_for(&env, detected)?;
     let exe =
         std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
     let mut dir_args = Vec::new();
@@ -1003,7 +1010,7 @@ fn run_hook(
     if std::env::var(summaries::HOOK_ENV).is_ok_and(|v| v == "off") {
         return 0;
     }
-    match setup(cli) {
+    match setup_with(cli, false) {
         Ok(setup) => {
             let connect = daemon_connector(&setup);
             let location = setup_location(&setup);

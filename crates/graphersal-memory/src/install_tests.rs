@@ -1509,6 +1509,249 @@ fn opencode_conflicts_are_kept_and_the_develop_server_switches() {
     memory.close();
 }
 
+// ------------------------------------------------------------------------------------------
+// M7b: opencode 2.x, and the upgrade from 1.x.
+// ------------------------------------------------------------------------------------------
+
+/// The setup of `home` with opencode of `major` installed.
+fn opencode_setup_for(home: &Path, data: &Path, major: crate::opencode::Major) -> Setup {
+    let mut setup = setup_in(home, data);
+    setup.opencode = crate::opencode::OpenCodePaths::of_home_for(home, major);
+    setup
+}
+
+fn doctor_problems(setup: &Setup) -> Vec<String> {
+    crate::opencode::install::doctor(setup)
+        .into_iter()
+        .filter(|f| f.problem)
+        .map(|f| f.text)
+        .collect()
+}
+
+#[test]
+fn opencode_2x_install_then_uninstall_leaves_existing_files_byte_identical() {
+    use crate::opencode::Major;
+    let home = TempDir::new("oc2-rt-home");
+    let data = TempDir::new("oc2-rt-data");
+    existing_opencode_home(home.path());
+    let before = snapshot(home.path());
+    let setup = opencode_setup_for(home.path(), data.path(), Major::V2);
+    assert!(setup.opencode.config_file.ends_with("opencode.jsonc"));
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, opencode_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("(opencode 2.x)"), "{out}");
+    let text = read(&setup.opencode.config_file);
+    assert!(
+        text.contains("// my settings") && text.contains("/* keep */"),
+        "{text}"
+    );
+    let config = crate::jsonedit::value_of(&text).unwrap();
+    let servers = &config["mcp"]["servers"];
+    assert_eq!(
+        servers["graphersal-memory"],
+        crate::opencode::install::mcp_entry(&setup, "use", true)
+    );
+    assert_eq!(servers["graphersal-memory"]["disabled"], false);
+    assert_eq!(servers["graphersal-memory"]["codemode"], false);
+    assert_eq!(servers["graphersal-memory-develop"]["disabled"], true);
+    assert!(config["mcp"]["graphersal-memory"].is_null(), "no 1.x shape");
+    assert_eq!(
+        config["mcp"]["other"]["command"],
+        json!(["x"]),
+        "the user's entry stays"
+    );
+    assert_eq!(
+        config["instructions"],
+        json!([setup.opencode.rules_file.display().to_string()])
+    );
+    assert!(crate::opencode::is_our_plugin(&read(
+        &setup.opencode.plugin_file
+    )));
+    assert_eq!(doctor_problems(&setup), Vec::<String>::new());
+    let status = crate::opencode::install::status_lines(&setup).join("\n");
+    assert!(status.contains("version: opencode 2.x (given)"), "{status}");
+    assert!(
+        status.contains("MCP server graphersal-memory (use): installed"),
+        "{status}"
+    );
+
+    // Idempotent.
+    let again = snapshot(home.path());
+    let (code, out) = run_install(&setup, &memory, opencode_only());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), again, "{out}");
+
+    // The develop server switches through `disabled`.
+    let options = InstallOptions {
+        enable_develop: true,
+        ..opencode_only()
+    };
+    assert_eq!(run_install(&setup, &memory, options).0, 0);
+    let develop = |setup: &Setup| {
+        crate::jsonedit::value_of(&read(&setup.opencode.config_file)).unwrap()["mcp"]["servers"]
+            ["graphersal-memory-develop"]["disabled"]
+            .clone()
+    };
+    assert_eq!(develop(&setup), false);
+    let (code, out) = run_uninstall(
+        &setup,
+        UninstallOptions {
+            disable_develop_only: true,
+            ..opencode_uninstall()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(develop(&setup), true);
+
+    let (code, out) = run_uninstall(&setup, opencode_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    memory.close();
+
+    // An empty home: nothing is left at all.
+    let home = TempDir::new("oc2-empty-home");
+    let data = TempDir::new("oc2-empty-data");
+    let setup = opencode_setup_for(home.path(), data.path(), Major::V2);
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, opencode_only()).0, 0);
+    let created = crate::jsonedit::value_of(&read(&setup.opencode.config_file)).unwrap();
+    assert!(created["mcp"]["servers"]["graphersal-memory"].is_object());
+    let (code, out) = run_uninstall(&setup, opencode_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        snapshot(home.path()).is_empty(),
+        "{:?}",
+        snapshot(home.path())
+    );
+    memory.close();
+}
+
+#[test]
+fn an_upgrade_from_1x_to_2x_moves_our_entries_out_of_config_json() {
+    use crate::opencode::Major;
+    let home = TempDir::new("oc12-home");
+    let data = TempDir::new("oc12-data");
+    let dir = home.path().join(".config/opencode");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A 1.x user's configuration in `config.json`, which 2.x does not read.
+    std::fs::write(
+        dir.join("config.json"),
+        "{\n  \"theme\": \"tokyonight\",\n  \"mcp\": {\"other\": {\"type\": \"local\", \"command\": [\"x\"]}}\n}\n",
+    )
+    .unwrap();
+    let before = snapshot(home.path());
+    let v1 = opencode_setup_for(home.path(), data.path(), Major::V1);
+    assert!(v1.opencode.config_file.ends_with("config.json"));
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&v1, &memory, opencode_only()).0, 0);
+    let installed_v1 = read(&dir.join("config.json"));
+
+    // opencode is upgraded to 2.x: doctor finds our entries in the wrong place.
+    let v2 = opencode_setup_for(home.path(), data.path(), Major::V2);
+    assert!(v2.opencode.config_file.ends_with("opencode.json"));
+    let problems = doctor_problems(&v2).join("\n");
+    assert!(
+        problems.contains("MCP server graphersal-memory: installed, outdated (in ")
+            && problems.contains("config.json, which opencode 2.x does not read"),
+        "{problems}"
+    );
+    assert!(
+        problems.contains("rules file in instructions: installed, outdated"),
+        "{problems}"
+    );
+    // install moves them: out of config.json, into opencode.json in 2.x's shape.
+    let (code, out) = run_install(&v2, &memory, opencode_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("does not read it"), "{out}");
+    let old = crate::jsonedit::value_of(&read(&dir.join("config.json"))).unwrap();
+    assert_eq!(
+        old,
+        json!({"theme": "tokyonight", "mcp": {"other": {"type": "local", "command": ["x"]}}}),
+        "only our parts left config.json"
+    );
+    let new = crate::jsonedit::value_of(&read(&dir.join("opencode.json"))).unwrap();
+    assert_eq!(
+        new["mcp"]["servers"]["graphersal-memory"],
+        crate::opencode::install::mcp_entry(&v2, "use", true)
+    );
+    assert_eq!(
+        new["instructions"][0],
+        v2.opencode.rules_file.display().to_string()
+    );
+    assert_eq!(doctor_problems(&v2), Vec::<String>::new());
+    let again = snapshot(home.path());
+    let (code, out) = run_install(&v2, &memory, opencode_only());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        snapshot(home.path()),
+        again,
+        "idempotent after the move: {out}"
+    );
+    assert_ne!(read(&dir.join("config.json")), installed_v1);
+
+    // uninstall gives every file back.
+    let (code, out) = run_uninstall(&v2, opencode_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    memory.close();
+}
+
+#[test]
+fn an_upgrade_from_1x_to_2x_moves_entries_of_the_1x_shape() {
+    use crate::opencode::Major;
+    let home = TempDir::new("oc12s-home");
+    let data = TempDir::new("oc12s-data");
+    existing_opencode_home(home.path());
+    let before = snapshot(home.path());
+    let v1 = opencode_setup_for(home.path(), data.path(), Major::V1);
+    let memory = Memory::open(data.path());
+    let options = InstallOptions {
+        enable_develop: true,
+        ..opencode_only()
+    };
+    assert_eq!(run_install(&v1, &memory, options).0, 0);
+
+    let v2 = opencode_setup_for(home.path(), data.path(), Major::V2);
+    let inspection = crate::opencode::install::inspect(&v2);
+    assert!(
+        matches!(&inspection.use_server, install::PartState::Outdated(why)
+            if why.contains("1.x shape (mcp.graphersal-memory)")),
+        "{:?}",
+        inspection.use_server
+    );
+    assert!(
+        inspection.develop_server.1,
+        "still enabled in the 1.x entry"
+    );
+    assert!(!doctor_problems(&v2).is_empty());
+    let (code, out) = run_install(&v2, &memory, opencode_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("move from mcp.graphersal-memory (the opencode 1.x shape) to mcp.servers"),
+        "{out}"
+    );
+    let text = read(&v2.opencode.config_file);
+    assert!(
+        text.contains("// my settings") && text.contains("/* keep */"),
+        "{text}"
+    );
+    let config = crate::jsonedit::value_of(&text).unwrap();
+    assert!(config["mcp"]["graphersal-memory"].is_null());
+    assert!(config["mcp"]["graphersal-memory-develop"].is_null());
+    assert_eq!(
+        config["mcp"]["servers"]["graphersal-memory"]["disabled"],
+        false
+    );
+    assert_eq!(config["mcp"]["other"]["command"], json!(["x"]));
+    assert_eq!(doctor_problems(&v2), Vec::<String>::new());
+
+    let (code, out) = run_uninstall(&v2, opencode_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    memory.close();
+}
+
 #[test]
 fn both_harnesses_share_one_store_and_the_wizard_asks_which_agents() {
     let home = TempDir::new("both-home");

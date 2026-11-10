@@ -2,16 +2,22 @@
 //! global configuration directory, and nothing else (`crate::opencode` explains why each part
 //! goes where it goes):
 //!
-//! - in the configuration file: the members `mcp.graphersal-memory` (the `use` profile,
-//!   enabled) and `mcp.graphersal-memory-develop` (`"enabled": false` until `--enable-develop`),
-//!   and the rules file's path as one element of `instructions`;
+//! - in the configuration file: the members `graphersal-memory` (the `use` profile, enabled) and
+//!   `graphersal-memory-develop` (switched off until `--enable-develop`) of `mcp` (1.x, with
+//!   `"enabled"`) or `mcp.servers` (2.x, with `"disabled"` and `"codemode": false`), and the
+//!   rules file's path as one element of `instructions`;
 //! - the rules file [`crate::opencode::RULES_FILE`] holding only the managed rule block (the
 //!   fingerprinted begin line as in Claude Code's `CLAUDE.md`, so a hand edit is a conflict);
-//! - the plugin file `plugins/graphersal-memory.js`.
+//! - the plugin file `plugins/graphersal-memory.js` (one file for both lines).
+//!
+//! After an upgrade from 1.x to 2.x, entries install wrote under 1.x are in the wrong place or
+//! shape: in `config.json` (2.x does not read it) or as `mcp.<name>` (2.x still reads it, as a
+//! legacy entry). `inspect` reports them as outdated, and `install` moves them (removes ours
+//! there, writes them where 2.x reads them), so a later `uninstall` still gives every file back.
 //!
 //! The state is `<data dir>/install/opencode.json`, backups as for Claude Code; `uninstall`
 //! restores an untouched file byte for byte from its backup (or deletes a file install
-//! created), else removes only our parts from its current text.
+//! created), else removes only our parts, in either shape, from its current text.
 
 use std::path::Path;
 
@@ -23,6 +29,7 @@ use crate::install::{
     find_block_in, ok, problem, read_json, read_text, wrap_block,
 };
 use crate::language::Language;
+use crate::opencode::Major;
 use crate::{fsutil, jsonedit};
 
 /// The rule block for opencode with the English memory language rule.
@@ -99,17 +106,68 @@ fn new_config() -> String {
     )
 }
 
-/// The MCP entry of a profile.
+/// The MCP entry of a profile for the installed line: 1.x `"enabled": <enabled>`, 2.x
+/// `"disabled": <not enabled>` (and `"codemode": false`).
 pub fn mcp_entry(setup: &Setup, profile: &str, enabled: bool) -> Value {
+    entry_for(setup, profile, enabled, setup.opencode.major())
+}
+
+/// The MCP entry of a profile in the shape of `major`.
+fn entry_for(setup: &Setup, profile: &str, enabled: bool, major: Major) -> Value {
     let mut args = vec![
         "mcp".to_string(),
         "--profile".to_string(),
         profile.to_string(),
     ];
     args.extend(setup.dir_args.iter().cloned());
-    let mut entry = setup.opencode_agent().mcp_entry(&setup.exe, &args);
-    entry["enabled"] = json!(enabled);
+    let mut paths = setup.opencode.clone();
+    paths.detected.major = major;
+    let mut entry = crate::opencode::OpenCode::new(paths).mcp_entry(&setup.exe, &args);
+    match major {
+        Major::V1 => entry["enabled"] = json!(enabled),
+        Major::V2 => entry["disabled"] = json!(!enabled),
+    }
     entry
+}
+
+/// Whether an entry (of either shape) is switched on.
+fn enabled(entry: &Value) -> bool {
+    entry["enabled"] != false && entry["disabled"] != true
+}
+
+/// The value at `path` in `value` (`Null` when missing).
+fn at<'a>(value: &'a Value, path: &[&str]) -> &'a Value {
+    path.iter().fold(value, |v, key| &v[*key])
+}
+
+/// Our entry `name` in the 1.x shape (`mcp.<name>`) where 2.x is installed: to be moved.
+fn legacy_ours<'a>(setup: &Setup, config: &'a Value, name: &str) -> Option<&'a Value> {
+    let entry = &config["mcp"][name];
+    (setup.opencode.major() == Major::V2 && is_our_entry(entry)).then_some(entry)
+}
+
+/// Whether a configuration holds any part of ours (either shape, or our `instructions`).
+fn has_our_parts(setup: &Setup, config: &Value) -> bool {
+    [USE_SERVER, DEVELOP_SERVER].iter().any(|name| {
+        is_our_entry(&config["mcp"][*name]) || is_our_entry(&config["mcp"]["servers"][*name])
+    }) || config["instructions"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| is_our_instruction(setup, item)))
+}
+
+/// The configuration files of the directory the installed line does not read but which hold
+/// parts of ours (2.x: a `config.json` install wrote under 1.x), with their text.
+fn stale_with_ours(setup: &Setup) -> Vec<(std::path::PathBuf, String)> {
+    setup
+        .opencode
+        .stale_config_files
+        .iter()
+        .filter_map(|path| {
+            let text = read_text(path).ok().flatten()?;
+            let value = jsonedit::value_of(&text).ok()?;
+            has_our_parts(setup, &value).then(|| (path.clone(), text))
+        })
+        .collect()
 }
 
 /// Whether an element of `instructions` is our rules file.
@@ -138,22 +196,49 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
     let mut changes = Vec::new();
     let paths = &setup.opencode;
 
+    // Parts an install under 1.x left in a file 2.x does not read: removed there (and written
+    // into the file 2.x reads below).
+    for (stale, text) in stale_with_ours(setup) {
+        let entry = state.file(&stale);
+        if let Some(new) = remove_from_config(setup, &stale, &text, entry, false)? {
+            let empty = only_schema(&new);
+            let created_by_us =
+                entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(false)));
+            steps.push(Step {
+                title: format!(
+                    "Move our entries out of {} (opencode {} does not read it)",
+                    stale.display(),
+                    paths.major().label()
+                ),
+                lines: vec![format!("remove our parts from {}", stale.display())],
+            });
+            changes.push(Change {
+                path: stale,
+                after: (!(created_by_us && empty)).then_some(new),
+                created: Vec::new(),
+                separator: None,
+            });
+        }
+    }
+
     // The configuration file: the MCP servers and the rules file in `instructions`.
     let path = &paths.config_file;
+    let servers = paths.servers_path();
     let before = read_text(path)?;
     let mut text = before.clone().unwrap_or_else(new_config);
     let parsed = jsonedit::value_of(&text)
         .map_err(|err| format!("{} is not valid JSON(C): {err}", path.display()))?;
     let mut created = Vec::new();
     let mut lines = Vec::new();
+    let place = servers.join(".");
     for (name, profile, enabled) in [
         (USE_SERVER, "use", true),
         (DEVELOP_SERVER, "develop", develop),
     ] {
-        let existing = &parsed["mcp"][name];
+        let existing = &at(&parsed, servers)[name];
         if !existing.is_null() && !is_our_entry(existing) {
             conflicts.push(format!(
-                "{}: mcp.{name} exists and is not ours; kept. Remove it and run install again.",
+                "{}: {place}.{name} exists and is not ours; kept. Remove it and run install again.",
                 path.display()
             ));
             lines.push(format!(
@@ -161,13 +246,26 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
             ));
             continue;
         }
+        let mut moved = false;
+        if legacy_ours(setup, &parsed, name).is_some()
+            && let Some(new) = jsonedit::remove_member(&text, &["mcp"], name)?
+        {
+            text = new;
+            moved = true;
+        }
         let entry = mcp_entry(setup, profile, enabled);
         let state_word = if enabled { "enabled" } else { "disabled" };
-        match jsonedit::set_member(&text, &["mcp"], name, &entry)? {
+        match jsonedit::set_member(&text, servers, name, &entry)? {
             Some((new, made)) => {
                 lines.push(format!(
                     "{name} ({profile} profile): {} ({state_word})",
-                    if existing.is_null() { "add" } else { "update" }
+                    if moved {
+                        format!("move from mcp.{name} (the opencode 1.x shape) to {place}.{name}")
+                    } else if existing.is_null() {
+                        "add".to_string()
+                    } else {
+                        "update".to_string()
+                    }
                 ));
                 text = new;
                 created.extend(made);
@@ -200,8 +298,9 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
     }
     steps.push(Step {
         title: format!(
-            "Register the MCP servers and the rules file in opencode's {}",
-            path.display()
+            "Register the MCP servers and the rules file in opencode's {} (opencode {})",
+            path.display(),
+            paths.major().label()
         ),
         lines,
     });
@@ -287,8 +386,13 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
                 created: Vec::new(),
                 separator: None,
             });
-            "create it (session start: indexing + one toast line; session end: indexing)"
-                .to_string()
+            match paths.major() {
+                Major::V1 => {
+                    "create it (session start: indexing + one toast line; session end: indexing)"
+                }
+                Major::V2 => "create it (session start and end: indexing)",
+            }
+            .to_string()
         }
         Some(text) if text == wanted => "already installed".to_string(),
         Some(text) if crate::opencode::is_our_plugin(&text) && untouched(&state, path, &text) => {
@@ -341,6 +445,7 @@ pub fn removal(
     let mut out = Vec::new();
     let mut targets = vec![paths.config_file.clone()];
     if !develop_only {
+        targets.extend(stale_with_ours(setup).into_iter().map(|(path, _)| path));
         targets.push(paths.rules_file.clone());
         targets.push(paths.plugin_file.clone());
     }
@@ -388,8 +493,9 @@ pub fn removal(
         let text = String::from_utf8(bytes)
             .map_err(|_| format!("{} is not UTF-8 text", path.display()))?;
         let created_by_us = entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(false)));
-        let new = if path == paths.config_file {
-            remove_from_config(setup, &text, entry, develop_only)?
+        let config_file = path == paths.config_file || paths.stale_config_files.contains(&path);
+        let new = if config_file {
+            remove_from_config(setup, &path, &text, entry, develop_only)?
         } else if path == paths.rules_file {
             match find_block(&text, Language::English) {
                 Ok(Some(found)) if found.intact => {
@@ -441,11 +547,8 @@ pub fn removal(
             None
         };
         if let Some(new) = new {
-            let empty = if path == paths.config_file {
-                jsonedit::value_of(&new).ok().is_some_and(|v| {
-                    v.as_object()
-                        .is_some_and(|o| o.keys().all(|k| k == "$schema"))
-                })
+            let empty = if config_file {
+                only_schema(&new)
             } else {
                 new.trim().is_empty()
             };
@@ -475,21 +578,26 @@ fn untouched_text(entry: Option<&serde_json::Map<String, Value>>, text: &str) ->
         == Some(fsutil::fingerprint(text.as_bytes()).as_str())
 }
 
-/// The configuration text without our MCP members and our `instructions` element (and the
-/// containers install created, when they are empty then); `develop_only`: the develop server
-/// switched off instead.
+/// Whether a configuration text holds nothing but its `$schema`.
+fn only_schema(text: &str) -> bool {
+    jsonedit::value_of(text).ok().is_some_and(|v| {
+        v.as_object()
+            .is_some_and(|o| o.keys().all(|k| k == "$schema"))
+    })
+}
+
+/// The configuration text without our MCP members (in either shape: `mcp.<name>` and
+/// `mcp.servers.<name>`) and our `instructions` element (and the containers install created,
+/// when they are empty then); `develop_only`: the develop server switched off instead.
 fn remove_from_config(
     setup: &Setup,
+    path: &Path,
     text: &str,
     entry: Option<&serde_json::Map<String, Value>>,
     develop_only: bool,
 ) -> Result<Option<String>, String> {
-    let parsed = jsonedit::value_of(text).map_err(|err| {
-        format!(
-            "{} is not valid JSON(C): {err}",
-            setup.opencode.config_file.display()
-        )
-    })?;
+    let parsed = jsonedit::value_of(text)
+        .map_err(|err| format!("{} is not valid JSON(C): {err}", path.display()))?;
     let created: Vec<&str> = entry
         .and_then(|e| e.get("created"))
         .and_then(Value::as_array)
@@ -498,34 +606,46 @@ fn remove_from_config(
     let mut current = text.to_string();
     let mut changed = false;
     if develop_only {
-        let develop = &parsed["mcp"][DEVELOP_SERVER];
-        if is_our_entry(develop)
-            && develop["enabled"] != false
-            && let Some((new, _)) = jsonedit::set_member(
-                &current,
-                &["mcp"],
-                DEVELOP_SERVER,
-                &mcp_entry(setup, "develop", false),
-            )?
-        {
-            return Ok(Some(new));
+        for (place, major) in [
+            (&["mcp", "servers"][..], Major::V2),
+            (&["mcp"][..], Major::V1),
+        ] {
+            let develop = &at(&parsed, place)[DEVELOP_SERVER];
+            if is_our_entry(develop)
+                && enabled(develop)
+                && let Some((new, _)) = jsonedit::set_member(
+                    &current,
+                    place,
+                    DEVELOP_SERVER,
+                    &entry_for(setup, "develop", false, major),
+                )?
+            {
+                current = new;
+                changed = true;
+            }
         }
-        return Ok(None);
+        return Ok(changed.then_some(current));
     }
     for name in [USE_SERVER, DEVELOP_SERVER] {
-        if is_our_entry(&parsed["mcp"][name])
-            && let Some(new) = jsonedit::remove_member(&current, &["mcp"], name)?
-        {
-            current = new;
-            changed = true;
+        for place in [&["mcp", "servers"][..], &["mcp"][..]] {
+            if is_our_entry(&at(&parsed, place)[name])
+                && let Some(new) = jsonedit::remove_member(&current, place, name)?
+            {
+                current = new;
+                changed = true;
+            }
         }
     }
-    if changed
-        && created.contains(&"mcp")
-        && jsonedit::is_empty_container(&current, &["mcp"])
-        && let Some(new) = jsonedit::remove_member(&current, &[], "mcp")?
-    {
-        current = new;
+    if changed {
+        for (parent, key) in [(&["mcp"][..], "servers"), (&[][..], "mcp")] {
+            let dotted = [parent, &[key]].concat().join(".");
+            if created.contains(&dotted.as_str())
+                && jsonedit::is_empty_container(&current, &[parent, &[key]].concat())
+                && let Some(new) = jsonedit::remove_member(&current, parent, key)?
+            {
+                current = new;
+            }
+        }
     }
     if let Some(new) = jsonedit::remove_elements(&current, &["instructions"], &|v| {
         is_our_instruction(setup, v)
@@ -575,9 +695,38 @@ pub fn inspect(setup: &Setup) -> Inspection {
     let paths = &setup.opencode;
     let mut errors = Vec::new();
     let config = read_json(&paths.config_file, &mut errors);
+    let stale = stale_with_ours(setup);
+    let stale_names = stale
+        .iter()
+        .map(|(path, _)| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let stale_values: Vec<Value> = stale
+        .iter()
+        .filter_map(|(_, text)| jsonedit::value_of(text).ok())
+        .collect();
+    let in_stale = |check: &dyn Fn(&Value) -> bool| stale_values.iter().any(check);
     let server = |name: &str, profile: &str| -> (PartState, bool) {
-        let entry = &config["mcp"][name];
+        let entry = &at(&config, paths.servers_path())[name];
         if entry.is_null() {
+            if let Some(old) = legacy_ours(setup, &config, name) {
+                return (
+                    PartState::Outdated(format!(
+                        "in the opencode 1.x shape (mcp.{name}); install moves it to \
+                         mcp.servers.{name}"
+                    )),
+                    enabled(old),
+                );
+            }
+            if in_stale(&|v| is_our_entry(&v["mcp"][name])) {
+                return (
+                    PartState::Outdated(format!(
+                        "in {stale_names}, which opencode {} does not read; install moves it",
+                        paths.major().label()
+                    )),
+                    false,
+                );
+            }
             (PartState::Missing, false)
         } else if !is_our_entry(entry) {
             (
@@ -585,24 +734,31 @@ pub fn inspect(setup: &Setup) -> Inspection {
                 false,
             )
         } else {
-            let enabled = entry["enabled"] != false;
-            if *entry == mcp_entry(setup, profile, enabled) {
-                (PartState::Installed, enabled)
+            let on = enabled(entry);
+            if *entry == mcp_entry(setup, profile, on) {
+                (PartState::Installed, on)
             } else {
                 (
                     PartState::Outdated(format!("starts {}", crate::agents::entry_program(entry))),
-                    enabled,
+                    on,
                 )
             }
         }
     };
     let use_server = server(USE_SERVER, "use").0;
     let develop_server = server(DEVELOP_SERVER, "develop");
-    let instructions = if config["instructions"]
-        .as_array()
-        .is_some_and(|items| items.iter().any(|i| is_our_instruction(setup, i)))
-    {
+    let ours = |v: &Value| {
+        v["instructions"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|i| is_our_instruction(setup, i)))
+    };
+    let instructions = if ours(&config) {
         PartState::Installed
+    } else if in_stale(&ours) {
+        PartState::Outdated(format!(
+            "in {stale_names}, which opencode {} does not read; install moves it",
+            paths.major().label()
+        ))
     } else {
         PartState::Missing
     };
@@ -660,6 +816,7 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
         "opencode (configuration {}):",
         paths.config_file.display()
     )];
+    lines.push(format!("  version: {}", paths.detected.describe()));
     lines.push(format!(
         "  MCP server {USE_SERVER} (use): {}",
         inspection.use_server.describe()
@@ -720,7 +877,11 @@ pub fn doctor(setup: &Setup) -> Vec<Finding> {
     let inspection = inspect(setup);
     let paths = &setup.opencode;
     let reinstall = "run `graphersal-memory install --harness opencode`";
-    let mut findings = Vec::new();
+    let mut findings = vec![ok(format!(
+        "opencode: {}; its configuration file is {}",
+        paths.detected.describe(),
+        paths.config_file.display()
+    ))];
     for error in &inspection.errors {
         findings.push(problem(
             format!("opencode: {error}"),
