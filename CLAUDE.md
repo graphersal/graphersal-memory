@@ -19,9 +19,10 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects` and the
     hidden `hook` work on Claude Code and opencode (`Setup` from the environment, with the model download
     `Source`; `bench_options` for `bench`; `DaemonSource` reads the memories for the export);
-    `ui` and `export` without `--to-files` report their planned stage and exit with code 2; the
+    `ui` and `export` without `--to-files` report their planned stage and exit with code 2
+    (`--harness codex` works wherever `claude-code` and `opencode` do; `cursor` is planned); the
     wizard is interactive when stdin and stdout are terminals;
-  - `src/agents.rs`: the harness abstraction (`Kind` = claude-code | opencode; `Agent`: MCP
+  - `src/agents.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex; `Agent`: MCP
     configuration file, its servers key and entry shape, settings and instruction files, the
     sessions location, the export directories, the auto-memory key, the headless command;
     `is_our_entry` for both entry shapes) and `ClaudeCode`; `Setup::detected`/`installed`;
@@ -40,6 +41,23 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `opencode/sessions.rs` the read-only SQLite reader of both lines' tables (`units`, `read`;
     a session in both is read from 2.x only when 2.x changed it after the copy; a unit path is
     `<db>#<session id>`) with both fixture schemas in its tests;
+  - `src/codex.rs` + `src/codex/`: OpenAI Codex CLI (verified against `rust-v0.167.0`; the
+    module docs cite the source files): `CodexPaths` (`$CODEX_HOME` else `~/.codex`:
+    `config.toml`, `hooks.json`, the global instruction file = the first non-empty of
+    `AGENTS.override.md`/`AGENTS.md`, `sessions/`, the export directory), `Codex` (the `Agent`),
+    the headless run (`exec_args`: `--json --ephemeral --skip-git-repo-check --sandbox
+    read-only`; `sandbox_config`/`build_sandbox`: a `CODEX_HOME` of its own with the user's model
+    settings and a copy of `auth.json`, every built-in tool off; `normalize_exec_output` of the
+    JSONL events: tokens, no cost, $0 only for `--oss`, `local_model`); `codex/install.rs` the
+    plan/removal/inspect/status/doctor (one managed TOML block with both `[mcp_servers.*]` tables,
+    develop `enabled = false`; the hooks in `hooks.json` with `--harness codex`; the rule block;
+    `[features] memories` switched off on request and restored; the hook trust Codex records in
+    `hooks.state`, which install never writes); `codex/sessions.rs` the rollout reader
+    (`sessions/YYYY/MM/DD/rollout-*.jsonl`; `user_message`/`agent_message` events, both history
+    modes; sub-agent sessions left out; a unit is the rollout file, id `session:<thread id>`);
+  - `src/tomledit.rs`: minimal-change TOML edits (parse with the `toml` crate, write as text: a
+    fingerprinted managed block inserted before the first table, `remove_table` for our tables
+    whose markers were lost, `set_bool` in place; every edit re-parsed and checked);
   - `src/prompt.rs`: the wizard's console (`Console`: "Step N of M", numbered choices, the
     default on Enter, re-ask; colour only on a terminal without `NO_COLOR`);
   - `src/language.rs`: the memory language (`english` | `any`) and its rule text, filled into
@@ -52,8 +70,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/export.rs`: memories back into the harness's file memory (per project `MEMORY.md` +
     `<slug>.md` as the import reads them, global ones into the agent's global memory file;
     identical files skipped, differing memory files kept with `<slug>.graphersal.md` beside
-    them, a differing `MEMORY.md` kept with the missing index lines appended; opencode: the same
-    files as Markdown under `~/graphersal-memory-export/opencode/`);
+    them, a differing `MEMORY.md` kept with the missing index lines appended; opencode and
+    Codex: the same files as Markdown under `~/graphersal-memory-export/<harness>/`);
   - `src/install.rs`: the wizard (`Current` = the current answers, `default_answers` for
     `--yes`/no terminal, `ask` for the interactive steps, `plan_install`, `install`), the
     auto-memory switch (`autoMemoryEnabled`, its previous value recorded in the settings file's
@@ -77,7 +95,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     changed memory files, then one `index_sessions` control line to the daemon (`run_with`'s
     `Enqueue`; start: its transcript is `active`, end: `ended`), one status line at session
     start, always exit 0; `GRAPHERSAL_MEMORY_HOOK=off` makes it do nothing; `run_opencode` for
-    opencode's plugin (`--harness opencode`: no import, `<db>#<id>` active/ended);
+    opencode's plugin (`--harness opencode`: no import, `<db>#<id>` active/ended); `run_codex`
+    for Codex's hooks (`--harness codex`: no import, the rollout `transcript_path`
+    active/ended, the start line becomes model context);
   - `src/config.rs`: `<data dir>/config.json` (`daemon.idle`, `memory.language`,
     `embedding.model`, `summaries.enabled|harness_command|monthly_budget_usd|since`;
     `with_summaries` and `with_values` edit in place); flag > env > file > default;
@@ -180,8 +200,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `tests/bench_tests.rs`: the real binary's `bench` with a fake `claude` on `PATH` that records
     its calls (dry run: zero calls; a run through the harness: the flags of every call, the live
     store and the sources unchanged, the spend in the report).
-- Planned areas (one module each when they arrive): `export`, other
-  harnesses (`install.rs` is Claude Code only; split it per harness when the second arrives).
+- Planned areas (one module each when they arrive): Cursor (`install.rs` holds Claude Code
+  and the shared wizard; each other harness has its own `<harness>/install.rs`).
 
 ## Memory model
 

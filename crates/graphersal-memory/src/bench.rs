@@ -72,6 +72,9 @@ pub struct Options {
     /// Where opencode's instruction files and sessions are read from (when the harness command
     /// is opencode's).
     pub opencode: crate::opencode::OpenCodePaths,
+    /// Where Codex's instruction files, sessions, model settings and login are read from (when
+    /// the harness command is Codex's).
+    pub codex: crate::codex::CodexPaths,
     /// The data directory (the live store is forked from it; reports go into it).
     pub data_dir: PathBuf,
     /// This binary (the graph arm's MCP server).
@@ -122,14 +125,33 @@ impl Harness for Process {
         let mut env = vec![(crate::summaries::HOOK_ENV, "off")];
         env.extend(call.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let opencode = crate::opencode::is_opencode(&call.args);
+        let codex = crate::codex::is_codex(&call.args);
         // opencode 2.x gets `--standalone` (its own server, in the sandbox's environment).
         let args = if opencode {
             crate::opencode::headless_args(&call.args)
+        } else if codex {
+            crate::codex::exec_args(&call.args)
         } else {
             call.args.clone()
         };
         match crate::harness::run(&args, &call.input, &call.cwd, &env, CALL_TIMEOUT) {
             Ok(output) if opencode => crate::opencode::normalize_run_output(&output.stdout),
+            Ok(output) if codex => {
+                let mut answer = crate::codex::normalize_exec_output(
+                    &output.stdout,
+                    crate::codex::local_model(&call.args),
+                );
+                // Codex reports a failed start (for example a local server that does not
+                // answer) on stderr only.
+                if answer["is_error"] == true && !output.stderr.trim().is_empty() {
+                    answer["result"] = json!(format!(
+                        "{} ({})",
+                        answer["result"].as_str().unwrap_or_default(),
+                        crate::transcript::clip(output.stderr.trim(), 300)
+                    ));
+                }
+                answer
+            }
             Ok(output) => json_in(&output.stdout).unwrap_or_else(|| {
                 json!({"is_error": true, "result": format!(
                     "the harness answered no JSON (exit {}): {}",
@@ -405,20 +427,31 @@ impl Estimate {
     }
 }
 
-/// Refuses a harness that is neither Claude Code's `claude` nor opencode's `opencode` (the
-/// arms are built with their flags and configuration).
+/// Refuses a harness that is neither Claude Code's `claude`, opencode's `opencode` nor Codex's
+/// `codex` with a local model (the arms are built with their flags and configuration). Codex
+/// reports tokens but no cost, so the budget could not stop a run on a paid model: only a
+/// local model (`--oss`, $0) is accepted.
 pub fn check_harness(command: &[String]) -> Result<(), String> {
     let is_claude = command.first().is_some_and(|program| {
         Path::new(program)
             .file_stem()
             .is_some_and(|stem| stem == "claude")
     });
-    if is_claude || crate::opencode::is_opencode(command) {
+    if crate::codex::is_codex(command) && !crate::codex::local_model(command) {
+        return Err(format!(
+            "bench through Codex needs a local model (for example `codex exec --oss \
+             --local-provider lmstudio`): `codex exec` reports tokens but no cost, so the budget \
+             could not stop the run; or use Claude Code's `claude -p` or opencode's `opencode \
+             run`. The harness command is `{}` (summaries.harness_command in config.json)",
+            command.join(" ")
+        ));
+    }
+    if is_claude || crate::opencode::is_opencode(command) || crate::codex::is_codex(command) {
         Ok(())
     } else {
         Err(format!(
-            "bench drives Claude Code's `claude -p` or opencode's `opencode run`; the harness \
-             command is `{}` (summaries.harness_command in config.json)",
+            "bench drives Claude Code's `claude -p`, opencode's `opencode run` or Codex's `codex \
+             exec --oss`; the harness command is `{}` (summaries.harness_command in config.json)",
             command.join(" ")
         ))
     }
@@ -429,9 +462,23 @@ fn opencode(options: &Options) -> bool {
     crate::opencode::is_opencode(&options.harness_command)
 }
 
+/// Whether the run goes through Codex.
+fn codex(options: &Options) -> bool {
+    crate::codex::is_codex(&options.harness_command)
+}
+
 /// The excerpt of the project's finished sessions, from the harness's own store.
 fn excerpt_for(options: &Options) -> Excerpt {
-    if opencode(options) {
+    if codex(options) {
+        Excerpt::of_transcripts(
+            &questions::codex_transcripts(
+                &options.codex.sessions,
+                &options.project,
+                SystemTime::now(),
+            ),
+            questions::EXCERPT_BUDGET,
+        )
+    } else if opencode(options) {
         Excerpt::of_transcripts(
             &questions::opencode_transcripts(
                 &options.opencode.db,
@@ -462,6 +509,10 @@ fn tool_free_call(
     cap: f64,
 ) -> Result<ToolFreeCall, String> {
     let mut command = options.harness_command.clone();
+    if codex(options) {
+        let (cwd, env) = arms::tool_free_codex(dir, &options.codex)?;
+        return Ok((cwd, command, env));
+    }
     if opencode(options) {
         let (cwd, env) = arms::tool_free_opencode(dir, &options.opencode.db)?;
         command.extend(["--format".to_string(), "json".to_string()]);
@@ -631,7 +682,7 @@ pub fn questions_command(
     if excerpt.sessions == 0 {
         return Err(no_transcripts(options));
     }
-    let free = crate::opencode::free_model(&options.harness_command);
+    let free = crate::harness::costs_nothing(&options.harness_command);
     let estimate = if free { 0.0 } else { 1.0 }
         * generation_usd(
             questions::prompt(&options.project, options.questions, &excerpt).len(),
@@ -681,6 +732,14 @@ pub fn questions_command(
 }
 
 fn no_transcripts(options: &Options) -> String {
+    if codex(options) {
+        return format!(
+            "no finished Codex session of {} under {} (sessions still being written are left \
+             out for 30 minutes)",
+            options.project,
+            options.codex.sessions.display()
+        );
+    }
     if opencode(options) {
         return format!(
             "no finished opencode session of {} in {} (sessions still being written are left \
@@ -756,7 +815,7 @@ pub fn run(
         ),
     };
     let mut estimate = Estimate::of(count, arms_list.len(), options.repeats, generation);
-    let free = crate::opencode::free_model(&options.harness_command);
+    let free = crate::harness::costs_nothing(&options.harness_command);
     if free {
         estimate = Estimate {
             calls: estimate.calls,
@@ -784,7 +843,13 @@ pub fn run(
         },
         options.repeats
     );
-    if free {
+    if free && crate::codex::local_model(&options.harness_command) {
+        let _ = writeln!(
+            out,
+            "`{}` runs a local model on this machine: this run costs $0.00.",
+            options.harness_command.join(" ")
+        );
+    } else if free {
         let _ = writeln!(
             out,
             "`{}` uses a free model of opencode Zen (free for a limited time): this run costs \
@@ -882,7 +947,9 @@ pub fn run(
 
     let sources = arms::Sources {
         project: options.project.clone(),
-        instructions: if opencode(options) {
+        instructions: if codex(options) {
+            arms::Sources::codex_instructions_of(&options.codex, &options.project)
+        } else if opencode(options) {
             arms::Sources::opencode_instructions_of(&options.opencode, &options.project)
         } else {
             arms::Sources::instructions_of(&options.claude.instructions, &options.project)
@@ -894,14 +961,16 @@ pub fn run(
                 .join(crate::import::claude_slug(&options.project))
                 .join("memory"),
         )
-        .filter(|dir| dir.is_dir() && !opencode(options)),
+        .filter(|dir| dir.is_dir() && !opencode(options) && !codex(options)),
         store_dir,
         exe: options.exe.clone(),
     };
     let arms_dir = run_dir.join("arms");
     let mut sandboxes = Vec::new();
     for arm in &arms_list {
-        sandboxes.push(if opencode(options) {
+        sandboxes.push(if codex(options) {
+            arms::build_codex(*arm, &arms_dir, &sources, &options.codex)?
+        } else if opencode(options) {
             arms::build_opencode(*arm, &arms_dir, &sources, &options.opencode.db)?
         } else {
             arms::build(*arm, &arms_dir, &sources)?
@@ -926,7 +995,13 @@ pub fn run(
         stopped: None,
         notes: Vec::new(),
     };
-    if opencode(options) && arms_list.contains(&BenchArm::Files) {
+    if codex(options) && arms_list.contains(&BenchArm::Files) {
+        meta.notes.push(
+            "Codex has no file memory: the files arm holds its instruction files (AGENTS.md) \
+             only."
+                .to_string(),
+        );
+    } else if opencode(options) && arms_list.contains(&BenchArm::Files) {
         meta.notes.push(
             "opencode has no file memory: the files arm holds its instruction files (AGENTS.md) \
              only."
@@ -941,7 +1016,7 @@ pub fn run(
     let answer_call = |sandbox: &arms::Sandbox, kind: Kind, prompt: String, cap: f64| {
         let mut args = options.harness_command.clone();
         args.extend(sandbox.args.iter().cloned());
-        if !opencode(options) {
+        if !opencode(options) && !codex(options) {
             args.extend(["--max-budget-usd".to_string(), format!("{cap:.2}")]);
         }
         Call {

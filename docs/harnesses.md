@@ -2,10 +2,9 @@
 
 > Pre-release: Claude Code is supported by `install`, `uninstall`, `status`, `doctor` and
 > `import` (stage M3), the indexing of its past sessions with opt-in summaries (stage M4) and the
-> A/B `bench` (stage M5); opencode 1.x by all of them since stage M7a, opencode 2.x since M7b.
-> Both harnesses can be installed at once
-> and share one store and one daemon. The other harnesses are targets, listed with what each one
-> needs.
+> A/B `bench` (stage M5); opencode 1.x by all of them since stage M7a, opencode 2.x since M7b,
+> OpenAI Codex CLI since M7c. Any of them can be installed at once
+> and share one store and one daemon. Cursor is a target, listed with what it needs.
 
 Every harness below supports MCP, so the memory tools work the same way everywhere. What differs is
 how graphersal-memory is installed into the harness, where the harness keeps its rules and
@@ -15,7 +14,7 @@ transcripts, and whether it has hooks.
 |---|---|---|---|---|---|
 | Claude Code | install, import, hooks, rule block (M3); past sessions, opt-in summaries (M4); bench (M5) | a member of `mcpServers` in `~/.claude.json` (user scope), edited in place with a backup | a marked block in `~/.claude/CLAUDE.md` | local transcripts (`~/.claude/projects/`) | SessionStart / SessionEnd |
 | opencode 1.x and 2.x | install, rule file, session plugin, past sessions, opt-in summaries, bench (M7a: 1.x; M7b: 2.x) | 1.x: members of `mcp`, 2.x: members of `mcp.servers`, in `~/.config/opencode/opencode.json(c)` (JSONC kept), edited in place with a backup | a rules file of our own, listed in `instructions` | its SQLite database (`~/.local/share/opencode/opencode.db`, both lines' tables), read-only | one plugin file for both lines: a session's start, and shutdown |
-| OpenAI Codex CLI | planned (M7) | its MCP config | `AGENTS.md` (to be checked) | its local store (format to be checked) | to be checked |
+| OpenAI Codex CLI | install, rule block, hooks, past sessions, opt-in summaries, bench with a local model (M7c) | one managed block of `[mcp_servers.*]` tables in `~/.codex/config.toml` (`$CODEX_HOME`), edited as text with a backup | a marked block in `~/.codex/AGENTS.md` (or `AGENTS.override.md` when that is the one Codex loads) | its rollout files (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`), read-only | SessionStart / SessionEnd in `~/.codex/hooks.json` (run once you trust them in `/hooks`) |
 | Cursor | planned (M7) | its MCP config | Cursor rules (to be checked) | its local store (format to be checked) | to be checked |
 
 Where a harness has no hooks, synchronisation runs from the MCP server itself or on demand.
@@ -303,6 +302,120 @@ reached"); such a summary is reported as failed and tried again at a later index
 files (your opencode instruction files: `AGENTS.md`, and on 1.x the `CLAUDE.md` it falls back
 to; opencode has no memory files), graph (the use tools on a fork of the store). opencode has no
 per-call cost cap like `--max-budget-usd`; the run stops when its spend reaches the budget.
+
+## OpenAI Codex CLI
+
+Verified against the source of release `rust-v0.167.0`
+([github.com/openai/codex](https://github.com/openai/codex/tree/rust-v0.167.0)) and its
+documentation (developers.openai.com/codex, now served from learn.chatgpt.com/docs). Links below
+point into that tag.
+
+### Where Codex keeps things
+
+- **Home**: `$CODEX_HOME` when set (it must exist), else `~/.codex`
+  ([`utils/home-dir`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/utils/home-dir/src/lib.rs)).
+  The user configuration is `config.toml` there (TOML). Codex writes into it itself: the trust of
+  a project (`[projects."<path>"]`), the trust of a hook (`[hooks.state."<key>"]`), a model you
+  pick.
+- **MCP servers**: `[mcp_servers.<name>]` tables with `command`, `args`, `env`, `enabled`
+  (default true; `false`: not started), `startup_timeout_sec` (default 10), `enabled_tools`,
+  `default_tools_approval_mode`
+  ([`config/src/mcp_types.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/config/src/mcp_types.rs)).
+  The model sees a tool as `mcp__<server>__<tool>`, every character outside `[A-Za-z0-9_]`
+  replaced by `_`
+  ([`codex-mcp/src/mcp/mod.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/codex-mcp/src/mcp/mod.rs),
+  `qualified_mcp_tool_name_prefix`): ours are `mcp__graphersal_memory__memories`, and so on. A
+  tool marked read-only by its server (ours: `memories`, `memory`, `recall`, `sessions`,
+  `session`) runs without asking; `remember` and `forget` ask the first time, as in Claude Code
+  ([`core/src/mcp_tool_call.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/core/src/mcp_tool_call.rs),
+  `requires_mcp_tool_approval`).
+- **Rules**: Codex loads one global instruction file, the first non-empty of
+  `$CODEX_HOME/AGENTS.override.md` and `$CODEX_HOME/AGENTS.md`
+  ([`codex-home/src/instructions/mod.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/codex-home/src/instructions/mod.rs)),
+  then the project's `AGENTS.md` files from the repository root down to the working directory
+  ([`core/src/agents_md.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/core/src/agents_md.rs)).
+  There is no setting that adds a second global file (`developer_instructions` is a single
+  string in `config.toml`, and a project's configuration replaces it), so the managed rule block
+  goes into the global file Codex loads, between the same fingerprinted marker lines as in
+  Claude Code's `CLAUDE.md`. Your text around it is never touched.
+- **Session start and end**: lifecycle hooks (feature `hooks`, stable and on by default,
+  [`features/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/features/src/lib.rs))
+  in `$CODEX_HOME/hooks.json`, the shape of Claude Code's settings. The input names the
+  session's rollout file (`transcript_path`); plain stdout of `SessionStart` becomes model
+  context; `SessionEnd` may run at most 3 seconds
+  ([`hooks/src/events/session_end.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/hooks/src/events/session_end.rs)).
+  **Codex runs a hook you did not review only after you trust it**: open `/hooks` in Codex once
+  and trust the two graphersal-memory hooks (Codex records the trust in `config.toml`,
+  [`hooks/src/engine/discovery.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/hooks/src/engine/discovery.rs)).
+  install does not trust its own hooks for you: that is your security decision. Until then,
+  sessions are still indexed once a rollout is unchanged for 30 minutes; `status` and `doctor`
+  say whether the trust is recorded.
+- **Sessions**: one JSON Lines rollout file per session,
+  `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread id>.jsonl`
+  ([`rollout/src/recorder.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/rollout/src/recorder.rs)),
+  lines `{"timestamp", "type", "payload"}`
+  ([`history/src/rollout_payload.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/history/src/rollout_payload.rs)).
+  The reader takes `session_meta` (thread id, working directory, git branch; a sub-agent's
+  session is left out), the `event_msg` records `user_message` and `agent_message` (what the
+  default history mode persists,
+  [`rollout/src/policy.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/rollout/src/policy.rs);
+  the `paginated` mode's `item_completed` records too), tool calls, `patch_apply_end` (files
+  edited) and compaction summaries. The injected instructions and environment context are not
+  the user's words and are left out. Rollouts that an off-by-default feature
+  (`local_thread_store_compression`) compresses to `.jsonl.zst` after 7 days are not read.
+  Sessions are `session:<thread id>` in the graph.
+- **Memory**: Codex has a memory feature of its own (`[features] memories = true`, off by
+  default; generated files under `$CODEX_HOME/memories_v2/`). When you switched it on, the
+  wizard offers to switch it off (the auto-memory question; `--keep-auto-memory` keeps it). Only a
+  plain `memories = true` line of `[features]` (or `features.memories = true`) is changed, in
+  place; uninstall switches it on again.
+
+### What `install` writes
+
+| File | What | How it is recognised |
+|---|---|---|
+| `~/.codex/config.toml` | one block between `# graphersal-memory:begin fingerprint=...` and `# graphersal-memory:end` with `[mcp_servers.graphersal-memory]` (`command` = this binary, `args = ["mcp", "--profile", "use"]`, `startup_timeout_sec = 30`: the first connection may start the daemon) and `[mcp_servers.graphersal-memory-develop]` (`enabled = false` until `--enable-develop`), placed before your first table so your top-level keys stay top-level; and, only if you agreed, `memories = false` | the marker comments; a hand edit inside is a conflict |
+| `~/.codex/hooks.json` | one group in `hooks.SessionStart` (timeout 30 s) and one in `hooks.SessionEnd` (3 s), each `"<this binary>" hook session-start\|session-end ... --harness codex` | the command |
+| `~/.codex/AGENTS.md` (or `AGENTS.override.md`) | the managed rule block (the tool names `mcp__graphersal_memory__<function>`) | the marker lines |
+
+The configuration is edited as text (`codex mcp add` would rewrite the file); every edit is checked
+by parsing the result, and nothing else in the file changes. Backups, the state
+(`<data dir>/install/codex.json`) and the byte-identical `uninstall` of an untouched file work as
+for Claude Code. Codex usually writes into `config.toml` after install (the trust of the hooks,
+of a project): then `uninstall` takes out our block (and switches the memories back), and Codex's
+own additions stay. Should Codex's own rewrite of the file ever drop our marker comments, install
+and uninstall still find our tables by their command.
+
+### `uninstall` and the export
+
+Codex has no memory files we could write the memories back into (its own memories are generated
+state). Uninstall exports every memory as readable Markdown under
+`~/graphersal-memory-export/codex/` (as for opencode: per project `MEMORY.md` and one file per
+memory, `global.md`; default yes, nothing is deleted). It is not loaded into Codex
+automatically; paste what you need into `~/.codex/AGENTS.md` or a project's `AGENTS.md`.
+`graphersal-memory export --to-files --harness codex` writes it again.
+
+### Summaries and `bench` through `codex exec`
+
+With Codex installed alone, install sets `summaries.harness_command` to `codex exec` (any `codex
+exec ...` command works, for example `codex exec --oss --local-provider lmstudio` for LM Studio
+on `localhost:1234` with its default model `openai/gpt-oss-20b`,
+[`lmstudio/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/lmstudio/src/lib.rs)).
+Every run gets `--json --ephemeral --skip-git-repo-check --sandbox read-only` and the prompt on
+stdin, in a `CODEX_HOME` of its own in the data directory: its `config.toml` has your model
+settings (`model`, `model_provider`, `model_reasoning_effort`, `oss_provider`,
+`model_providers` copied from yours), `approval_policy = "never"`, no hooks, no Codex memories, no
+history, no project instruction files and every built-in tool switched off (shell, unified exec,
+image viewing, web search, sub-agents, apps, plugins); a copy of your `auth.json` (your login) is
+put there, the original is never changed; none of your MCP servers are loaded. `codex exec
+--json` reports tokens (`turn.completed`) but **no cost**
+([`exec/src/exec_events.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/exec/src/exec_events.rs)):
+a summary on a local model (`--oss`) counts $0.00; on any other model the monthly budget counts
+the pre-call estimate of each call. The bench needs a known cost to enforce its budget, so it
+runs through Codex only with a local model (`--oss`) and refuses otherwise. Its arms for Codex:
+none (no context), files (your Codex instruction files, `AGENTS.md`; Codex has no memory files),
+graph (the read functions of a server over a fork of the store, `enabled_tools`, approved without
+asking), each with its own `CODEX_HOME` and no built-in tools.
 
 ## Without a terminal (later)
 

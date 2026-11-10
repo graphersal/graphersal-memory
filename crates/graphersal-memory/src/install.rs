@@ -180,6 +180,8 @@ pub struct Setup {
     pub paths: ClaudePaths,
     /// opencode's files.
     pub opencode: crate::opencode::OpenCodePaths,
+    /// Codex's files.
+    pub codex: crate::codex::CodexPaths,
     /// The program search path the harness detection looks in (`None`: this process's `PATH`;
     /// tests pass an empty one).
     pub search_path: Option<std::ffi::OsString>,
@@ -208,11 +210,17 @@ impl Setup {
         crate::opencode::OpenCode::new(self.opencode.clone())
     }
 
+    /// Codex with this setup's paths.
+    pub fn codex_agent(&self) -> crate::codex::Codex {
+        crate::codex::Codex::new(self.codex.clone())
+    }
+
     /// The agent of a harness.
     pub fn agent_of(&self, kind: Kind) -> Box<dyn Agent> {
         match kind {
             Kind::ClaudeCode => Box::new(self.agent()),
             Kind::OpenCode => Box::new(self.opencode_agent()),
+            Kind::Codex => Box::new(self.codex_agent()),
         }
     }
 
@@ -248,6 +256,7 @@ impl Setup {
                                 || self.opencode.config_dir.is_dir()
                                 || self.opencode.home.join(".opencode/bin").is_dir()
                         }
+                        Kind::Codex => self.on_path("codex") || self.codex.codex_home.is_dir(),
                     }
             })
             .collect()
@@ -265,6 +274,7 @@ impl Setup {
                         Kind::OpenCode => {
                             !crate::opencode::install::inspect(self).nothing_installed()
                         }
+                        Kind::Codex => !crate::codex::install::inspect(self).nothing_installed(),
                     }
             })
             .collect()
@@ -635,6 +645,10 @@ struct InstallPlan {
     changes: Vec<Change>,
     /// opencode's file changes.
     opencode_changes: Vec<Change>,
+    /// Codex's file changes.
+    codex_changes: Vec<Change>,
+    /// What happens to Codex's memories (`crate::codex::install::Plan::memories`).
+    codex_memories: Option<bool>,
     conflicts: Vec<String>,
     imports: Vec<DirPlan>,
     write_config: bool,
@@ -958,11 +972,14 @@ struct Current {
     import_pending: (usize, usize),
     /// The harnesses found on this machine (Claude Code when none is found).
     detected: Vec<Kind>,
+    /// Whether Codex's own memories are on (`[features] memories = true`).
+    codex_memories_on: bool,
 }
 
 impl Current {
     fn read(setup: &Setup) -> Result<Self, String> {
         let state = State::load(setup)?;
+        let codex_state = State::load_of(setup, Kind::Codex)?;
         let config = Config::load(&setup.data_dir)?;
         let agent = setup.agent();
         let mut errors = Vec::new();
@@ -981,7 +998,11 @@ impl Current {
         let (with_project, _, new, changed, _) = import::totals(&imports);
         Ok(Self {
             installed: State::exists(setup),
-            auto_memory_answer: state.meta.get("auto_memory_off").and_then(Value::as_bool),
+            auto_memory_answer: state
+                .meta
+                .get("auto_memory_off")
+                .or_else(|| codex_state.meta.get("auto_memory_off"))
+                .and_then(Value::as_bool),
             auto_memory_off: off,
             auto_memory_off_by_user: off && !recorded,
             develop_registered: is_our_entry(&user_config["mcpServers"][DEVELOP_SERVER]),
@@ -995,7 +1016,19 @@ impl Current {
                 }
             },
             config,
+            codex_memories_on: read_text(&setup.codex.config_file)
+                .ok()
+                .flatten()
+                .and_then(|text| crate::tomledit::parse(&text).ok())
+                .is_some_and(|doc| crate::codex::install::memories_on(&doc)),
         })
+    }
+
+    /// Whether the auto-memory question applies: Claude Code may be chosen and its auto-memory
+    /// was not switched off by the user, or Codex may be chosen and its memories are on.
+    fn ask_auto_memory(&self, claude_possible: bool, codex_possible: bool) -> bool {
+        (claude_possible && !self.auto_memory_off_by_user)
+            || (codex_possible && self.codex_memories_on)
     }
 }
 
@@ -1069,10 +1102,10 @@ fn ask(
     let ask_harnesses = options.harnesses.is_none() && current.detected.len() > 1;
     // The Claude Code questions are asked when Claude Code may be chosen.
     let claude_possible = defaults.harnesses.contains(&Kind::ClaudeCode) || ask_harnesses;
+    let codex_possible = defaults.harnesses.contains(&Kind::Codex) || ask_harnesses;
     let ask_import = claude_possible && current.import_pending.1 > 0;
-    let ask_auto_memory =
-        claude_possible && agent.auto_memory_key().is_some() && !current.auto_memory_off_by_user;
-    let total = wizard_steps(options, current, claude_possible);
+    let ask_auto_memory = current.ask_auto_memory(claude_possible, codex_possible);
+    let total = wizard_steps(options, current, claude_possible, codex_possible);
     let mut n = 0;
     let mut next = || {
         n += 1;
@@ -1204,19 +1237,26 @@ fn ask(
         defaults.import
     };
 
-    let auto_memory_off = if ask_auto_memory && claude {
-        console.step(
-            next(),
-            total,
-            &format!("{name}'s auto-memory"),
-            &[
-                &format!(
-                    "{name} also writes its own memory files and loads them into every session;"
-                ),
-                "with graphersal-memory both would keep the same facts twice.",
-                NOTHING_IS_LOST,
-            ],
-        );
+    let claude_memory = claude && !current.auto_memory_off_by_user;
+    let codex_memory = harnesses.contains(&Kind::Codex) && current.codex_memories_on;
+    let auto_memory_off = if ask_auto_memory && claude_memory {
+        let mut lines = vec![
+            format!("{name} also writes its own memory files and loads them into every session;"),
+            "with graphersal-memory both would keep the same facts twice.".to_string(),
+            NOTHING_IS_LOST.to_string(),
+        ];
+        if codex_memory {
+            lines.push(
+                "The same answer switches Codex's own memories off ([features] memories in"
+                    .to_string(),
+            );
+            lines.push(format!(
+                "{}); uninstall switches them on again.",
+                setup.codex.config_file.display()
+            ));
+        }
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        console.step(next(), total, &format!("{name}'s auto-memory"), &lines);
         console.yes_no(
             &format!(
                 "switch it off ({} false in {})",
@@ -1224,6 +1264,26 @@ fn ask(
                 agent.settings_file().display()
             ),
             "keep it on (the files it writes are imported at each session start)",
+            Some(defaults.auto_memory_off),
+        )?
+    } else if ask_auto_memory && codex_memory {
+        console.step(
+            next(),
+            total,
+            "Codex's memories",
+            &[
+                "Codex's own memory feature is on: it generates memories from your chats and",
+                "loads them into sessions; with graphersal-memory both would keep the same facts",
+                "twice.",
+                crate::codex::install::NOTHING_IS_LOST,
+            ],
+        );
+        console.yes_no(
+            &format!(
+                "switch it off ([features] memories = false in {})",
+                setup.codex.config_file.display()
+            ),
+            "keep it on",
             Some(defaults.auto_memory_off),
         )?
     } else {
@@ -1240,7 +1300,7 @@ fn ask(
                 "finished session is summarized through your own `{}`",
                 summaries_command(&current.config, &harnesses).join(" ")
             ),
-            if crate::opencode::free_model(&summaries_command(&current.config, &harnesses)) {
+            if crate::harness::costs_nothing(&summaries_command(&current.config, &harnesses)) {
                 "(decisions, corrections, outcomes, open threads). With this free model:"
             } else {
                 "(decisions, corrections, outcomes, open threads). That costs model usage:"
@@ -1286,27 +1346,37 @@ fn ask(
 /// The number of wizard steps (the summary included): the harness question when more than
 /// one harness is found and `--harness` is not given, the import and auto-memory questions when
 /// Claude Code may be chosen.
-fn wizard_steps(options: &InstallOptions, current: &Current, claude_possible: bool) -> usize {
+fn wizard_steps(
+    options: &InstallOptions,
+    current: &Current,
+    claude_possible: bool,
+    codex_possible: bool,
+) -> usize {
     let ask_harnesses = options.harnesses.is_none() && current.detected.len() > 1;
     let import = claude_possible && current.import_pending.1 > 0;
-    let auto = claude_possible && !current.auto_memory_off_by_user;
+    let auto = current.ask_auto_memory(claude_possible, codex_possible);
     4 + usize::from(ask_harnesses) + usize::from(import) + usize::from(auto) + 1
 }
 
 /// The command the summaries run through for `harnesses`: the settings file's, except that
-/// with opencode alone the default `claude -p` becomes opencode's headless command (with a
-/// free model).
+/// without Claude Code the default `claude -p` becomes opencode's headless command (with a
+/// free model) when opencode is chosen, else Codex's (`codex exec`).
 pub fn summaries_command(config: &Config, harnesses: &[Kind]) -> Vec<String> {
     let command = &config.summaries.harness_command;
     let claude_default = crate::config::split_command(crate::config::DEFAULT_HARNESS_COMMAND)
         .is_ok_and(|default| default == *command);
-    if claude_default
-        && !harnesses.contains(&Kind::ClaudeCode)
-        && harnesses.contains(&Kind::OpenCode)
-    {
-        crate::config::split_command(crate::opencode::DEFAULT_HEADLESS_COMMAND).unwrap_or_default()
+    let other = if !claude_default || harnesses.contains(&Kind::ClaudeCode) {
+        None
+    } else if harnesses.contains(&Kind::OpenCode) {
+        Some(crate::opencode::DEFAULT_HEADLESS_COMMAND)
+    } else if harnesses.contains(&Kind::Codex) {
+        Some(crate::codex::DEFAULT_HEADLESS_COMMAND)
     } else {
-        command.clone()
+        None
+    };
+    match other {
+        Some(other) => crate::config::split_command(other).unwrap_or_default(),
+        None => command.clone(),
     }
 }
 
@@ -1443,6 +1513,20 @@ fn plan_install(
         opencode_changes = plan.changes;
         conflicts.extend(plan.conflicts);
     }
+    let mut codex_changes = Vec::new();
+    let mut codex_memories = None;
+    if answers.harnesses.contains(&Kind::Codex) {
+        let plan = crate::codex::install::plan(
+            setup,
+            answers.language,
+            answers.develop,
+            answers.auto_memory_off,
+        )?;
+        steps.extend(plan.steps);
+        codex_changes = plan.changes;
+        codex_memories = plan.memories;
+        conflicts.extend(plan.conflicts);
+    }
     steps.push(plan_sessions(setup, options, answers, current)?);
     let config_path = crate::config::path(&setup.data_dir);
     let write_config = !config_path.exists();
@@ -1468,6 +1552,8 @@ fn plan_install(
         steps,
         changes,
         opencode_changes,
+        codex_changes,
+        codex_memories,
         conflicts,
         imports,
         write_config,
@@ -1762,13 +1848,14 @@ pub fn install(
     let plan = plan_install(setup, options, &answers, &current)?;
     if interactive {
         let mut console = Console::new(input, out, options.color);
-        let claude_possible = options.harnesses.is_none() && current.detected.len() > 1
-            || options
-                .harnesses
-                .clone()
-                .unwrap_or_else(|| current.detected.clone())
-                .contains(&Kind::ClaudeCode);
-        let total = wizard_steps(options, &current, claude_possible);
+        let offered = options
+            .harnesses
+            .clone()
+            .unwrap_or_else(|| current.detected.clone());
+        let ask_harnesses = options.harnesses.is_none() && current.detected.len() > 1;
+        let claude_possible = ask_harnesses || offered.contains(&Kind::ClaudeCode);
+        let codex_possible = ask_harnesses || offered.contains(&Kind::Codex);
+        let total = wizard_steps(options, &current, claude_possible, codex_possible);
         console.step(total, total, "Summary", &["This is what install will do:"]);
         print_steps(console.out(), &plan.steps);
         for conflict in &plan.conflicts {
@@ -1780,6 +1867,12 @@ pub fn install(
             && !current.auto_memory_off
         {
             let _ = writeln!(console.out(), "\n  {NOTHING_IS_LOST}");
+        } else if plan.codex_memories == Some(true) {
+            let _ = writeln!(
+                console.out(),
+                "\n  {}",
+                crate::codex::install::NOTHING_IS_LOST
+            );
         }
         let _ = writeln!(console.out());
         if !console.confirm_apply() {
@@ -1845,6 +1938,34 @@ pub fn install(
                 kind_state.save(setup)?;
                 apply_changes(setup, &plan.opencode_changes, &mut kind_state, &mut report)?;
             }
+            Kind::Codex => {
+                kind_state
+                    .meta
+                    .insert("auto_memory_off".into(), json!(answers.auto_memory_off));
+                kind_state.save(setup)?;
+                apply_changes(setup, &plan.codex_changes, &mut kind_state, &mut report)?;
+                let config = &setup.codex.config_file;
+                match plan.codex_memories {
+                    Some(true) => {
+                        kind_state.file_mut(config).insert(
+                            crate::codex::install::MEMORIES_RECORD.into(),
+                            json!({"previous": true}),
+                        );
+                        report.push(
+                            "Codex's memories: off (uninstall exports every memory as Markdown \
+                             and switches them on again)"
+                                .to_string(),
+                        );
+                    }
+                    Some(false) => {
+                        kind_state
+                            .file_mut(config)
+                            .remove(crate::codex::install::MEMORIES_RECORD);
+                    }
+                    None => {}
+                }
+                kind_state.save(setup)?;
+            }
         }
     }
     match &plan.auto_memory {
@@ -1881,9 +2002,14 @@ pub fn install(
     if command != current.config.summaries.harness_command {
         values.push(("summaries", "harness_command", json!(command.join(" "))));
         report.push(format!(
-            "summaries run through `{}` when you switch them on (opencode only; a free model of \
-             opencode Zen; summaries.harness_command in config.json)",
-            command.join(" ")
+            "summaries run through `{}` when you switch them on ({}; summaries.harness_command in \
+             config.json)",
+            command.join(" "),
+            if crate::opencode::is_opencode(&command) {
+                "opencode only; a free model of opencode Zen"
+            } else {
+                "Codex only; the model of your Codex configuration"
+            }
         ));
     }
 
@@ -2067,7 +2193,11 @@ pub fn install(
     for conflict in &plan.conflicts {
         let _ = writeln!(out, "  conflict: {conflict}");
     }
-    if plan.changes.is_empty() && plan.opencode_changes.is_empty() && plan.conflicts.is_empty() {
+    if plan.changes.is_empty()
+        && plan.opencode_changes.is_empty()
+        && plan.codex_changes.is_empty()
+        && plan.conflicts.is_empty()
+    {
         let _ = writeln!(
             out,
             "  {} configuration: already up to date",
@@ -2085,12 +2215,24 @@ pub fn install(
             .map(|k| k.display_name())
             .collect::<Vec<_>>()
             .join(" and "),
-        match (claude, answers.harnesses.contains(&Kind::OpenCode)) {
+        match (
+            claude || answers.harnesses.contains(&Kind::Codex),
+            answers.harnesses.contains(&Kind::OpenCode)
+        ) {
             (true, true) => "hooks and the plugin",
             (false, true) => "plugin",
             _ => "hooks",
         }
     );
+    if answers.harnesses.contains(&Kind::Codex)
+        && !crate::codex::install::inspect(setup).hooks_trusted
+    {
+        let _ = writeln!(
+            out,
+            "Codex runs the new hooks only after you trust them: open `/hooks` in Codex once and \
+             trust the two graphersal-memory hooks."
+        );
+    }
     Ok(if plan.conflicts.is_empty() && failures == 0 {
         0
     } else {
@@ -2318,6 +2460,7 @@ pub fn uninstall_with(
     };
     let state = State::load(setup)?;
     let opencode_state = State::load_of(setup, Kind::OpenCode)?;
+    let codex_state = State::load_of(setup, Kind::Codex)?;
     let mut conflicts = Vec::new();
     let mut changes: Vec<(Kind, Change, &'static str)> = Vec::new();
     if kinds.contains(&Kind::ClaudeCode) {
@@ -2333,6 +2476,16 @@ pub fn uninstall_with(
             &mut conflicts,
         )? {
             changes.push((Kind::OpenCode, change, what));
+        }
+    }
+    if kinds.contains(&Kind::Codex) {
+        for (change, what) in crate::codex::install::removal(
+            setup,
+            &codex_state,
+            options.disable_develop_only,
+            &mut conflicts,
+        )? {
+            changes.push((Kind::Codex, change, what));
         }
     }
     let title = if options.disable_develop_only {
@@ -2488,7 +2641,22 @@ pub fn uninstall_with(
             setup.agent().display_name()
         ));
     }
-    let mut states = [(Kind::ClaudeCode, state), (Kind::OpenCode, opencode_state)];
+    if !options.disable_develop_only
+        && kinds.contains(&Kind::Codex)
+        && codex_state
+            .file(&setup.codex.config_file)
+            .is_some_and(|entry| entry.contains_key(crate::codex::install::MEMORIES_RECORD))
+        && changes
+            .iter()
+            .any(|(_, change, _)| change.path == setup.codex.config_file)
+    {
+        report.push("Codex's memories: switched on again, as before install".to_string());
+    }
+    let mut states = [
+        (Kind::ClaudeCode, state),
+        (Kind::OpenCode, opencode_state),
+        (Kind::Codex, codex_state),
+    ];
     for (kind, change, _) in &changes {
         match &change.after {
             Some(text) => {

@@ -18,6 +18,12 @@ use std::time::{Duration, Instant};
 /// The extensions Windows tries when `PATHEXT` is not set.
 const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 
+/// Whether a headless command runs on a model that costs nothing: a free model of opencode Zen
+/// (`crate::opencode::free_model`) or a local model of Codex (`--oss`, `crate::codex::local_model`).
+pub fn costs_nothing(command: &[String]) -> bool {
+    crate::opencode::free_model(command) || crate::codex::local_model(command)
+}
+
 /// The program to start for `program` on this platform (see the module docs).
 pub fn program_path(program: &str) -> PathBuf {
     resolve(

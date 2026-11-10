@@ -230,6 +230,33 @@ pub fn opencode_transcripts(
         .collect()
 }
 
+/// The finished Codex rollouts of `project` under `sessions` (unchanged for 30 minutes), newest
+/// first, parsed (the id is the session's thread id, as the indexing names it).
+pub fn codex_transcripts(
+    sessions: &Path,
+    project: &str,
+    now: SystemTime,
+) -> Vec<(String, transcript::Transcript)> {
+    let now = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut found: Vec<(u64, PathBuf)> =
+        crate::codex::sessions::of_project(sessions, Path::new(project))
+            .into_iter()
+            .filter(|(_, modified)| now.saturating_sub(*modified) >= RECENT.as_secs())
+            .map(|(path, modified)| (modified, path))
+            .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    found
+        .into_iter()
+        .filter_map(|(_, path)| {
+            crate::codex::sessions::read(&path)
+                .ok()
+                .map(|t| (crate::codex::sessions::thread_id(&path), t))
+        })
+        .collect()
+}
+
 /// The raw-transcript excerpt the questions are generated from: newest sessions first, each
 /// turn marked with its id, until `budget` characters; also the start of each turn's prompt by
 /// id (the source excerpts of the question file).

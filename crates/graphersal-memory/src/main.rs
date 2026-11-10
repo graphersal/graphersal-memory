@@ -13,6 +13,7 @@ mod bench_tests;
 mod catalog;
 mod cli;
 mod client;
+mod codex;
 mod commands;
 mod config;
 mod daemon;
@@ -44,6 +45,7 @@ mod sessions;
 mod shim;
 mod store;
 mod summaries;
+mod tomledit;
 mod transcript;
 
 use std::process::ExitCode;

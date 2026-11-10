@@ -27,6 +27,7 @@ pub(crate) fn setup_in(home: &Path, data: &Path) -> Setup {
     Setup {
         paths,
         opencode: crate::opencode::OpenCodePaths::of_home(home),
+        codex: crate::codex::CodexPaths::of_home(home),
         search_path: Some(std::ffi::OsString::new()),
         data_dir: data.to_path_buf(),
         run_dir: short_run_dir(),
@@ -1904,4 +1905,319 @@ fn opencode_status_and_doctor_name_its_parts() {
         "{findings:?}"
     );
     memory.close();
+}
+
+// ------------------------------------------------------------------------------------------
+// M7c: Codex.
+// ------------------------------------------------------------------------------------------
+
+fn codex_only() -> InstallOptions {
+    InstallOptions {
+        yes: true,
+        harnesses: Some(vec![Kind::Codex]),
+        ..InstallOptions::default()
+    }
+}
+
+fn codex_uninstall() -> UninstallOptions {
+    UninstallOptions {
+        yes: true,
+        no_export: true,
+        harnesses: Some(vec![Kind::Codex]),
+        ..UninstallOptions::default()
+    }
+}
+
+/// The user's own Codex configuration: comments, top-level keys, a project table, an MCP server
+/// of another program; their own AGENTS.md and a hook of theirs.
+const CODEX_CONFIG: &str = "# my Codex settings\nmodel = \"gpt-5.5\"\napproval_policy = \"on-request\"\n\n[mcp_servers.other]\ncommand = \"npx\"\nargs = [\"-y\", \"other\"]  # keep\n\n[projects.\"/w/app\"]\ntrust_level = \"trusted\"\n";
+
+fn existing_codex_home(home: &Path) {
+    let dir = home.join(".codex");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.toml"), CODEX_CONFIG).unwrap();
+    std::fs::write(
+        dir.join("AGENTS.md"),
+        "# My Codex rules\n\nTabs, not spaces.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("hooks.json"),
+        "{\n  \"hooks\": {\n    \"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"say done\"}]}]\n  }\n}\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn codex_install_then_uninstall_leaves_existing_files_byte_identical() {
+    let home = TempDir::new("cx-rt-home");
+    let data = TempDir::new("cx-rt-data");
+    existing_codex_home(home.path());
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, codex_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with("graphersal-memory install (Codex)"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("Claude Code"),
+        "no Claude Code wording: {out}"
+    );
+    assert!(
+        out.contains("/hooks"),
+        "the report says how to trust the hooks: {out}"
+    );
+    let text = read(&setup.codex.config_file);
+    assert!(
+        text.starts_with("# my Codex settings\nmodel = \"gpt-5.5\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("args = [\"-y\", \"other\"]  # keep"),
+        "{text}"
+    );
+    let block_at = text.find(crate::tomledit::BEGIN).unwrap();
+    assert!(
+        block_at < text.find("[mcp_servers.other]").unwrap(),
+        "{text}"
+    );
+    let doc = crate::tomledit::parse(&text).unwrap();
+    assert_eq!(
+        doc["mcp_servers"]["graphersal-memory"],
+        crate::codex::install::mcp_entry(&setup, "use", true)
+    );
+    assert_eq!(
+        doc["mcp_servers"]["graphersal-memory"]["command"],
+        "/opt/gm/bin/graphersal-memory"
+    );
+    assert_eq!(
+        doc["mcp_servers"]["graphersal-memory-develop"]["enabled"],
+        false
+    );
+    assert_eq!(doc["mcp_servers"]["other"]["command"], "npx");
+    assert_eq!(doc["model"], "gpt-5.5");
+    assert_eq!(doc["projects"]["/w/app"]["trust_level"], "trusted");
+    let hooks = crate::jsonedit::value_of(&read(&setup.codex.hooks_file)).unwrap();
+    assert_eq!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"], "say done");
+    let start = hooks["hooks"]["SessionStart"][0]["hooks"][0].clone();
+    assert!(
+        start["command"]
+            .as_str()
+            .unwrap()
+            .contains(" hook session-start "),
+        "{start}"
+    );
+    assert!(
+        start["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("--harness codex"),
+        "{start}"
+    );
+    assert_eq!(hooks["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
+    let agents = read(&home.path().join(".codex/AGENTS.md"));
+    assert!(
+        agents.starts_with("# My Codex rules\n\nTabs, not spaces.\n"),
+        "{agents}"
+    );
+    assert!(
+        agents.contains("mcp__graphersal_memory__<function>"),
+        "{agents}"
+    );
+    // Nothing of the other harnesses.
+    assert!(!setup.paths.user_config.exists() && !setup.paths.config_dir.exists());
+    assert!(!setup.opencode.config_dir.exists());
+    assert!(data.path().join("install/codex.json").exists());
+    let inspection = crate::codex::install::inspect(&setup);
+    assert!(!inspection.nothing_installed());
+    assert!(
+        !inspection.hooks_trusted,
+        "Codex has not trusted the hooks yet"
+    );
+    assert!(
+        crate::codex::install::doctor(&setup)
+            .iter()
+            .any(|f| f.problem && f.text.contains("not trusted")),
+    );
+
+    // Idempotent.
+    let again = snapshot(home.path());
+    let (code, out) = run_install(&setup, &memory, codex_only());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), again, "{out}");
+    assert!(out.contains("already up to date"), "{out}");
+
+    let (code, out) = run_uninstall(&setup, codex_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    assert!(!data.path().join("install/codex.json").exists());
+    memory.close();
+}
+
+#[test]
+fn codex_writes_into_its_config_and_uninstall_still_removes_only_our_parts() {
+    let home = TempDir::new("cx-edit-home");
+    let data = TempDir::new("cx-edit-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, codex_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(setup.codex.config_file.is_file() && setup.codex.hooks_file.is_file());
+    // Codex records project trust and the trust of our hooks (as it does after `/hooks`).
+    let hooks = setup.codex.hooks_file.display().to_string();
+    let added = format!(
+        "\n[projects.\"/w/app\"]\ntrust_level = \"trusted\"\n\n[hooks.state.\"{hooks}:session_start:0:0\"]\ntrusted_hash = \"sha256:1\"\n\n[hooks.state.\"{hooks}:session_end:0:0\"]\ntrusted_hash = \"sha256:2\"\n"
+    );
+    let mut text = read(&setup.codex.config_file);
+    text.push_str(&added);
+    std::fs::write(&setup.codex.config_file, &text).unwrap();
+    assert!(crate::codex::install::inspect(&setup).hooks_trusted);
+    let (code, out) = run_uninstall(&setup, codex_uninstall());
+    assert_eq!(code, 0, "{out}");
+    let left = read(&setup.codex.config_file);
+    assert_eq!(
+        crate::tomledit::parse(&left).unwrap(),
+        crate::tomledit::parse(&added).unwrap(),
+        "{left}"
+    );
+    assert!(!left.contains("graphersal-memory:begin"), "{left}");
+    assert!(!setup.codex.hooks_file.exists(), "install created it");
+    assert!(!setup.codex.instruction_file.exists(), "install created it");
+    memory.close();
+}
+
+#[test]
+fn codex_memories_are_switched_off_on_request_and_back_on_at_uninstall() {
+    let home = TempDir::new("cx-mem-home");
+    let data = TempDir::new("cx-mem-data");
+    let dir = home.path().join(".codex");
+    std::fs::create_dir_all(&dir).unwrap();
+    let original = "model = \"o3\"\n\n[features]\n# mine\nmemories = true\n";
+    std::fs::write(dir.join("config.toml"), original).unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    // The default: switched off, with the sentence that nothing is lost.
+    let (code, out) = run_install(&setup, &memory, codex_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Nothing is lost"), "{out}");
+    let text = read(&setup.codex.config_file);
+    assert!(text.contains("# mine\nmemories = false\n"), "{text}");
+    assert!(
+        crate::codex::install::status_lines(&setup)
+            .iter()
+            .any(|l| l.contains("switched off by install")),
+    );
+    let (code, out) = run_uninstall(&setup, codex_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Codex's memories: switched on again"), "{out}");
+    assert_eq!(read(&setup.codex.config_file), original);
+    // Kept on when asked to.
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            keep_auto_memory: true,
+            ..codex_only()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("[features] memories: on (kept)"), "{out}");
+    assert!(read(&setup.codex.config_file).contains("# mine\nmemories = true\n"));
+    memory.close();
+}
+
+#[test]
+fn codex_develop_server_is_switched_by_enabled_and_conflicts_are_kept() {
+    let home = TempDir::new("cx-dev-home");
+    let data = TempDir::new("cx-dev-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            enable_develop: true,
+            ..codex_only()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    let doc = crate::tomledit::parse(&read(&setup.codex.config_file)).unwrap();
+    assert!(doc["mcp_servers"]["graphersal-memory-develop"]["enabled"].is_null());
+    let (code, out) = run_uninstall(
+        &setup,
+        UninstallOptions {
+            disable_develop_only: true,
+            ..codex_uninstall()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    let text = read(&setup.codex.config_file);
+    let doc = crate::tomledit::parse(&text).unwrap();
+    assert_eq!(
+        doc["mcp_servers"]["graphersal-memory-develop"]["enabled"],
+        false
+    );
+    assert!(crate::tomledit::find(&text).unwrap().unwrap().intact);
+    assert!(
+        setup.codex.hooks_file.exists(),
+        "only the develop server changed"
+    );
+    memory.close();
+
+    // Another program's server under our name: kept, reported, nothing written there.
+    let home = TempDir::new("cx-conflict-home");
+    let data = TempDir::new("cx-conflict-data");
+    let dir = home.path().join(".codex");
+    std::fs::create_dir_all(&dir).unwrap();
+    let theirs = "[mcp_servers.graphersal-memory]\ncommand = \"/somewhere/else\"\n";
+    std::fs::write(dir.join("config.toml"), theirs).unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, codex_only());
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("is not ours"), "{out}");
+    assert_eq!(read(&setup.codex.config_file), theirs);
+    memory.close();
+}
+
+#[test]
+fn codex_rules_go_into_the_override_file_when_that_is_the_one_codex_loads() {
+    let home = TempDir::new("cx-ovr-home");
+    let data = TempDir::new("cx-ovr-data");
+    let dir = home.path().join(".codex");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("AGENTS.md"), "# shadowed\n").unwrap();
+    std::fs::write(dir.join("AGENTS.override.md"), "# active\n").unwrap();
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), data.path());
+    assert_eq!(setup.codex.instruction_file, dir.join("AGENTS.override.md"));
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, codex_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(read(&dir.join("AGENTS.override.md")).contains("graphersal-memory:begin"));
+    assert_eq!(read(&dir.join("AGENTS.md")), "# shadowed\n");
+    let (code, out) = run_uninstall(&setup, codex_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    memory.close();
+}
+
+#[test]
+fn codex_is_detected_by_its_home_and_exported_as_markdown() {
+    let home = TempDir::new("cx-det-home");
+    let data = TempDir::new("cx-det-data");
+    let setup = setup_in(home.path(), data.path());
+    assert!(!setup.detected().contains(&Kind::Codex));
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+    assert!(setup.detected().contains(&Kind::Codex));
+    let agent = setup.agent_of(Kind::Codex);
+    assert!(!crate::agents::Agent::has_file_memory(agent.as_ref()));
+    assert_eq!(
+        crate::agents::Agent::global_memory_file(agent.as_ref()),
+        home.path().join("graphersal-memory-export/codex/global.md")
+    );
+    assert!(crate::commands::export_note(agent.as_ref()).contains("AGENTS.md"));
 }
