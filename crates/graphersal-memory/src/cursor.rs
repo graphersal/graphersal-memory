@@ -96,15 +96,10 @@ pub struct CursorPaths {
 }
 
 impl CursorPaths {
-    /// Resolves the paths from the environment (`env` reads one variable: home `HOME` else
-    /// `USERPROFILE`) and the data directory.
+    /// Resolves the paths from the environment (`env` reads one variable: the home directory,
+    /// [`crate::store::home_dir`]) and the data directory.
     pub fn resolve(env: &dyn Fn(&str) -> Option<String>, data_dir: &Path) -> Result<Self, String> {
-        let set = |name: &str| env(name).filter(|value| !value.is_empty());
-        let home = PathBuf::from(
-            set("HOME")
-                .or_else(|| set("USERPROFILE"))
-                .ok_or("cannot find the home directory (HOME is not set)")?,
-        );
+        let home = crate::store::home_dir(env)?;
         Ok(Self::of_home(&home, data_dir))
     }
 

@@ -148,17 +148,14 @@ pub struct ClaudePaths {
 
 impl ClaudePaths {
     /// Resolves the paths from the environment (`env` reads one variable): `CLAUDE_CONFIG_DIR`
-    /// when set, else `~/.claude` (home: `HOME`, else `USERPROFILE`).
+    /// when set, else `~/.claude` (home: [`crate::store::home_dir`]).
     pub fn resolve(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         let set = |name: &str| env(name).filter(|value| !value.is_empty());
         if let Some(dir) = set("CLAUDE_CONFIG_DIR") {
             let dir = PathBuf::from(dir);
             return Ok(Self::with(dir.join(".claude.json"), dir));
         }
-        let home = set("HOME")
-            .or_else(|| set("USERPROFILE"))
-            .ok_or("cannot find the home directory (HOME is not set)")?;
-        let home = PathBuf::from(home);
+        let home = crate::store::home_dir(env)?;
         Ok(Self::with(home.join(".claude.json"), home.join(".claude")))
     }
 
@@ -305,8 +302,22 @@ impl Setup {
     }
 
     /// The hook command of an event (`session-start`, `session-end`).
+    /// The quoted program runs in a POSIX shell (Git Bash on Windows) and in `cmd.exe`.
     pub fn hook_command(&self, event: &str) -> String {
-        let mut command = format!("{} hook {event}", quote(&self.exe.display().to_string()));
+        self.hook_command_with(event, quote, "")
+    }
+
+    /// [`Setup::hook_command`] for PowerShell: `& 'program' hook <event> ...` (a quoted string
+    /// alone is an expression there, `&` runs it; single quotes keep `$` and backticks literal).
+    pub fn powershell_hook_command(&self, event: &str) -> String {
+        self.hook_command_with(event, quote_powershell, "& ")
+    }
+
+    fn hook_command_with(&self, event: &str, quote: fn(&str) -> String, call: &str) -> String {
+        let mut command = format!(
+            "{call}{} hook {event}",
+            quote(&self.exe.display().to_string())
+        );
         for arg in &self.dir_args {
             command.push(' ');
             if arg.starts_with("--") {
@@ -332,6 +343,11 @@ impl Setup {
 /// `text` in double quotes for a shell command line.
 fn quote(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\\\""))
+}
+
+/// `text` in single quotes for a PowerShell command line (a `'` inside is doubled).
+fn quote_powershell(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
 }
 
 /// Whether an MCP entry is one of ours: it starts a `graphersal-memory` binary with `mcp`.

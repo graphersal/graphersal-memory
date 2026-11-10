@@ -106,17 +106,15 @@ pub struct CodexPaths {
 }
 
 impl CodexPaths {
-    /// Resolves the paths from the environment (`env` reads one variable): `CODEX_HOME`, home
-    /// `HOME` else `USERPROFILE`.
+    /// Resolves the paths from the environment (`env` reads one variable): `CODEX_HOME`
+    /// (canonicalized like Codex does, `codex-rs/utils/home-dir`, so the hook trust keys Codex
+    /// records under the hooks file's path match ours), else the home directory
+    /// ([`crate::store::home_dir`]).
     pub fn resolve(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         let set = |name: &str| env(name).filter(|value| !value.is_empty());
-        let home = PathBuf::from(
-            set("HOME")
-                .or_else(|| set("USERPROFILE"))
-                .ok_or("cannot find the home directory (HOME is not set)")?,
-        );
+        let home = crate::store::home_dir(env)?;
         let codex_home = match set("CODEX_HOME") {
-            Some(dir) if Path::new(&dir).is_absolute() => PathBuf::from(dir),
+            Some(dir) if Path::new(&dir).is_absolute() => crate::mcp::canonical(Path::new(&dir)),
             _ => home.join(".codex"),
         };
         Ok(Self::with(home, codex_home))
@@ -527,14 +525,38 @@ mod tests {
             paths.export_dir,
             PathBuf::from("/h/graphersal-memory-export/codex")
         );
+        let codex_home = crate::mcp_tests::abs("/c");
         let custom = CodexPaths::resolve(&|name| match name {
             "HOME" => Some("/h".into()),
-            "CODEX_HOME" => Some("/c".into()),
+            "CODEX_HOME" => Some(codex_home.clone()),
             _ => None,
         })
         .unwrap();
-        assert_eq!(custom.config_file, PathBuf::from("/c/config.toml"));
+        assert_eq!(
+            custom.config_file,
+            PathBuf::from(&codex_home).join("config.toml")
+        );
         assert!(CodexPaths::resolve(&|_| None).is_err());
+    }
+
+    #[test]
+    fn an_existing_codex_home_is_canonical_like_codex_makes_it() {
+        let tmp = crate::mcp_tests::TempDir::new("codex-canon");
+        let given = tmp.path().join("x").join("..").join("home");
+        std::fs::create_dir_all(tmp.path().join("x")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("home")).unwrap();
+        let text = given.display().to_string();
+        let paths = CodexPaths::resolve(&|name| match name {
+            "HOME" | "USERPROFILE" => Some("/h".into()),
+            "CODEX_HOME" => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+        let canonical = crate::mcp::canonical(&tmp.path().join("home"));
+        assert_eq!(paths.codex_home, canonical);
+        assert!(!paths.codex_home.display().to_string().contains(".."));
+        assert!(!paths.codex_home.display().to_string().starts_with(r"\\?\"));
+        assert_eq!(paths.hooks_file, canonical.join("hooks.json"));
     }
 
     #[test]
@@ -649,7 +671,7 @@ mod tests {
             Some(&auth),
         )
         .unwrap();
-        let home = tmp.path().join("s/home");
+        let home = tmp.path().join("s").join("home");
         assert_eq!(
             env[0],
             ("CODEX_HOME".to_string(), home.display().to_string())

@@ -342,8 +342,34 @@ fn read_assistant(record: &Value, out: &mut Transcript) {
 }
 
 /// `path` relative to the project root `root`, or to the root of a worktree
-/// (`.../worktrees/<name>/<rest>`); `None` for a file elsewhere.
+/// (`.../worktrees/<name>/<rest>`); `None` for a file elsewhere. A Windows path (a drive letter
+/// or a UNC share, [`is_windows_path`]) is compared with either separator and without case,
+/// and its relative path uses `/`, as on the other platforms.
 pub fn relative_file(path: &str, root: &str) -> Option<String> {
+    if is_windows_path(root) || is_windows_path(path) {
+        let path = path.replace('\\', "/");
+        let root = root.replace('\\', "/");
+        let root = root.trim_end_matches('/');
+        if let Some(rest) = worktree_relative(&path) {
+            return Some(rest);
+        }
+        let head = path.get(..root.len())?;
+        if !head.eq_ignore_ascii_case(root) {
+            return None;
+        }
+        let rest = path[root.len()..].strip_prefix('/')?;
+        return (!rest.is_empty()).then(|| rest.to_string());
+    }
+    if let Some(rest) = worktree_relative(path) {
+        return Some(rest);
+    }
+    let root = root.trim_end_matches(['/', '\\']);
+    let rest = path.strip_prefix(root)?.strip_prefix(['/', '\\'])?;
+    (!rest.is_empty()).then(|| rest.to_string())
+}
+
+/// The part of `path` after `.../worktrees/<name>/`, when it has one.
+fn worktree_relative(path: &str) -> Option<String> {
     let marker = "/worktrees/";
     if let Some(at) = path.find(marker)
         && let Some((_, rest)) = path[at + marker.len()..].split_once('/')
@@ -351,9 +377,48 @@ pub fn relative_file(path: &str, root: &str) -> Option<String> {
     {
         return Some(rest.to_string());
     }
-    let root = root.trim_end_matches(['/', '\\']);
-    let rest = path.strip_prefix(root)?.strip_prefix(['/', '\\'])?;
-    (!rest.is_empty()).then(|| rest.to_string())
+    None
+}
+
+/// Whether `path` (text another program recorded, not necessarily a path of this machine) is a
+/// Windows path: a drive letter (`C:\`, `C:/`) or a UNC share (`\\server`).
+pub fn is_windows_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    (bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/'))
+        || path.starts_with(r"\\")
+}
+
+/// Whether `path` (recorded text) is absolute on the platform it came from: a Unix path from
+/// `/`, or a Windows path ([`is_windows_path`]).
+pub fn is_absolute_text(path: &str) -> bool {
+    path.starts_with('/') || is_windows_path(path)
+}
+
+/// The recorded path `file` resolved against the recorded directory `directory` as text, with
+/// the directory's separator (`\` for a Windows directory without `/`); an absolute `file`, an
+/// empty one or an empty directory stays as it is.
+pub fn join_text(directory: &str, file: &str) -> String {
+    if file.is_empty() || directory.is_empty() || is_absolute_text(file) {
+        return file.to_string();
+    }
+    let separator = if is_windows_path(directory) && !directory.contains('/') {
+        '\\'
+    } else {
+        '/'
+    };
+    let file = if separator == '\\' {
+        file.replace('/', "\\")
+    } else {
+        file.to_string()
+    };
+    format!(
+        "{}{separator}{}",
+        directory.trim_end_matches(['/', '\\']),
+        file
+    )
 }
 
 #[cfg(test)]
@@ -506,5 +571,49 @@ pub(crate) mod tests {
         );
         assert_eq!(relative_file("/tmp/x.rs", "/w/app"), None);
         assert_eq!(relative_file("/w/apple/x.rs", "/w/app"), None);
+    }
+
+    #[test]
+    fn windows_paths_become_relative_with_slashes() {
+        let rel = |path, root| relative_file(path, root);
+        assert_eq!(
+            rel(r"C:\w\app\src\a.rs", r"C:\w\app").as_deref(),
+            Some("src/a.rs")
+        );
+        assert_eq!(
+            rel(r"c:\W\App\src\a.rs", r"C:\w\app\").as_deref(),
+            Some("src/a.rs"),
+            "no case on Windows"
+        );
+        assert_eq!(
+            rel(r"C:\w\app/src/a.rs", "C:/w/app").as_deref(),
+            Some("src/a.rs"),
+            "either separator"
+        );
+        assert_eq!(
+            rel(r"C:\w\app\.claude\worktrees\agent-1\src\b.rs", r"C:\w\app").as_deref(),
+            Some("src/b.rs")
+        );
+        assert_eq!(
+            rel(r"\\srv\share\app\x.rs", r"\\srv\share\app").as_deref(),
+            Some("x.rs")
+        );
+        assert_eq!(rel(r"C:\w\apple\x.rs", r"C:\w\app"), None);
+        assert_eq!(rel(r"D:\w\app\x.rs", r"C:\w\app"), None);
+        assert_eq!(rel(r"C:\w\app", r"C:\w\app"), None);
+    }
+
+    #[test]
+    fn recorded_paths_join_as_text() {
+        assert_eq!(join_text("/w/app", "src/a.rs"), "/w/app/src/a.rs");
+        assert_eq!(join_text("/w/app/", "src/a.rs"), "/w/app/src/a.rs");
+        assert_eq!(join_text(r"C:\w\app", "src/a.rs"), r"C:\w\app\src\a.rs");
+        assert_eq!(join_text("C:/w/app", "src/a.rs"), "C:/w/app/src/a.rs");
+        assert_eq!(join_text("/w/app", "/x.rs"), "/x.rs");
+        assert_eq!(join_text("/w/app", r"D:\x.rs"), r"D:\x.rs");
+        assert_eq!(join_text("", "a.rs"), "a.rs");
+        assert_eq!(join_text("/w", ""), "");
+        assert!(is_absolute_text("/x") && is_absolute_text(r"C:\x") && is_absolute_text(r"\\s\x"));
+        assert!(!is_absolute_text("x") && !is_absolute_text("C:x"));
     }
 }

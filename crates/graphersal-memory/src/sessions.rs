@@ -1095,8 +1095,11 @@ mod tests {
         let projects = tmp.join("projects");
         let dir = projects.join(crate::import::claude_slug(&work.display().to_string()));
         std::fs::create_dir_all(dir.join("abc").join("subagents")).unwrap();
+        // The fixture is JSON: the directory goes in as a JSON string's content (a Windows
+        // path's backslashes escaped).
+        let escaped = serde_json::to_string(&work.display().to_string()).unwrap();
         let text =
-            crate::transcript::tests::fixture().replace("/w/app", &work.display().to_string());
+            crate::transcript::tests::fixture().replace("/w/app", &escaped[1..escaped.len() - 1]);
         let file = dir.join("abc.jsonl");
         std::fs::write(&file, text).unwrap();
         // A sub-agent transcript and a stray file are never indexed.
@@ -1548,7 +1551,7 @@ mod tests {
             Request::from_control(&line).unwrap().harness,
             Kind::OpenCode
         );
-        let old = json!({"projects_dir": "/x", "ended": [], "active": []});
+        let old = json!({"projects_dir": crate::mcp_tests::abs("/x"), "ended": [], "active": []});
         assert_eq!(
             Request::from_control(&old).unwrap().harness,
             Kind::ClaudeCode

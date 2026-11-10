@@ -42,6 +42,16 @@ impl Drop for TempDir {
     }
 }
 
+/// A Unix-style fixture path made absolute on this platform: as given on Unix, on a drive on
+/// Windows (`/c/x` is `C:\c\x`), where a leading `/` alone is not absolute.
+pub(crate) fn abs(unix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{}", unix.replace('/', "\\"))
+    } else {
+        unix.to_string()
+    }
+}
+
 /// A client of one served connection.
 struct Client {
     to: Option<PipeWriter>,
