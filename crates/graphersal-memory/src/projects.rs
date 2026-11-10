@@ -453,6 +453,13 @@ pub fn resolve_with(
                 entry.insert("remotes".into(), json!(remotes));
                 changed = true;
             }
+            // A project recorded without its root commit (before ids) gets it once.
+            if current.root_commit.is_none()
+                && let Some(root) = keys(true).root_commit
+            {
+                entry.insert("root_commit".into(), json!(root));
+                changed = true;
+            }
             if let Some(first) = found.remotes.first()
                 && entry.get("git_remote").and_then(Value::as_str) != Some(first.as_str())
             {
@@ -892,6 +899,17 @@ mod tests {
                 .unwrap()
                 .paths
                 .contains(&"/new/app".to_string())
+        );
+        // Its root commit is recorded the first time it is known.
+        resolve_with(data.path(), "/new/app", &keys(&[], Some(ROOT))).unwrap();
+        assert_eq!(
+            Projects::load(data.path())
+                .unwrap()
+                .get("/old/app")
+                .unwrap()
+                .root_commit
+                .as_deref(),
+            Some(ROOT)
         );
     }
 
