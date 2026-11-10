@@ -92,7 +92,8 @@ fn harness_not_implemented(command: &str, harness: Harness) -> String {
     };
     format!(
         "graphersal-memory {command} --harness {name}: not implemented yet (planned in stage \
-         M7: other harnesses); Claude Code, opencode and Codex are supported."
+         M7: other harnesses); Claude Code, opencode, Codex and Cursor are supported one at a \
+         time."
     )
 }
 
@@ -203,6 +204,7 @@ pub fn run_cli(
                 Harness::ClaudeCode => crate::agents::Kind::ClaudeCode,
                 Harness::Opencode => crate::agents::Kind::OpenCode,
                 Harness::Codex => crate::agents::Kind::Codex,
+                Harness::Cursor => crate::agents::Kind::Cursor,
                 other => {
                     let _ = writeln!(stderr, "{}", harness_not_implemented(name, *other));
                     return EXIT_NOT_IMPLEMENTED;
@@ -350,6 +352,7 @@ fn setup_with(cli: &Cli, probe: bool) -> Result<Setup, String> {
     let detected = crate::opencode::detect(&env, None, probe)?;
     let opencode = crate::opencode::OpenCodePaths::resolve_for(&env, detected)?;
     let codex = crate::codex::CodexPaths::resolve(&env)?;
+    let cursor = crate::cursor::CursorPaths::resolve(&env, &data_dir)?;
     let exe =
         std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
     let mut dir_args = Vec::new();
@@ -365,6 +368,7 @@ fn setup_with(cli: &Cli, probe: bool) -> Result<Setup, String> {
         paths,
         opencode,
         codex,
+        cursor,
         search_path: None,
         data_dir,
         run_dir,
@@ -484,6 +488,10 @@ pub fn export_note(agent: &dyn crate::agents::Agent) -> String {
     let how = match agent.kind() {
         crate::agents::Kind::Codex => {
             "to give the agent a file, paste it into ~/.codex/AGENTS.md or a project's AGENTS.md"
+        }
+        crate::agents::Kind::Cursor => {
+            "to give the agent a file, paste it into a project's AGENTS.md or into a rule file \
+             under ~/.cursor/rules (a .mdc file with `alwaysApply: true`)"
         }
         _ => {
             "to give the agent a file, add its path to `instructions` in the agent's configuration"
@@ -799,6 +807,7 @@ pub fn session_harnesses(setup: &Setup) -> Vec<crate::agents::Kind> {
         .filter(|kind| match kind {
             crate::agents::Kind::OpenCode => setup.opencode.db.is_file(),
             crate::agents::Kind::Codex => setup.codex.sessions.is_dir(),
+            crate::agents::Kind::Cursor => setup.cursor.registry.is_file(),
             crate::agents::Kind::ClaudeCode => true,
         })
         .collect();
@@ -976,6 +985,9 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
     if kinds.contains(&crate::agents::Kind::Codex) {
         findings.extend(crate::codex::install::doctor(setup));
     }
+    if kinds.contains(&crate::agents::Kind::Cursor) {
+        findings.extend(crate::cursor::install::doctor(setup));
+    }
     // Claude Code's checks end with the shared ones (settings, model, daemon, registry).
     if kinds.contains(&crate::agents::Kind::ClaudeCode) {
         findings.extend(install::doctor(setup));
@@ -1036,6 +1048,19 @@ fn run_hook(
     if std::env::var(summaries::HOOK_ENV).is_ok_and(|v| v == "off") {
         return 0;
     }
+    // Claude Code's hooks run by Cursor (its third-party hooks): the Cursor hooks do Cursor's
+    // part. The input is read here to tell (a harness closes stdin after writing it).
+    let input = hook::read_input(stdin);
+    if harness == Harness::ClaudeCode && hook::is_cursor_input(&String::from_utf8_lossy(&input)) {
+        let _ = writeln!(
+            stderr,
+            "graphersal-memory hook: run by Cursor for Claude Code's settings; nothing to do \
+             (graphersal-memory's own Cursor hooks handle Cursor: `graphersal-memory install \
+             --harness cursor`)"
+        );
+        return 0;
+    }
+    let stdin = std::io::Cursor::new(input);
     match setup_with(cli, false) {
         Ok(setup) => {
             let connect = daemon_connector(&setup);
@@ -1051,6 +1076,17 @@ fn run_hook(
                         .to_string())
                 }
             });
+            if harness == Harness::Cursor {
+                return hook::run_cursor(
+                    event,
+                    setup.cursor.registry.clone(),
+                    std::env::var("CURSOR_PROJECT_DIR").ok(),
+                    Some(enqueue),
+                    stdin,
+                    stdout,
+                    stderr,
+                );
+            }
             if harness == Harness::Codex {
                 return hook::run_codex(
                     event,
@@ -1396,6 +1432,14 @@ pub fn status_text(
                         .to_string(),
                 );
             }
+            if kinds.contains(&crate::agents::Kind::Cursor) {
+                lines.extend(crate::cursor::install::status_lines(setup));
+            } else if setup.detected().contains(&crate::agents::Kind::Cursor) {
+                lines.push(
+                    "Cursor: found, not set up (`graphersal-memory install --harness cursor`)"
+                        .to_string(),
+                );
+            }
             for line in lines {
                 text.push_str(&line);
                 text.push('\n');
@@ -1463,16 +1507,13 @@ mod tests {
     }
 
     #[test]
-    fn other_harnesses_are_not_implemented_yet() {
-        for command in ["install", "uninstall"] {
-            let cli =
-                Cli::try_parse_from(["graphersal-memory", command, "--harness", "cursor"]).unwrap();
-            let mut err = Vec::new();
-            assert_eq!(run_cli(&cli, std::io::empty(), Vec::new(), &mut err), 2);
-            let text = String::from_utf8(err).unwrap();
-            assert!(text.contains("not implemented yet"), "{text}");
-            assert!(text.contains("M7"), "{text}");
+    fn every_harness_choice_is_implemented_and_export_takes_one() {
+        // Cursor was the last planned harness (M7d): every choice names supported harnesses.
+        use clap::ValueEnum;
+        for harness in Harness::value_variants() {
+            assert!(harness.kinds().is_some(), "{harness:?}");
         }
+        assert!(harness_not_implemented("export", Harness::All).contains("one at a time"));
     }
 
     #[test]

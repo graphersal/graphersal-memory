@@ -437,6 +437,13 @@ pub fn check_harness(command: &[String]) -> Result<(), String> {
             .file_stem()
             .is_some_and(|stem| stem == "claude")
     });
+    if crate::cursor::is_cursor_cli(command) {
+        return Err(format!(
+            "{}. The harness command is `{}`",
+            crate::cursor::NO_HEADLESS,
+            command.join(" ")
+        ));
+    }
     if crate::codex::is_codex(command) && !crate::codex::local_model(command) {
         return Err(format!(
             "bench through Codex needs a local model (for example `codex exec --oss \

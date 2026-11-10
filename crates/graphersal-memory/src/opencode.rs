@@ -475,8 +475,8 @@ impl Agent for OpenCode {
         None
     }
 
-    fn headless_command(&self) -> &'static str {
-        DEFAULT_HEADLESS_COMMAND
+    fn headless_command(&self) -> Option<&'static str> {
+        Some(DEFAULT_HEADLESS_COMMAND)
     }
 }
 

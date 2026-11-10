@@ -28,6 +28,7 @@ pub(crate) fn setup_in(home: &Path, data: &Path) -> Setup {
         paths,
         opencode: crate::opencode::OpenCodePaths::of_home(home),
         codex: crate::codex::CodexPaths::of_home(home),
+        cursor: crate::cursor::CursorPaths::of_home(home, data),
         search_path: Some(std::ffi::OsString::new()),
         data_dir: data.to_path_buf(),
         run_dir: short_run_dir(),
@@ -2278,4 +2279,431 @@ fn codex_tool_approvals_the_user_gave_are_kept_and_cleaned_up_with_our_servers()
         );
         memory.close();
     }
+}
+
+// ------------------------------------------------------------------------------------------
+// M7d: Cursor.
+// ------------------------------------------------------------------------------------------
+
+fn cursor_only() -> InstallOptions {
+    InstallOptions {
+        yes: true,
+        harnesses: Some(vec![Kind::Cursor]),
+        ..InstallOptions::default()
+    }
+}
+
+fn cursor_uninstall() -> UninstallOptions {
+    UninstallOptions {
+        yes: true,
+        no_export: true,
+        harnesses: Some(vec![Kind::Cursor]),
+        ..UninstallOptions::default()
+    }
+}
+
+/// The user's own `~/.cursor`: an `mcp.json` with a comment and a server of another program, a
+/// `hooks.json` with a hook of theirs, a user rule file of theirs (the documented formats,
+/// cursor.com/docs/mcp, /docs/hooks, /docs/rules).
+const CURSOR_MCP: &str = "{\n  // my servers\n  \"mcpServers\": {\n    \"other\": {\n      \"command\": \"npx\",\n      \"args\": [\"-y\", \"other\"]\n    }\n  }\n}\n";
+const CURSOR_HOOKS: &str = "{\n  \"version\": 1,\n  \"hooks\": {\n    \"afterFileEdit\": [{ \"command\": \"./hooks/format.sh\" }]\n  }\n}\n";
+const CURSOR_RULE: &str = "---\nalwaysApply: true\n---\n\nReply in a concise style.\n";
+
+fn existing_cursor_home(home: &Path) {
+    let dir = home.join(".cursor");
+    std::fs::create_dir_all(dir.join("rules")).unwrap();
+    std::fs::write(dir.join("mcp.json"), CURSOR_MCP).unwrap();
+    std::fs::write(dir.join("hooks.json"), CURSOR_HOOKS).unwrap();
+    std::fs::write(dir.join("rules/concise.mdc"), CURSOR_RULE).unwrap();
+}
+
+#[test]
+fn cursor_install_then_uninstall_leaves_existing_files_byte_identical() {
+    let home = TempDir::new("cu-rt-home");
+    let data = TempDir::new("cu-rt-data");
+    existing_cursor_home(home.path());
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, cursor_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with("graphersal-memory install (Cursor)"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("Claude Code"),
+        "no Claude Code wording: {out}"
+    );
+    assert!(
+        out.contains("Cursor asks before each MCP tool call"),
+        "{out}"
+    );
+    assert!(out.contains("Restart running Cursor sessions"), "{out}");
+    // mcp.json: our server beside theirs, the comment kept, no develop server.
+    let text = read(&setup.cursor.mcp_file);
+    assert!(text.starts_with("{\n  // my servers\n"), "{text}");
+    let mcp = crate::jsonedit::value_of(&text).unwrap();
+    assert_eq!(mcp["mcpServers"]["other"]["command"], "npx");
+    assert_eq!(
+        mcp["mcpServers"]["graphersal-memory"],
+        json!({"type": "stdio", "command": "/opt/gm/bin/graphersal-memory",
+               "args": ["mcp", "--profile", "use", "--data-dir", data.path().display().to_string()]})
+    );
+    assert!(mcp["mcpServers"]["graphersal-memory-develop"].is_null());
+    // hooks.json: theirs kept, ours flat entries with a timeout.
+    let hooks = crate::jsonedit::value_of(&read(&setup.cursor.hooks_file)).unwrap();
+    assert_eq!(hooks["version"], 1);
+    assert_eq!(
+        hooks["hooks"]["afterFileEdit"][0]["command"],
+        "./hooks/format.sh"
+    );
+    let start = hooks["hooks"]["sessionStart"][0].clone();
+    let command = start["command"].as_str().unwrap();
+    assert!(command.contains(" hook session-start "), "{start}");
+    assert!(command.ends_with("--harness cursor"), "{start}");
+    assert_eq!(start["timeout"], 30);
+    assert!(
+        hooks["hooks"]["sessionEnd"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains(" hook session-end ")
+    );
+    // Our own rule file; theirs untouched.
+    let rules = read(&setup.cursor.rules_file);
+    assert!(rules.starts_with("---\ndescription: "), "{rules}");
+    assert!(rules.contains("alwaysApply: true"), "{rules}");
+    assert!(
+        rules.contains(crate::cursor::install::RULE_BLOCK),
+        "{rules}"
+    );
+    assert_eq!(
+        read(&home.path().join(".cursor/rules/concise.mdc")),
+        CURSOR_RULE
+    );
+    // Nothing of the other harnesses.
+    assert!(!setup.paths.user_config.exists() && !setup.paths.config_dir.exists());
+    assert!(!setup.codex.codex_home.exists() && !setup.opencode.config_dir.exists());
+    assert!(data.path().join("install/cursor.json").exists());
+    let inspection = crate::cursor::install::inspect(&setup);
+    assert_eq!(inspection.use_server, crate::install::PartState::Installed);
+    assert_eq!(inspection.rules, crate::install::PartState::Installed);
+    assert!(
+        inspection
+            .hooks
+            .iter()
+            .all(|(_, s)| *s == crate::install::PartState::Installed)
+    );
+    assert_eq!(setup.installed(), vec![Kind::Cursor]);
+
+    // Idempotent.
+    let again = snapshot(home.path());
+    let (code, out) = run_install(&setup, &memory, cursor_only());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), again, "{out}");
+    assert!(out.contains("already up to date"), "{out}");
+
+    let (code, out) = run_uninstall(&setup, cursor_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    assert!(!data.path().join("install/cursor.json").exists());
+    memory.close();
+}
+
+#[test]
+fn cursor_files_install_created_go_and_the_users_later_additions_stay() {
+    let home = TempDir::new("cu-new-home");
+    let data = TempDir::new("cu-new-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, cursor_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(read(&setup.cursor.hooks_file).starts_with("{\n  \"version\": 1,"));
+    // Created files only: uninstall leaves no trace (directories included).
+    let (code, out) = run_uninstall(&setup, cursor_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert!(!home.path().join(".cursor").exists(), "{out}");
+
+    // The user adds a server and a hook of theirs after install: those stay.
+    let (code, out) = run_install(&setup, &memory, cursor_only());
+    assert_eq!(code, 0, "{out}");
+    let mcp = read(&setup.cursor.mcp_file);
+    let (mcp, _) = crate::jsonedit::set_member(
+        &mcp,
+        &["mcpServers"],
+        "theirs",
+        &json!({"command": "/bin/theirs"}),
+    )
+    .unwrap()
+    .unwrap();
+    std::fs::write(&setup.cursor.mcp_file, &mcp).unwrap();
+    let hooks = read(&setup.cursor.hooks_file);
+    let (hooks, _) = crate::jsonedit::append_element(
+        &hooks,
+        &["hooks", "stop"],
+        &json!({"command": "./hooks/done.sh"}),
+    )
+    .unwrap();
+    std::fs::write(&setup.cursor.hooks_file, &hooks).unwrap();
+    let (code, out) = run_uninstall(&setup, cursor_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        crate::jsonedit::value_of(&read(&setup.cursor.mcp_file)).unwrap(),
+        json!({"mcpServers": {"theirs": {"command": "/bin/theirs"}}})
+    );
+    assert_eq!(
+        crate::jsonedit::value_of(&read(&setup.cursor.hooks_file)).unwrap(),
+        json!({"version": 1, "hooks": {"stop": [{"command": "./hooks/done.sh"}]}})
+    );
+    assert!(!setup.cursor.rules_file.exists(), "install created it");
+    memory.close();
+}
+
+#[test]
+fn cursor_develop_server_is_registered_only_on_request_and_conflicts_are_kept() {
+    let home = TempDir::new("cu-dev-home");
+    let data = TempDir::new("cu-dev-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            enable_develop: true,
+            ..cursor_only()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    let mcp = crate::jsonedit::value_of(&read(&setup.cursor.mcp_file)).unwrap();
+    assert_eq!(
+        mcp["mcpServers"]["graphersal-memory-develop"],
+        crate::cursor::install::mcp_entry(&setup, "develop")
+    );
+    let (code, out) = run_uninstall(
+        &setup,
+        UninstallOptions {
+            disable_develop_only: true,
+            ..cursor_uninstall()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    let mcp = crate::jsonedit::value_of(&read(&setup.cursor.mcp_file)).unwrap();
+    assert!(mcp["mcpServers"]["graphersal-memory-develop"].is_null());
+    assert!(!mcp["mcpServers"]["graphersal-memory"].is_null());
+    assert!(
+        setup.cursor.hooks_file.exists(),
+        "only the develop server changed"
+    );
+    // A full uninstall afterwards still leaves nothing.
+    let (code, out) = run_uninstall(&setup, cursor_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert!(!home.path().join(".cursor").exists(), "{out}");
+    memory.close();
+
+    // Another program's server and a rule file of the user under our names: kept, reported.
+    let home = TempDir::new("cu-conflict-home");
+    let data = TempDir::new("cu-conflict-data");
+    let dir = home.path().join(".cursor");
+    std::fs::create_dir_all(dir.join("rules")).unwrap();
+    let theirs = "{\"mcpServers\": {\"graphersal-memory\": {\"command\": \"/somewhere/else\"}}}\n";
+    std::fs::write(dir.join("mcp.json"), theirs).unwrap();
+    std::fs::write(dir.join("rules/graphersal-memory.mdc"), CURSOR_RULE).unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, cursor_only());
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("is not ours"), "{out}");
+    assert!(out.contains("is not graphersal-memory's"), "{out}");
+    assert_eq!(read(&setup.cursor.mcp_file), theirs);
+    assert_eq!(read(&setup.cursor.rules_file), CURSOR_RULE);
+    let inspection = crate::cursor::install::inspect(&setup);
+    assert!(matches!(
+        inspection.use_server,
+        crate::install::PartState::Conflict(_)
+    ));
+    assert!(matches!(
+        inspection.rules,
+        crate::install::PartState::Conflict(_)
+    ));
+    memory.close();
+}
+
+#[test]
+fn cursor_rule_file_follows_the_language_and_a_hand_edit_is_kept() {
+    let home = TempDir::new("cu-rule-home");
+    let data = TempDir::new("cu-rule-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, cursor_only()).0, 0);
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            language: Some(crate::language::Language::Any),
+            ..cursor_only()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    let rules = read(&setup.cursor.rules_file);
+    assert!(
+        rules.contains(crate::cursor::install::RULE_BLOCK_ANY),
+        "{rules}"
+    );
+    assert!(
+        rules.starts_with(crate::cursor::install::FRONT_MATTER),
+        "{rules}"
+    );
+    // The user writes below the block: uninstall takes only the block out.
+    let mine = format!("{rules}\nAlso: answer briefly.\n");
+    std::fs::write(&setup.cursor.rules_file, &mine).unwrap();
+    let (code, out) = run_uninstall(&setup, cursor_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        read(&setup.cursor.rules_file),
+        format!(
+            "{}\nAlso: answer briefly.\n",
+            crate::cursor::install::FRONT_MATTER
+        )
+    );
+    // Edited inside the block: kept, reported.
+    let home = TempDir::new("cu-rule2-home");
+    let data2 = TempDir::new("cu-rule2-data");
+    let setup = setup_in(home.path(), data2.path());
+    assert_eq!(run_install(&setup, &memory, cursor_only()).0, 0);
+    let edited = read(&setup.cursor.rules_file).replace("Store and search", "Keep");
+    std::fs::write(&setup.cursor.rules_file, &edited).unwrap();
+    let (code, out) = run_uninstall(&setup, cursor_uninstall());
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("edited by hand"), "{out}");
+    assert_eq!(read(&setup.cursor.rules_file), edited);
+    memory.close();
+}
+
+#[test]
+fn cursor_is_detected_by_its_home_status_and_doctor_name_its_parts() {
+    let home = TempDir::new("cu-det-home");
+    let data = TempDir::new("cu-det-data");
+    let setup = setup_in(home.path(), data.path());
+    assert!(!setup.detected().contains(&Kind::Cursor));
+    std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    assert!(setup.detected().contains(&Kind::Cursor));
+    let lines = crate::cursor::install::status_lines(&setup).join("\n");
+    assert!(lines.contains("Not installed: run `graphersal-memory install --harness cursor`"));
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, cursor_only()).0, 0);
+    let lines = crate::cursor::install::status_lines(&setup).join("\n");
+    for part in [
+        "MCP server graphersal-memory (use",
+        "hook sessionStart",
+        "hook sessionEnd",
+        "rule file",
+        "headless command (summaries, bench): none",
+        "0 transcript(s) reported by the hooks",
+    ] {
+        assert!(lines.contains(part), "{part}\n{lines}");
+    }
+    let findings = crate::cursor::install::doctor(&setup);
+    assert!(!findings.iter().any(|f| f.problem), "{findings:?}");
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.text.contains("no transcript reported by the hooks yet")),
+        "{findings:?}"
+    );
+    // A transcript reported by a hook is counted.
+    let transcript = crate::cursor::sessions::tests::write_fixture(
+        &home.path().join(".cursor/projects/w"),
+        "c1",
+    );
+    crate::cursor::sessions::record(&setup.cursor.registry, &transcript, "/w", "c1").unwrap();
+    assert!(
+        crate::cursor::install::status_lines(&setup)
+            .join("\n")
+            .contains("1 transcript(s) reported by the hooks (1 on disk)")
+    );
+    // A broken file is a problem doctor names.
+    std::fs::write(&setup.cursor.hooks_file, "{ broken").unwrap();
+    let findings = crate::cursor::install::doctor(&setup);
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.problem && f.text.contains("is not valid JSON")),
+        "{findings:?}"
+    );
+    memory.close();
+}
+
+#[test]
+fn cursor_uninstall_exports_every_memory_as_markdown() {
+    let home = TempDir::new("cu-exp-home");
+    let data = TempDir::new("cu-exp-data");
+    let work = TempDir::new("cu-exp-work");
+    let project_dir = mcp::canonical(work.path());
+    let project = project_dir.display().to_string();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, cursor_only()).0, 0);
+    for (slug, scope) in [("use-pnpm", "project"), ("tabs-not-spaces", "global")] {
+        let saved = memory.call(
+            &project,
+            "remember",
+            json!({"slug": slug, "kind": "feedback", "summary": format!("{slug} summary"),
+                   "body": format!("{slug} body"), "scope": scope}),
+        );
+        assert!(saved.to_string().contains(slug), "{saved}");
+    }
+    let (code, out) = run_uninstall_exporting(
+        &setup,
+        &memory,
+        UninstallOptions {
+            yes: true,
+            harnesses: Some(vec![Kind::Cursor]),
+            ..UninstallOptions::default()
+        },
+        b"",
+    );
+    assert_eq!(code, 0, "{out}");
+    let export = home.path().join("graphersal-memory-export/cursor");
+    assert!(out.contains(&export.display().to_string()), "{out}");
+    assert!(out.contains("Cursor has no file memory"), "{out}");
+    assert!(out.contains("~/.cursor/rules"), "{out}");
+    let dir = export.join(crate::import::claude_slug(&project));
+    assert!(read(&dir.join("use-pnpm.md")).contains("use-pnpm body"));
+    assert!(read(&dir.join("MEMORY.md")).contains("(use-pnpm.md)"));
+    assert!(read(&export.join("global.md")).contains("tabs-not-spaces summary"));
+    assert!(!home.path().join(".cursor").exists(), "{out}");
+    assert_eq!(InProcess(&memory).memories_all().len(), 2);
+    memory.close();
+}
+
+#[test]
+fn the_wizard_lists_cursor_among_the_detected_agents() {
+    let home = TempDir::new("cu-wiz-home");
+    let data = TempDir::new("cu-wiz-data");
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    let setup = setup_in(home.path(), data.path());
+    assert_eq!(setup.detected(), vec![Kind::ClaudeCode, Kind::Cursor]);
+    let memory = Memory::open(data.path());
+    // Which agents: 3 (Cursor only); language: Enter; model: 3 (built-in); auto-memory (asked
+    // while Claude Code may be chosen): skipped for Cursor only; summaries: 2 (no); develop:
+    // 2 (no); summary: Enter applies.
+    let (code, out) = run_wizard(&setup, &memory, "3\n\n3\n2\n2\n\n");
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Step 1 of 7 \u{b7} Which agents"), "{out}");
+    assert!(out.contains("Claude Code and Cursor"), "{out}");
+    // The auto-memory step counted for Claude Code is left out of the count for Cursor only.
+    assert!(
+        out.contains("Step 5 of 6 \u{b7} The develop server"),
+        "{out}"
+    );
+    assert!(out.contains("Step 6 of 6 \u{b7} Summary"), "{out}");
+    assert!(out.contains("Cursor only"), "{out}");
+    assert!(
+        out.contains("Cursor's own CLI is not used for summaries"),
+        "{out}"
+    );
+    assert_eq!(setup.installed(), vec![Kind::Cursor]);
+    assert!(!setup.paths.user_config.exists(), "Claude Code untouched");
+    memory.close();
 }

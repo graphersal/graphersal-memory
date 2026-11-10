@@ -17,12 +17,13 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/commands.rs`: running a command (`run_cli`): `mcp` runs the shim (`--no-daemon`:
     serves in this process), `daemon` runs (`--foreground`) or starts the daemon, `install`,
     `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects` and the
-    hidden `hook` work on Claude Code and opencode (`Setup` from the environment, with the model download
+    hidden `hook` work on Claude Code, opencode, Codex and Cursor (`Setup` from the environment, with the model download
     `Source`; `bench_options` for `bench`; `DaemonSource` reads the memories for the export);
     `ui` and `export` without `--to-files` report their planned stage and exit with code 2
-    (`--harness codex` works wherever `claude-code` and `opencode` do; `cursor` is planned); the
+    (`--harness codex` and `--harness cursor` work wherever `claude-code` and `opencode` do;
+    a Claude Code hook whose input is Cursor's, `cursor_version`, does nothing); the
     wizard is interactive when stdin and stdout are terminals;
-  - `src/agents.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex; `Agent`: MCP
+  - `src/agents.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex | cursor; `Agent`: MCP
     configuration file, its servers key and entry shape, settings and instruction files, the
     sessions location, the export directories, the auto-memory key, the headless command;
     `is_our_entry` for both entry shapes) and `ClaudeCode`; `Setup::detected`/`installed`;
@@ -55,6 +56,19 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `hooks.state`, which install never writes); `codex/sessions.rs` the rollout reader
     (`sessions/YYYY/MM/DD/rollout-*.jsonl`; `user_message`/`agent_message` events, both history
     modes; sub-agent sessions left out; a unit is the rollout file, id `session:<thread id>`);
+  - `src/cursor.rs` + `src/cursor/`: Cursor (verified against its documentation of 2026-11-10;
+    the module docs cite the pages; no live run yet, `docs/cursor-live-check.md` is the
+    checklist): `CursorPaths` (`~/.cursor`: `mcp.json`, `hooks.json`, our user rule file
+    `rules/graphersal-memory.mdc`, the export directory, and the registry of transcripts
+    `<data dir>/sessions/cursor-transcripts.json`), `Cursor` (the `Agent`; no headless command:
+    summaries and bench refuse Cursor's CLI, `NO_HEADLESS`); `cursor/install.rs` the
+    plan/removal/inspect/status/doctor (`mcpServers` members, develop only with
+    `--enable-develop`; flat `sessionStart`/`sessionEnd` entries, a new `hooks.json` with
+    `"version": 1`; the rule file = front matter `alwaysApply: true` + the managed block);
+    `cursor/sessions.rs` the registry the hooks write (`record`, under a lock) and the tolerant
+    JSONL reader of the transcripts they name (the format is undocumented: role/type
+    user|assistant, text parts, `<user_query>`, `tool_use` names; the rest skipped; sub-agent
+    transcripts left out); Cursor's chat database is never read;
   - `src/tomledit.rs`: minimal-change TOML edits (parse with the `toml` crate, write as text: a
     fingerprinted managed block inserted before the first table, `remove_table` for our tables
     whose markers were lost, `set_bool` in place; every edit re-parsed and checked);
@@ -70,8 +84,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/export.rs`: memories back into the harness's file memory (per project `MEMORY.md` +
     `<slug>.md` as the import reads them, global ones into the agent's global memory file;
     identical files skipped, differing memory files kept with `<slug>.graphersal.md` beside
-    them, a differing `MEMORY.md` kept with the missing index lines appended; opencode and
-    Codex: the same files as Markdown under `~/graphersal-memory-export/<harness>/`);
+    them, a differing `MEMORY.md` kept with the missing index lines appended; opencode, Codex
+    and Cursor: the same files as Markdown under `~/graphersal-memory-export/<harness>/`);
   - `src/install.rs`: the wizard (`Current` = the current answers, `default_answers` for
     `--yes`/no terminal, `ask` for the interactive steps, `plan_install`, `install`), the
     auto-memory switch (`autoMemoryEnabled`, its previous value recorded in the settings file's
@@ -97,7 +111,10 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     start, always exit 0; `GRAPHERSAL_MEMORY_HOOK=off` makes it do nothing; `run_opencode` for
     opencode's plugin (`--harness opencode`: no import, `<db>#<id>` active/ended); `run_codex`
     for Codex's hooks (`--harness codex`: no import, the rollout `transcript_path`
-    active/ended, the start line becomes model context);
+    active/ended, the start line becomes model context); `run_cursor` for Cursor's hooks
+    (`--harness cursor`: records `transcript_path` + `workspace_roots` in the registry, the
+    transcript active/ended, the start answer `{"additional_context": ...}`); `read_input` and
+    `is_cursor_input` (a Claude Code hook run by Cursor's third-party hooks does nothing);
   - `src/config.rs`: `<data dir>/config.json` (`daemon.idle`, `memory.language`,
     `embedding.model`, `summaries.enabled|harness_command|monthly_budget_usd|since`;
     `with_summaries` and `with_values` edit in place); flag > env > file > default;
@@ -106,7 +123,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     bad lines and a partial last line skipped; fingerprint of the complete lines);
   - `src/sessions.rs`: the session indexing per harness (`Request.harness`; the daemon keeps one
     pending request per harness): `units` (Claude Code: `scan`, top-level `*.jsonl` only;
-    opencode: its database), finished = unchanged for `IDLE` (30 min) or `ended`, state
+    opencode: its database; Codex: its rollouts; Cursor: the transcripts in its registry),
+    finished = unchanged for `IDLE` (30 min) or `ended`, state
     `<data dir>/sessions/<harness>.json`,
     `Writer` (the daemon: the project's store; tests: `tests::Direct`), `run` (index in batches of
     40 turns, then summaries), `estimate`, `plan`, the control lines `index_sessions` /
@@ -200,8 +218,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `tests/bench_tests.rs`: the real binary's `bench` with a fake `claude` on `PATH` that records
     its calls (dry run: zero calls; a run through the harness: the flags of every call, the live
     store and the sources unchanged, the spend in the report).
-- Planned areas (one module each when they arrive): Cursor (`install.rs` holds Claude Code
-  and the shared wizard; each other harness has its own `<harness>/install.rs`).
+- `install.rs` holds Claude Code and the shared wizard; each other harness has its own
+  `<harness>/install.rs`.
 
 ## Memory model
 

@@ -408,6 +408,9 @@ pub fn run_harness_with(
     if args.is_empty() {
         return Err("summaries.harness_command is empty".to_string());
     }
+    if crate::cursor::is_cursor_cli(command) {
+        return Err(crate::cursor::NO_HEADLESS.to_string());
+    }
     let opencode = crate::opencode::is_opencode(command);
     let codex = crate::codex::is_codex(command);
     let mut env: Vec<(String, String)> = vec![(HOOK_ENV.to_string(), "off".to_string())];

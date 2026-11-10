@@ -111,14 +111,17 @@ graphersal-memory install
 
 ### What `install` asks, changes, and how `uninstall` reverts it
 
-`install` sets up every agent harness it finds: Claude Code, opencode and OpenAI Codex CLI
-(`--harness claude-code|opencode|codex|all` chooses). With more than one found, the wizard's first
+`install` sets up every agent harness it finds: Claude Code, opencode, OpenAI Codex CLI and
+Cursor (`--harness claude-code|opencode|codex|cursor|all` chooses). With more than one found, the wizard's first
 step asks which; every chosen agent gets the same memory (one store, one daemon). For opencode
 (1.x and 2.x; install asks `opencode --version` which one it is) it registers the MCP servers in
 `~/.config/opencode/opencode.json`, a rules file listed in `instructions` and a small session
 plugin; for Codex, the MCP servers in `~/.codex/config.toml`, the rule block in
 `~/.codex/AGENTS.md` and two hooks in `~/.codex/hooks.json` (Codex runs them once you trust them
-in `/hooks`); for both, `uninstall` exports the memories as Markdown (neither has a file memory).
+in `/hooks`); for Cursor, the MCP server in `~/.cursor/mcp.json`, a rule file of its own in
+`~/.cursor/rules/` and two hooks in `~/.cursor/hooks.json` (Cursor support is checked against
+its documentation and fixtures; a live check is pending). For these three, `uninstall` exports
+the memories as Markdown (none of them has a file memory).
 The details are in [docs/harnesses.md](docs/harnesses.md), the captured wizards in
 [docs/install.md](docs/install.md). The Claude Code steps:
 
@@ -405,7 +408,7 @@ Details: [docs/privacy.md](docs/privacy.md).
 | Claude Code | install, uninstall, import of the file memory, hooks, rule block (M3); past sessions and opt-in summaries (M4); the A/B, `bench` (M5) |
 | opencode 1.x and 2.x | install, uninstall (Markdown export), rule file, session plugin, past sessions from its database, opt-in summaries and `bench` through `opencode run` (free models cost $0) (M7a: 1.x; M7b: 2.x, and the move of our entries after an upgrade from 1.x) |
 | OpenAI Codex CLI | install, uninstall (Markdown export), rule block in `AGENTS.md`, SessionStart/SessionEnd hooks, past sessions from its rollout files, opt-in summaries through `codex exec`, `bench` with a local model (`--oss`), switching Codex's own memories off on request (M7c) |
-| Cursor | planned (M7) |
+| Cursor | install, uninstall (Markdown export), rule file `~/.cursor/rules/graphersal-memory.mdc`, sessionStart/sessionEnd hooks, past sessions from the transcripts the hooks name; no summaries or `bench` through Cursor (M7d; tested against fixtures, a live check is pending: [docs/cursor-live-check.md](docs/cursor-live-check.md)) |
 | Desktop apps without a terminal (e.g. Claude Desktop) | later; the core is designed not to depend on a terminal or hooks |
 
 Details: [docs/harnesses.md](docs/harnesses.md).
@@ -425,7 +428,8 @@ Details: [docs/harnesses.md](docs/harnesses.md).
 | Release binaries (macOS arm64/x86_64, Linux x86_64/aarch64 static, Windows x86_64), `install.sh` / `install.ps1` with checksum verification, `SHA256SUMS`, build provenance | built (M6: the release workflow builds and smoke-tests every platform; the installers are tested against a local copy of a release); available once the first release is published |
 | opencode: install/uninstall (`--harness opencode`, or both at once sharing one store), the session plugin, past sessions, summaries and `bench` through `opencode run` | available for 1.x (M7a) and 2.x (M7b): the line is detected with `opencode --version` (else from its database), an upgrade from 1.x is detected by `doctor` and moved by `install`, sessions are read from both lines' tables without duplicates. Tested on temporary homes with hand-built databases in each line's format and fake `opencode` binaries; real smoke runs with opencode 1.18.35 (M7a, and the M7b plugin) and 2.2.4 (M7b) on throwaway homes and a free model |
 | Codex: install/uninstall (`--harness codex`), the hooks, past sessions, summaries through `codex exec`, `bench` with a local model | available (M7c), verified against Codex 0.167.0's source. Tested on temporary homes with hand-built rollout files and configurations and a fake `codex` binary; real smoke with Codex 0.167.0 and LM Studio (`qwen2.5-coder-14b-instruct`): registration, indexing and a summary through `codex exec --oss` worked; that model wrote its tool calls as text instead of calling them, so `remember`/`memories` through Codex are not yet shown with a local model |
-| Other harnesses (Cursor), browser UI, desktop app | planned (M7) |
+| Cursor: install/uninstall (`--harness cursor`), the hooks, past sessions from the transcripts the hooks name | available (M7d), checked against Cursor's documentation of 2026-11-10 and tested on temporary homes with hand-built files in the documented formats; not yet run with a live Cursor (needs a login): [docs/cursor-live-check.md](docs/cursor-live-check.md). Summaries and `bench` do not run through Cursor's CLI (no cost reported) |
+| Browser UI, desktop app | planned (M7) |
 
 ### Try it
 

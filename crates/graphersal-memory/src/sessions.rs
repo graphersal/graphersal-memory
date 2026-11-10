@@ -2,7 +2,9 @@
 //! (`<claude config>/projects/<project>/<session>.jsonl`, parsed by `crate::transcript`) and every
 //! finished opencode session (its database, read by `crate::opencode::sessions`) and every
 //! finished Codex rollout (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`, read by
-//! `crate::codex::sessions`) becomes a
+//! `crate::codex::sessions`) and every finished Cursor transcript its hooks reported (the
+//! registry `<data dir>/sessions/cursor-transcripts.json`, read by `crate::cursor::sessions`)
+//! becomes a
 //! `session` vertex with its `turn`s, and, when the user opted in, an English summary split into
 //! `fact`s (`crate::summaries`). A [`Request`] names one harness; each harness has its own state
 //! file. An opencode session is addressed like a file, as `<opencode.db>#<session id>`
@@ -66,7 +68,8 @@ pub struct Request {
     pub harness: Kind,
     /// Where the harness keeps its sessions: Claude Code's projects directory
     /// (`~/.claude/projects`), opencode's data directory (`~/.local/share/opencode`, holding
-    /// `opencode.db`).
+    /// `opencode.db`), Codex's `sessions/`; for Cursor the registry file of the transcripts its
+    /// hooks reported.
     pub projects_dir: PathBuf,
     /// Transcripts known to be finished (a `SessionEnd` named them).
     pub ended: BTreeSet<PathBuf>,
@@ -256,6 +259,7 @@ pub fn units(request: &Request) -> Result<Vec<Unit>, String> {
             .collect()),
         Kind::OpenCode => crate::opencode::sessions::units(&request.projects_dir),
         Kind::Codex => Ok(crate::codex::sessions::units(&request.projects_dir)),
+        Kind::Cursor => crate::cursor::sessions::units(&request.projects_dir),
     }
 }
 
@@ -446,19 +450,40 @@ struct Parsed {
     source: String,
 }
 
-/// Parses a transcript; with `data_dir` its project's directory is resolved to the project's
-/// stable id (`crate::projects::resolve`), else the id is the directory.
+/// The registry of Cursor's transcripts in `data_dir`.
+fn cursor_registry(data_dir: &Path) -> PathBuf {
+    data_dir.join("sessions").join(crate::cursor::REGISTRY_FILE)
+}
+
+/// Parses a transcript (a Cursor transcript is one `data_dir`'s registry lists); with `resolve`
+/// its project's directory is resolved to the project's stable id (`crate::projects::resolve`),
+/// else the id is the directory.
 fn parse_file(
     file: &Path,
     modified: u64,
-    data_dir: Option<&Path>,
+    data_dir: &Path,
+    resolve: bool,
 ) -> Result<Option<Parsed>, String> {
     let uuid = unit_uuid(file);
+    let cursor = crate::opencode::sessions::split_unit(file)
+        .is_none()
+        .then(|| crate::cursor::sessions::project_of(&cursor_registry(data_dir), file))
+        .flatten();
     let (harness, transcript, source) = match crate::opencode::sessions::split_unit(file) {
         Some((db, id)) => (
             Kind::OpenCode,
             crate::opencode::sessions::read(&db, &id)?,
             format!("opencode:{id}"),
+        ),
+        None if cursor.is_some() => (
+            Kind::Cursor,
+            crate::cursor::sessions::read(file, cursor.as_deref().unwrap_or_default())?,
+            format!(
+                "cursor:{}",
+                file.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            ),
         ),
         None if crate::codex::sessions::is_rollout(file) => (
             Kind::Codex,
@@ -499,9 +524,10 @@ fn parse_file(
         .iter()
         .filter_map(|path| transcript::relative_file(path, &project))
         .collect();
-    let key = match data_dir {
-        Some(data_dir) => crate::projects::resolve(data_dir, &project)?.id,
-        None => project.clone(),
+    let key = if resolve {
+        crate::projects::resolve(data_dir, &project)?.id
+    } else {
+        project.clone()
     };
     let title = if transcript.title.is_empty() {
         format!("Session {}", uuid.chars().take(8).collect::<String>())
@@ -799,7 +825,7 @@ fn index_one(
     cache: &mut BTreeMap<String, Known>,
     state: &mut State,
 ) -> Result<Indexed, String> {
-    let Some(parsed) = parse_file(file, modified, Some(data_dir))? else {
+    let Some(parsed) = parse_file(file, modified, data_dir, true)? else {
         *state.entry_mut(file) = json!({"size": size, "mtime": modified, "empty": true});
         return Ok(Indexed::Empty);
     };
@@ -877,7 +903,7 @@ fn summarize_one(
             None => return Ok(Summarized::Waiting),
         },
     };
-    let parsed = match parse_file(file, modified, Some(data_dir)) {
+    let parsed = match parse_file(file, modified, data_dir, true) {
         Ok(Some(parsed)) if parsed.transcript.fingerprint == fingerprint => parsed,
         // Changed since its indexing: the next run indexes it again first.
         Ok(_) => return Ok(Summarized::Waiting),
@@ -994,7 +1020,7 @@ pub fn estimate_for(
         } else if same && entry["empty"] == true {
             continue;
         } else {
-            match parse_file(&file, modified, None) {
+            match parse_file(&file, modified, data_dir, false) {
                 Ok(Some(parsed)) => (
                     summaries::prompt(&parsed.transcript, &parsed.files, &parsed.project)
                         .chars()
@@ -1816,6 +1842,59 @@ mod tests {
         let line = active.to_control();
         assert_eq!(line["harness"], "codex");
         assert_eq!(Request::from_control(&line).unwrap().harness, Kind::Codex);
+    }
+
+    #[test]
+    fn cursor_transcripts_reported_by_the_hooks_are_indexed_with_their_workspace() {
+        let tmp = crate::mcp_tests::TempDir::new("cu-idx");
+        let data = crate::mcp_tests::TempDir::new("cu-idx-data");
+        let work = crate::mcp::canonical(tmp.path()).join("work");
+        std::fs::create_dir_all(work.join(".git")).unwrap();
+        let registry = data
+            .path()
+            .join("sessions")
+            .join(crate::cursor::REGISTRY_FILE);
+        let file = crate::cursor::sessions::tests::write_fixture(&tmp.path().join("cursor"), "c1");
+        // A transcript nobody reported is not read.
+        let unreported =
+            crate::cursor::sessions::tests::write_fixture(&tmp.path().join("cursor"), "c0");
+        let request = Request {
+            idle: Duration::ZERO,
+            ..Request::for_harness(Kind::Cursor, &registry)
+        };
+        let mut store = Direct::new();
+        let none = index(&request, data.path(), &mut store);
+        assert_eq!((none.found, none.indexed), (0, 0), "{:?}", none.problems);
+        crate::cursor::sessions::record(&registry, &file, &work.display().to_string(), "c1")
+            .unwrap();
+        let first = index(&request, data.path(), &mut store);
+        assert_eq!(first.problems, Vec::<String>::new());
+        assert_eq!((first.found, first.indexed, first.turns), (1, 1, 2));
+        let session = store.query(
+            "g.v(\"session:c1\").project(\"name\", \"project\", \"harness\", \"source\")\
+             .by(\"name\").by(\"project\").by(\"harness\").by(\"source\").next()",
+        );
+        assert_eq!(session[0]["harness"], "cursor");
+        assert_eq!(session[0]["project"], work.display().to_string());
+        assert_eq!(session[0]["source"], "cursor:c1.jsonl");
+        assert_eq!(
+            session[0]["name"],
+            "Use tabs in this repository, never spaces."
+        );
+        assert!(data.path().join("sessions/cursor.json").exists());
+        let again = index(&request, data.path(), &mut store);
+        assert_eq!((again.found, again.indexed, again.unchanged), (1, 0, 1));
+        // Active: left alone; the control line names the harness.
+        let mut active = request.clone();
+        active.active.insert(file.clone());
+        assert_eq!(index(&active, data.path(), &mut store).active, 1);
+        let line = active.to_control();
+        assert_eq!(line["harness"], "cursor");
+        assert_eq!(Request::from_control(&line).unwrap().harness, Kind::Cursor);
+        assert!(crate::cursor::sessions::project_of(&registry, &unreported).is_none());
+        let estimate =
+            estimate_for(Kind::Cursor, &registry, data.path(), Duration::ZERO, None).unwrap();
+        assert_eq!(estimate.sessions, 1);
     }
 
     /// A fake `codex`: records its arguments, `CODEX_HOME` and prompt, answers `exec --json`
