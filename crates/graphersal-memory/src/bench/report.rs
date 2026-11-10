@@ -1,10 +1,12 @@
 //! The bench report: one row per answer (arm, question, repeat) with its judge score and its
-//! cost, aggregated per arm and category into quality, confidently wrong answers, cost,
-//! tokens, turns, wall time and cost per score point; written as `report.md` and `report.json`.
+//! cost, aggregated per arm and category (and per origin when the user's own questions are in
+//! the run) into quality, confidently wrong answers, cost, tokens, turns, wall time and cost per
+//! score point; written as `report.md` and `report.json`. An answer to a question without a
+//! reference is shown but never judged, and stays out of every mean.
 
 use serde_json::{Value, json};
 
-use super::questions::CATEGORIES;
+use super::questions::REPORT_CATEGORIES;
 
 /// One judged answer.
 #[derive(Debug, Clone, PartialEq)]
@@ -13,6 +15,11 @@ pub struct Row {
     pub question: String,
     /// Its category.
     pub category: String,
+    /// Who wrote the question: `user` or `generated`.
+    pub origin: String,
+    /// Whether the answer was judged (its question has a reference); else `score` means
+    /// nothing and the row is in no mean.
+    pub judged: bool,
     /// The arm's name.
     pub arm: String,
     /// The repeat (1-based).
@@ -45,8 +52,10 @@ impl Row {
     /// The row as JSON.
     pub fn to_json(&self) -> Value {
         json!({
-            "question": self.question, "category": self.category, "arm": self.arm,
-            "repeat": self.repeat, "score": self.score, "confident_wrong": self.confident_wrong,
+            "question": self.question, "category": self.category, "origin": self.origin,
+            "arm": self.arm, "repeat": self.repeat, "judged": self.judged,
+            "score": if self.judged { json!(self.score) } else { Value::Null },
+            "confident_wrong": self.confident_wrong,
             "note": self.note, "answer": self.answer, "error": self.error,
             "cost_usd": self.cost_usd, "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens, "turns": self.turns, "ms": self.ms,
@@ -62,6 +71,8 @@ pub struct Group {
     pub arm: String,
     /// The category, or `all`.
     pub category: String,
+    /// The origin (`user`, `generated`), or `all`.
+    pub origin: String,
     /// How many answers.
     pub n: usize,
     /// Mean score.
@@ -85,7 +96,7 @@ pub struct Group {
 }
 
 impl Group {
-    fn of(arm: &str, category: &str, rows: &[&Row]) -> Option<Self> {
+    fn of(arm: &str, category: &str, origin: &str, rows: &[&Row]) -> Option<Self> {
         if rows.is_empty() {
             return None;
         }
@@ -96,6 +107,7 @@ impl Group {
         Some(Self {
             arm: arm.to_string(),
             category: category.to_string(),
+            origin: origin.to_string(),
             n: rows.len(),
             score,
             confident_wrong: rows.iter().filter(|r| r.confident_wrong).count(),
@@ -111,7 +123,8 @@ impl Group {
 
     fn to_json(&self) -> Value {
         json!({
-            "arm": self.arm, "category": self.category, "n": self.n, "score": self.score,
+            "arm": self.arm, "category": self.category, "origin": self.origin, "n": self.n,
+            "score": self.score,
             "confident_wrong": self.confident_wrong, "cost_usd": self.cost_usd,
             "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
             "turns": self.turns, "seconds": self.seconds, "cost_per_point": self.cost_per_point,
@@ -120,16 +133,31 @@ impl Group {
     }
 }
 
-/// Every group: per category, then `all`, each per arm in `arms` order.
+/// The origins in report order.
+const ORIGINS: [&str; 2] = ["user", "generated"];
+
+/// Every group of the judged rows: per category, then per origin (only when the user's own
+/// questions are in the run), then `all`, each per arm in `arms` order.
 pub fn groups(rows: &[Row], arms: &[String]) -> Vec<Group> {
+    let judged: Vec<&Row> = rows.iter().filter(|r| r.judged).collect();
     let mut out = Vec::new();
-    for category in CATEGORIES.iter().copied().chain(std::iter::once("all")) {
+    let mut sets: Vec<(&str, &str)> = REPORT_CATEGORIES.iter().map(|c| (*c, "all")).collect();
+    if rows.iter().any(|r| r.origin == "user") {
+        sets.extend(ORIGINS.iter().map(|o| ("all", *o)));
+    }
+    sets.push(("all", "all"));
+    for (category, origin) in sets {
         for arm in arms {
-            let selected: Vec<&Row> = rows
+            let selected: Vec<&Row> = judged
                 .iter()
-                .filter(|r| &r.arm == arm && (category == "all" || r.category == category))
+                .copied()
+                .filter(|r| {
+                    &r.arm == arm
+                        && (category == "all" || r.category == category)
+                        && (origin == "all" || r.origin == origin)
+                })
                 .collect();
-            out.extend(Group::of(arm, category, &selected));
+            out.extend(Group::of(arm, category, origin, &selected));
         }
     }
     out
@@ -142,7 +170,7 @@ pub fn repeat_scores(rows: &[Row], arm: &str) -> Vec<f64> {
         .filter_map(|repeat| {
             let scores: Vec<f64> = rows
                 .iter()
-                .filter(|r| r.arm == arm && r.repeat == repeat)
+                .filter(|r| r.arm == arm && r.repeat == repeat && r.judged)
                 .map(|r| f64::from(r.score))
                 .collect();
             (!scores.is_empty()).then(|| scores.iter().sum::<f64>() / scores.len() as f64)
@@ -155,6 +183,8 @@ pub fn repeat_scores(rows: &[Row], arm: &str) -> Vec<f64> {
 pub struct Spent {
     /// Generating the questions (in this run).
     pub generation: f64,
+    /// Looking up the references of the user's own questions (in this run).
+    pub references: f64,
     /// The warm-up calls.
     pub warmup: f64,
     /// The answers.
@@ -166,7 +196,7 @@ pub struct Spent {
 impl Spent {
     /// Everything.
     pub fn total(&self) -> f64 {
-        self.generation + self.warmup + self.answers + self.judge
+        self.generation + self.references + self.warmup + self.answers + self.judge
     }
 }
 
@@ -197,6 +227,12 @@ pub struct Meta {
     pub stopped: Option<String>,
     /// Extra caveats of this run.
     pub notes: Vec<String>,
+    /// How many of the questions are the user's own.
+    pub user_questions: usize,
+    /// How many questions have the user's own answer as their reference.
+    pub user_references: usize,
+    /// The questions without a reference `(id, question)`: answered, shown, not judged.
+    pub unjudged: Vec<(String, String)>,
 }
 
 fn money(usd: f64) -> String {
@@ -224,9 +260,13 @@ fn caveats(meta: &Meta, rows: &[Row]) -> Vec<String> {
              differences with that in mind.",
             meta.questions, meta.repeats
         ),
-        "The judge is an LLM (the same harness and model as the answers) scoring against \
-         references that an LLM wrote from your raw transcripts."
-            .to_string(),
+        if meta.user_references < meta.questions.saturating_sub(meta.unjudged.len()) {
+            "The judge is an LLM (the same harness and model as the answers) scoring against \
+             references that an LLM wrote from your raw transcripts."
+                .to_string()
+        } else {
+            "The judge is an LLM (the same harness and model as the answers).".to_string()
+        },
         if meta.confirmed {
             "You confirmed the question set.".to_string()
         } else {
@@ -242,6 +282,22 @@ fn caveats(meta: &Meta, rows: &[Row]) -> Vec<String> {
          arms comparable)."
             .to_string(),
     ];
+    if meta.user_references > 0 {
+        out.push(format!(
+            "{} question(s) of yours are judged against your own answer: the judge compares with \
+             your wording, so a correct answer phrased differently, or one that is right where your \
+             note is short, may score differently than against a reference from the transcripts.",
+            meta.user_references
+        ));
+    }
+    if !meta.unjudged.is_empty() {
+        out.push(format!(
+            "{} question(s) have no reference (none was found in your sessions): every arm \
+             answered them, the answers are shown below, and they are in no score or mean \
+             (judging without a reference would reward a confident guess).",
+            meta.unjudged.len()
+        ));
+    }
     let errors = rows.iter().filter(|r| r.error.is_some()).count();
     if errors > 0 {
         out.push(format!(
@@ -290,10 +346,11 @@ pub fn markdown(meta: &Meta, rows: &[Row], spent: &Spent) -> String {
         "|---|---|---|---|---|---|---|---|---|---|".to_string(),
     ]);
     for g in groups(rows, &arms) {
-        let label = if g.category == "all" {
-            format!("**all ({})**", g.n)
-        } else {
-            format!("{} ({})", g.category, g.n)
+        let label = match (g.category.as_str(), g.origin.as_str()) {
+            ("all", "all") => format!("**all ({})**", g.n),
+            ("all", "user") => format!("your questions ({})", g.n),
+            ("all", origin) => format!("{origin} questions ({})", g.n),
+            (category, _) => format!("{category} ({})", g.n),
         };
         out.push(format!(
             "| {label} | {} | {:.2} | {} | {} | {} | {} | {} | {:.1} | {:.0} |",
@@ -321,9 +378,14 @@ pub fn markdown(meta: &Meta, rows: &[Row], spent: &Spent) -> String {
     out.extend([
         String::new(),
         format!(
-            "Spent (list price): {} in all: questions {}, warm-up {}, answers {}, judge {}.",
+            "Spent (list price): {} in all: questions {}{}, warm-up {}, answers {}, judge {}.",
             money(spent.total()),
             money(spent.generation),
+            if spent.references > 0.0 {
+                format!(", references of your questions {}", money(spent.references))
+            } else {
+                String::new()
+            },
             money(spent.warmup),
             money(spent.answers),
             money(spent.judge)
@@ -344,12 +406,17 @@ pub fn markdown(meta: &Meta, rows: &[Row], spent: &Spent) -> String {
     ]);
     for r in rows {
         out.push(format!(
-            "| {} ({}) | {} | {} | {}{} | {} |",
+            "| {} ({}{}) | {} | {} | {}{} | {} |",
             r.question,
+            if r.origin == "user" { "yours, " } else { "" },
             r.category,
             r.arm,
             r.repeat,
-            r.score,
+            if r.judged {
+                r.score.to_string()
+            } else {
+                "not judged".to_string()
+            },
             if r.confident_wrong {
                 " (confidently wrong)"
             } else {
@@ -357,6 +424,31 @@ pub fn markdown(meta: &Meta, rows: &[Row], spent: &Spent) -> String {
             },
             r.note.replace('|', "/").replace('\n', " ")
         ));
+    }
+    if !meta.unjudged.is_empty() {
+        out.extend([
+            String::new(),
+            "## Questions without a reference".to_string(),
+            String::new(),
+            "Not judged and in no mean: read the answers yourself.".to_string(),
+        ]);
+        for (id, question) in &meta.unjudged {
+            out.extend([
+                String::new(),
+                format!("**{id}**: {question}"),
+                String::new(),
+            ]);
+            for r in rows.iter().filter(|r| &r.question == id) {
+                let answer = if r.answer.trim().is_empty() {
+                    r.error
+                        .clone()
+                        .map_or_else(|| "(no answer)".to_string(), |e| format!("(failed: {e})"))
+                } else {
+                    crate::transcript::clip(&r.answer.replace('\n', " "), 600)
+                };
+                out.push(format!("- {} r{}: {answer}", r.arm, r.repeat));
+            }
+        }
     }
     out.push(String::new());
     out.join("\n")
@@ -381,7 +473,11 @@ pub fn to_json(meta: &Meta, rows: &[Row], spent: &Spent) -> Value {
         "groups": groups(rows, &arms).iter().map(Group::to_json).collect::<Vec<_>>(),
         "repeat_scores": arms.iter().map(|a| json!({"arm": a, "scores": repeat_scores(rows, a)}))
             .collect::<Vec<_>>(),
+        "user_questions": meta.user_questions,
+        "unjudged": meta.unjudged.iter().map(|(id, q)| json!({"id": id, "question": q}))
+            .collect::<Vec<_>>(),
         "spent_usd": {"total": spent.total(), "questions": spent.generation,
+                      "references": spent.references,
                       "warmup": spent.warmup, "answers": spent.answers, "judge": spent.judge},
         "caveats": caveats(meta, rows),
         "rows": rows.iter().map(Row::to_json).collect::<Vec<_>>(),
@@ -392,9 +488,10 @@ pub fn to_json(meta: &Meta, rows: &[Row], spent: &Spent) -> Value {
 pub fn summary(meta: &Meta, rows: &[Row], spent: &Spent) -> String {
     let arms: Vec<String> = meta.arms.iter().map(|(a, _)| a.clone()).collect();
     let mut out = Vec::new();
-    for g in groups(rows, &arms)
-        .into_iter()
-        .filter(|g| g.category == "all")
+    let groups = groups(rows, &arms);
+    for g in groups
+        .iter()
+        .filter(|g| g.category == "all" && g.origin == "all")
     {
         out.push(format!(
             "  {:<6} score {:.2}/5, {} confidently wrong, {} per answer, {} input tokens, cost \
@@ -405,6 +502,20 @@ pub fn summary(meta: &Meta, rows: &[Row], spent: &Spent) -> String {
             money(g.cost_usd),
             tokens(g.input_tokens),
             g.cost_per_point.map_or_else(|| "-".to_string(), money)
+        ));
+    }
+    let mine: Vec<String> = groups
+        .iter()
+        .filter(|g| g.origin == "user")
+        .map(|g| format!("{} {:.2}", g.arm, g.score))
+        .collect();
+    if !mine.is_empty() {
+        out.push(format!("  your own questions: {}", mine.join(", ")));
+    }
+    if !meta.unjudged.is_empty() {
+        out.push(format!(
+            "  {} question(s) without a reference: answered, not scored (see the report)",
+            meta.unjudged.len()
         ));
     }
     out.push(format!(
@@ -427,6 +538,8 @@ mod tests {
         Row {
             question: q.into(),
             category: category.into(),
+            origin: "generated".into(),
+            judged: true,
             arm: arm.into(),
             repeat,
             score,
@@ -508,6 +621,7 @@ mod tests {
         };
         let spent = Spent {
             generation: 0.1,
+            references: 0.0,
             warmup: 0.05,
             answers: 0.1,
             judge: 0.04,

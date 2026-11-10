@@ -327,6 +327,7 @@ memory and sessions (Claude Code):
 graphersal-memory bench --dry-run      # the plan, the sandboxes and the cost estimate; spends nothing
 graphersal-memory bench                # shows the estimate, asks, runs, writes the report
 graphersal-memory bench questions --review   # read and confirm the generated questions
+graphersal-memory bench questions add "Which database do we use?" --answer "SQLite"   # add your own
 ```
 
 - **Arms**: no memory; your file memory as it is (`CLAUDE.md`, `MEMORY.md` and the memory
@@ -338,6 +339,9 @@ graphersal-memory bench questions --review   # read and confirm the generated qu
 - **References from raw transcripts**: questions and reference answers are generated from your
   raw session transcripts, which every arm shares, never from our own summaries, which would
   favour us. Each names the turns it comes from, and you can review and edit them.
+- **Your own questions**: add what you care about the assistant remembering (`bench questions
+  add`, `import`, or a step when `bench` asks in a terminal), with your answer or with one looked
+  up in your transcripts; the report scores them apart from the generated ones.
 - **Judged and reported**: a judge scores each answer from 0 to 5 and flags confidently wrong
   answers. The report gives quality, cost, tokens, turns and cost per score point, per arm and
   per category.

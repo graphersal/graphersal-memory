@@ -124,6 +124,11 @@ impl<'a> Console<'a> {
         }
     }
 
+    /// Reads one free-text answer line, trimmed; `None` at the end of the input.
+    pub fn read_answer(&mut self) -> Option<String> {
+        self.answer()
+    }
+
     /// Shows `choices` numbered from 1 and returns the index chosen. `default` (an index) is
     /// marked and taken on Enter (and at the end of the input); without one an answer is
     /// required. An answer that is no number of the list is asked again.

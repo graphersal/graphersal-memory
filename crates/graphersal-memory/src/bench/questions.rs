@@ -11,11 +11,18 @@ use serde_json::{Value, json};
 use crate::fsutil;
 use crate::transcript::{self, clip};
 
-/// The categories of questions, in report order.
+/// The categories the generator writes, in report order.
 pub const CATEGORIES: [&str; 3] = ["rule", "decision", "history"];
 
-/// The format version of a question file.
-const FORMAT: u64 = 1;
+/// The category of a question of the user's that names none.
+pub const OTHER: &str = "other";
+
+/// Every category a question file may hold, in report order.
+pub const REPORT_CATEGORIES: [&str; 4] = ["rule", "decision", "history", OTHER];
+
+/// The format version of a question file (version 1, before the user's own questions, still
+/// loads: its questions are all generated).
+const FORMAT: u64 = 2;
 
 /// The excerpt's budget (characters) for the generation prompt.
 pub const EXCERPT_BUDGET: usize = 120_000;
@@ -27,17 +34,76 @@ const SESSION_BUDGET: usize = 30_000;
 /// session indexing leaves it out.
 const RECENT: Duration = Duration::from_secs(30 * 60);
 
+/// Who wrote a question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// The generator, from the raw transcripts (`Q1`, `Q2`, ...).
+    Generated,
+    /// The user (`bench questions add`/`import`, or the interactive step; `U1`, `U2`, ...).
+    User,
+}
+
+impl Origin {
+    /// The name in the question file and the report.
+    pub fn name(self) -> &'static str {
+        match self {
+            Origin::Generated => "generated",
+            Origin::User => "user",
+        }
+    }
+}
+
+/// Where a question's reference answer comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceFrom {
+    /// Written by the harness from the raw transcripts (with source turns).
+    Transcripts,
+    /// The user's own answer.
+    User,
+    /// A question of the user's whose reference was not looked up yet.
+    Pending,
+    /// Looked up, and the transcripts do not answer it: asked, never judged.
+    NotFound,
+}
+
+impl ReferenceFrom {
+    /// The name in the question file.
+    pub fn name(self) -> &'static str {
+        match self {
+            ReferenceFrom::Transcripts => "transcripts",
+            ReferenceFrom::User => "user",
+            ReferenceFrom::Pending => "pending",
+            ReferenceFrom::NotFound => "not_found",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "transcripts" => ReferenceFrom::Transcripts,
+            "user" => ReferenceFrom::User,
+            "pending" => ReferenceFrom::Pending,
+            "not_found" => ReferenceFrom::NotFound,
+            _ => return None,
+        })
+    }
+}
+
 /// One question with its reference answer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Question {
-    /// `Q1`, `Q2`, ...
+    /// `Q1`, `Q2`, ... (generated) or `U1`, `U2`, ... (the user's).
     pub id: String,
-    /// `rule`, `decision` or `history`.
+    /// Who wrote it.
+    pub origin: Origin,
+    /// `rule`, `decision`, `history`, or `other` (a question of the user's without one).
     pub category: String,
     /// The question as the developer would ask it.
     pub question: String,
-    /// The reference answer.
-    pub reference: String,
+    /// The reference answer; `None` only for a question of the user's without one yet
+    /// ([`ReferenceFrom::Pending`]) or with none in the transcripts ([`ReferenceFrom::NotFound`]).
+    pub reference: Option<String>,
+    /// Where the reference comes from.
+    pub reference_from: ReferenceFrom,
     /// The turn ids (`turn:<session uuid>:<n>`) the reference comes from.
     pub sources: Vec<String>,
     /// The start of each source turn's prompt, to check the reference against.
@@ -46,12 +112,34 @@ pub struct Question {
     pub keep: bool,
 }
 
+impl Question {
+    /// A question of the user's: `answer` is its reference (else it is looked up later).
+    pub fn user(id: String, question: &str, answer: Option<&str>, category: Option<&str>) -> Self {
+        let answer = answer.map(str::trim).filter(|a| !a.is_empty());
+        Self {
+            id,
+            origin: Origin::User,
+            category: category.unwrap_or(OTHER).to_string(),
+            question: question.trim().to_string(),
+            reference: answer.map(str::to_string),
+            reference_from: if answer.is_some() {
+                ReferenceFrom::User
+            } else {
+                ReferenceFrom::Pending
+            },
+            sources: Vec::new(),
+            excerpts: Vec::new(),
+            keep: true,
+        }
+    }
+}
+
 /// The question set of one project.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuestionSet {
     /// The project key.
     pub project: String,
-    /// When it was generated (UTC).
+    /// When the generated questions were generated (UTC; empty before any generation).
     pub generated_at: String,
     /// How many sessions the excerpt held.
     pub sessions: usize,
@@ -59,14 +147,99 @@ pub struct QuestionSet {
     pub cost_usd: f64,
     /// Whether the user confirmed it.
     pub confirmed: bool,
-    /// The questions.
+    /// The questions: the user's first, then the generated ones.
     pub questions: Vec<Question>,
 }
 
+/// A question's text for duplicate checks: lower case, letters and digits only, single spaces.
+pub fn normalize(text: &str) -> String {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl QuestionSet {
+    /// A set without questions (before the first `add` or generation). Nothing generated is
+    /// in it to review, so it counts as confirmed until generated content arrives.
+    pub fn empty(project: &str) -> Self {
+        Self {
+            project: project.to_string(),
+            generated_at: String::new(),
+            sessions: 0,
+            cost_usd: 0.0,
+            confirmed: true,
+            questions: Vec::new(),
+        }
+    }
+
     /// The questions in use (`keep`).
     pub fn kept(&self) -> Vec<&Question> {
         self.questions.iter().filter(|q| q.keep).collect()
+    }
+
+    /// How many questions of `origin` there are, and how many of them are kept.
+    pub fn count(&self, origin: Origin) -> (usize, usize) {
+        let all = self.questions.iter().filter(|q| q.origin == origin);
+        let kept = all.clone().filter(|q| q.keep).count();
+        (all.count(), kept)
+    }
+
+    /// The question whose normalised text equals `question`'s.
+    pub fn duplicate_of(&self, question: &str) -> Option<&Question> {
+        let wanted = normalize(question);
+        self.questions
+            .iter()
+            .find(|q| !wanted.is_empty() && normalize(&q.question) == wanted)
+    }
+
+    /// The id the next question of the user's gets: `U<highest + 1>`.
+    pub fn next_user_id(&self) -> String {
+        let highest = self
+            .questions
+            .iter()
+            .filter_map(|q| q.id.strip_prefix('U')?.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0);
+        format!("U{}", highest + 1)
+    }
+
+    /// Adds a question of the user's after the other questions of the user's; a duplicate (by
+    /// normalised text) is not added and its id is the error.
+    pub fn add_user(
+        &mut self,
+        question: &str,
+        answer: Option<&str>,
+        category: Option<&str>,
+    ) -> Result<String, String> {
+        if let Some(existing) = self.duplicate_of(question) {
+            return Err(existing.id.clone());
+        }
+        let id = self.next_user_id();
+        let at = self
+            .questions
+            .iter()
+            .rposition(|q| q.origin == Origin::User)
+            .map_or(0, |i| i + 1);
+        self.questions
+            .insert(at, Question::user(id.clone(), question, answer, category));
+        Ok(id)
+    }
+
+    /// Replaces the generated questions with `generated` (a new generation), keeping every
+    /// question of the user's; a generated question that repeats one of the user's is left out.
+    pub fn replace_generated(&mut self, generated: Vec<Question>) {
+        self.questions.retain(|q| q.origin == Origin::User);
+        let mut n = 0;
+        for mut q in generated {
+            if self.duplicate_of(&q.question).is_some() {
+                continue;
+            }
+            n += 1;
+            q.id = format!("Q{n}");
+            self.questions.push(q);
+        }
     }
 
     /// The set as the JSON of its file.
@@ -80,18 +253,24 @@ impl QuestionSet {
             "confirmed": self.confirmed,
             "how_to_review": "Check each reference against its source turns. Fix a reference \
                 in place, set \"keep\": false to drop a question, then run \
-                `graphersal-memory bench questions --review` (or set \"confirmed\": true).",
+                `graphersal-memory bench questions --review` (or set \"confirmed\": true). \
+                Questions with \"origin\": \"user\" are your own: write a reference to give the \
+                right answer, or set \"reference_from\": \"pending\" to have it looked up again.",
             "questions": self.questions.iter().map(|q| json!({
-                "id": q.id, "category": q.category, "question": q.question,
-                "reference": q.reference, "sources": q.sources, "excerpts": q.excerpts,
-                "keep": q.keep,
+                "id": q.id, "origin": q.origin.name(), "category": q.category,
+                "question": q.question, "reference": q.reference,
+                "reference_from": q.reference_from.name(), "sources": q.sources,
+                "excerpts": q.excerpts, "keep": q.keep,
             })).collect::<Vec<_>>(),
         })
     }
 
-    /// The set from the JSON of its file.
+    /// The set from the JSON of its file (format 1 or 2). A hand edit is reconciled: a
+    /// reference written into a question of the user's makes it the user's answer; a question
+    /// of the user's without one is pending (or stays not found).
     pub fn from_json(value: &Value) -> Result<Self, String> {
-        if value["version"].as_u64() != Some(FORMAT) {
+        let version = value["version"].as_u64();
+        if version != Some(FORMAT) && version != Some(1) {
             return Err("unsupported question file version".to_string());
         }
         let strings = |v: &Value| -> Vec<String> {
@@ -109,32 +288,54 @@ impl QuestionSet {
             .enumerate()
         {
             let text = |key: &str| q[key].as_str().unwrap_or_default().trim().to_string();
-            let question = Question {
-                id: q["id"]
-                    .as_str()
-                    .map_or_else(|| format!("Q{}", i + 1), str::to_string),
-                category: text("category"),
-                question: text("question"),
-                reference: text("reference"),
+            let origin = if text("origin") == "user" {
+                Origin::User
+            } else {
+                Origin::Generated
+            };
+            let id = q["id"].as_str().map_or_else(
+                || match origin {
+                    Origin::Generated => format!("Q{}", i + 1),
+                    Origin::User => format!("U{}", i + 1),
+                },
+                str::to_string,
+            );
+            let category = text("category");
+            if !REPORT_CATEGORIES.contains(&category.as_str()) {
+                return Err(format!(
+                    "question {id}: category '{category}' is not one of {}",
+                    REPORT_CATEGORIES.join(", ")
+                ));
+            }
+            let question = text("question");
+            let reference = Some(text("reference")).filter(|r| !r.is_empty());
+            let written = ReferenceFrom::parse(&text("reference_from"));
+            let reference_from = match (origin, &reference, written) {
+                (Origin::Generated, Some(_), _) => ReferenceFrom::Transcripts,
+                (Origin::User, Some(_), Some(ReferenceFrom::Transcripts)) => {
+                    ReferenceFrom::Transcripts
+                }
+                (Origin::User, Some(_), _) => ReferenceFrom::User,
+                (Origin::User, None, Some(ReferenceFrom::NotFound)) => ReferenceFrom::NotFound,
+                (Origin::User, None, _) => ReferenceFrom::Pending,
+                (Origin::Generated, None, _) => {
+                    return Err(format!("question {id}: the reference is empty"));
+                }
+            };
+            if question.is_empty() {
+                return Err(format!("question {id}: the question is empty"));
+            }
+            questions.push(Question {
+                id,
+                origin,
+                category,
+                question,
+                reference,
+                reference_from,
                 sources: strings(&q["sources"]),
                 excerpts: strings(&q["excerpts"]),
                 keep: q["keep"].as_bool().unwrap_or(true),
-            };
-            if !CATEGORIES.contains(&question.category.as_str()) {
-                return Err(format!(
-                    "question {}: category '{}' is not one of {}",
-                    question.id,
-                    question.category,
-                    CATEGORIES.join(", ")
-                ));
-            }
-            if question.question.is_empty() || question.reference.is_empty() {
-                return Err(format!(
-                    "question {}: the question or its reference is empty",
-                    question.id
-                ));
-            }
-            questions.push(question);
+            });
         }
         Ok(Self {
             project: value["project"].as_str().unwrap_or_default().to_string(),
@@ -428,27 +629,17 @@ pub fn parse(answer: &Value, excerpt: &Excerpt, count: usize) -> Result<Vec<Ques
         if !CATEGORIES.contains(&category.as_str()) || question.is_empty() || reference.is_empty() {
             continue;
         }
-        let mut sources = Vec::new();
-        let mut excerpts = Vec::new();
-        for id in item["sources"].as_array().into_iter().flatten() {
-            let Some(id) = id.as_str().and_then(|id| excerpt.resolve(id)) else {
-                continue;
-            };
-            if let Some(start) = excerpt.excerpt_of(&id)
-                && !sources.contains(&id)
-            {
-                excerpts.push(start.to_string());
-                sources.push(id);
-            }
-        }
+        let (sources, excerpts) = grounded(&item["sources"], excerpt);
         if sources.is_empty() {
             continue;
         }
         out.push(Question {
             id: format!("Q{}", out.len() + 1),
+            origin: Origin::Generated,
             category,
             question,
-            reference,
+            reference: Some(reference),
+            reference_from: ReferenceFrom::Transcripts,
             sources,
             excerpts,
             keep: true,
@@ -465,6 +656,288 @@ pub fn parse(answer: &Value, excerpt: &Excerpt, count: usize) -> Result<Vec<Ques
         );
     }
     Ok(out)
+}
+
+/// The source turns of `cited` ids that the excerpt holds, resolved, without repeats, with the
+/// start of each turn's prompt.
+fn grounded(cited: &Value, excerpt: &Excerpt) -> (Vec<String>, Vec<String>) {
+    let mut sources = Vec::new();
+    let mut excerpts = Vec::new();
+    for id in cited.as_array().into_iter().flatten() {
+        let Some(id) = id.as_str().and_then(|id| excerpt.resolve(id)) else {
+            continue;
+        };
+        if let Some(start) = excerpt.excerpt_of(&id)
+            && !sources.contains(&id)
+        {
+            excerpts.push(start.to_string());
+            sources.push(id);
+        }
+    }
+    (sources, excerpts)
+}
+
+/// The JSON schema of the reference finder's answer.
+pub fn reference_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"answers": {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "string"},
+            "found": {"type": "boolean"},
+            "reference": {"type": "string"},
+            "sources": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["id", "found", "reference", "sources"]}}},
+        "required": ["answers"],
+    })
+}
+
+/// The reference prompt: find the answer of each of the user's `questions` (`(id, text)`) in
+/// `excerpt`, the same raw transcripts the generator reads.
+pub fn reference_prompt(
+    project: &str,
+    questions: &[(String, String)],
+    excerpt: &Excerpt,
+) -> String {
+    let name = Path::new(project)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| project.to_string());
+    let list: String = questions
+        .iter()
+        .map(|(id, q)| format!("\n- [{id}] {q}"))
+        .collect();
+    format!(
+        "A developer wrote benchmark questions that test whether an AI coding assistant remembers \
+earlier working sessions with them on the project \"{name}\". Below are excerpts of the raw session \
+transcripts; every turn starts with its id in brackets, like [turn:<session>:<n>].
+
+For each question, find the turns that answer it:
+- found: true only if the transcripts clearly answer the question; false otherwise (never guess);
+- reference: when found, the correct answer in 1-3 English sentences, with the concrete facts \
+(names, versions, numbers) the transcript states; only facts the developer stated or confirmed, or \
+that the transcript clearly establishes; empty when not found;
+- sources: the ids of the turns that support the reference (one or more, exactly as written); \
+empty when not found;
+- id: the question's id as given.
+
+Answer with one JSON object matching this JSON schema:
+{}
+
+The questions:{list}
+
+The transcripts follow.
+{}",
+        reference_schema(),
+        excerpt.text
+    )
+}
+
+/// What the reference finder found for one question: the reference with its source turns and
+/// their excerpts, or `None` (not found, or not grounded in a turn of the excerpt).
+pub type Found = Option<(String, Vec<String>, Vec<String>)>;
+
+/// The reference finder's answer for each of `ids` (an id it left out counts as not found).
+pub fn parse_references(
+    answer: &Value,
+    excerpt: &Excerpt,
+    ids: &[String],
+) -> Result<Vec<(String, Found)>, String> {
+    let output = if answer["structured_output"].is_object() {
+        answer["structured_output"].clone()
+    } else if let Some(result) = answer["result"].as_str() {
+        crate::bench::json_in(result).ok_or("the reference finder answered no JSON")?
+    } else {
+        answer.clone()
+    };
+    let items = output["answers"]
+        .as_array()
+        .ok_or("the reference finder answered no list of answers")?;
+    Ok(ids
+        .iter()
+        .map(|id| {
+            let found = items
+                .iter()
+                .find(|item| item["id"].as_str().map(str::trim) == Some(id.as_str()))
+                .and_then(|item| {
+                    let reference = item["reference"].as_str().unwrap_or_default().trim();
+                    if item["found"] != Value::Bool(true) || reference.is_empty() {
+                        return None;
+                    }
+                    let (sources, excerpts) = grounded(&item["sources"], excerpt);
+                    (!sources.is_empty()).then(|| (reference.to_string(), sources, excerpts))
+                });
+            (id.clone(), found)
+        })
+        .collect())
+}
+
+impl QuestionSet {
+    /// Applies what the reference finder found: a found reference with its sources (the set
+    /// then needs a review again), else not found.
+    pub fn apply_references(&mut self, found: Vec<(String, Found)>) -> (usize, usize) {
+        let (mut yes, mut no) = (0, 0);
+        for (id, found) in found {
+            let Some(q) = self.questions.iter_mut().find(|q| q.id == id) else {
+                continue;
+            };
+            match found {
+                Some((reference, sources, excerpts)) => {
+                    q.reference = Some(reference);
+                    q.reference_from = ReferenceFrom::Transcripts;
+                    q.sources = sources;
+                    q.excerpts = excerpts;
+                    yes += 1;
+                }
+                None => {
+                    q.reference = None;
+                    q.reference_from = ReferenceFrom::NotFound;
+                    q.sources.clear();
+                    q.excerpts.clear();
+                    no += 1;
+                }
+            }
+        }
+        if yes > 0 {
+            self.confirmed = false;
+        }
+        (yes, no)
+    }
+
+    /// The kept questions of the user's whose reference is still to be looked up.
+    pub fn pending(&self) -> Vec<(String, String)> {
+        self.kept()
+            .into_iter()
+            .filter(|q| q.reference_from == ReferenceFrom::Pending)
+            .map(|q| (q.id.clone(), q.question.clone()))
+            .collect()
+    }
+}
+
+/// One question read from an import file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Imported {
+    /// The question.
+    pub question: String,
+    /// The expected answer, if the file gives one.
+    pub answer: Option<String>,
+    /// The category, if the file gives one.
+    pub category: Option<String>,
+}
+
+/// The questions of an import file, and the entries skipped with why: JSON (a list of entries,
+/// or an object with `questions`, in the question file's entry shape: `question`, optional
+/// `reference` or `answer`, optional `category`), else plain text: one question per line, or
+/// `Q:`/`A:` pairs (a line without a prefix continues the one before); empty lines and lines
+/// starting with `#` are left out.
+pub fn parse_import(text: &str) -> Result<(Vec<Imported>, Vec<String>), String> {
+    let trimmed = text.trim_start_matches('\u{feff}').trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        let value: Value = serde_json::from_str(trimmed)
+            .map_err(|err| format!("the file looks like JSON but is not valid JSON: {err}"))?;
+        let entries = if value.is_array() {
+            &value
+        } else {
+            &value["questions"]
+        };
+        let entries = entries.as_array().ok_or(
+            "the JSON holds no list of questions (a list, or an object with \"questions\")",
+        )?;
+        let mut out = Vec::new();
+        let mut skipped = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            let text = |key: &str| {
+                entry[key]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string)
+            };
+            let Some(question) = text("question").or_else(|| entry.as_str().map(str::to_string))
+            else {
+                skipped.push(format!("entry {}: no question", i + 1));
+                continue;
+            };
+            let category = text("category");
+            if let Some(c) = &category
+                && !REPORT_CATEGORIES.contains(&c.as_str())
+            {
+                skipped.push(format!(
+                    "entry {}: category '{c}' is not one of {}",
+                    i + 1,
+                    REPORT_CATEGORIES.join(", ")
+                ));
+                continue;
+            }
+            out.push(Imported {
+                question,
+                answer: text("reference").or_else(|| text("answer")),
+                category,
+            });
+        }
+        return Ok((out, skipped));
+    }
+    let lines: Vec<&str> = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    let prefix = |line: &str, p: char| -> Option<String> {
+        let mut chars = line.chars();
+        let first = chars.next()?;
+        (first.eq_ignore_ascii_case(&p) && chars.next() == Some(':'))
+            .then(|| line[2..].trim().to_string())
+    };
+    let qa = lines.iter().any(|l| prefix(l, 'q').is_some());
+    let mut out: Vec<Imported> = Vec::new();
+    let mut skipped = Vec::new();
+    if !qa {
+        out.extend(lines.iter().map(|l| Imported {
+            question: (*l).to_string(),
+            answer: None,
+            category: None,
+        }));
+        return Ok((out, skipped));
+    }
+    // Q:/A: pairs; `in_answer` says whether a plain line continues the answer.
+    let mut in_answer = false;
+    for line in lines {
+        if let Some(q) = prefix(line, 'q') {
+            out.push(Imported {
+                question: q,
+                answer: None,
+                category: None,
+            });
+            in_answer = false;
+        } else if let Some(a) = prefix(line, 'a') {
+            match out.last_mut() {
+                Some(last) if last.answer.is_none() => {
+                    last.answer = Some(a);
+                    in_answer = true;
+                }
+                _ => skipped.push(format!("an answer without its question: {}", clip(&a, 60))),
+            }
+        } else if let Some(last) = out.last_mut() {
+            let part = if in_answer {
+                last.answer.get_or_insert_with(String::new)
+            } else {
+                &mut last.question
+            };
+            if !part.is_empty() {
+                part.push(' ');
+            }
+            part.push_str(line);
+        } else {
+            skipped.push(format!("a line before the first Q: {}", clip(line, 60)));
+        }
+    }
+    out.retain(|q| {
+        let keep = !q.question.is_empty();
+        if !keep {
+            skipped.push("an empty Q:".to_string());
+        }
+        keep
+    });
+    Ok((out, skipped))
 }
 
 #[cfg(test)]
@@ -618,5 +1091,194 @@ mod tests {
         let found = transcripts(dir.path(), "/w/p", later);
         assert_eq!(found.len(), 2);
         assert!(found.iter().all(|f| f.starts_with(&project_dir)));
+    }
+
+    #[test]
+    fn user_questions_are_added_after_each_other_and_duplicates_are_refused() {
+        let mut set = QuestionSet::empty("/w/p");
+        assert!(set.confirmed, "nothing generated to review yet");
+        assert_eq!(
+            set.add_user("Why lz4?", Some(" Speed. "), Some("decision")),
+            Ok("U1".into())
+        );
+        assert_eq!(set.add_user("May I push?", None, None), Ok("U2".into()));
+        // The same question by its normalised text (case, punctuation, spaces).
+        assert_eq!(set.add_user("  why   LZ4 ", None, None), Err("U1".into()));
+        assert!(
+            set.duplicate_of(" ?! ").is_none(),
+            "empty text is no duplicate"
+        );
+        let u1 = &set.questions[0];
+        assert_eq!(u1.origin, Origin::User);
+        assert_eq!(u1.reference.as_deref(), Some("Speed."));
+        assert_eq!(u1.reference_from, ReferenceFrom::User);
+        assert_eq!(u1.category, "decision");
+        let u2 = &set.questions[1];
+        assert_eq!(u2.reference, None);
+        assert_eq!(u2.reference_from, ReferenceFrom::Pending);
+        assert_eq!(u2.category, OTHER);
+        assert_eq!(
+            set.pending(),
+            [("U2".to_string(), "May I push?".to_string())]
+        );
+        // A generation replaces only the generated questions and skips repeats of the user's.
+        let generated = parse(
+            &json!({"questions": [
+                {"category": "rule", "question": "May I push?", "reference": "No.",
+                 "sources": ["turn:s1:0"]},
+                {"category": "rule", "question": "Who reviews?", "reference": "Ann.",
+                 "sources": ["turn:s1:0"]}]}),
+            &excerpt(),
+            5,
+        )
+        .unwrap();
+        set.replace_generated(generated.clone());
+        set.replace_generated(generated);
+        let ids: Vec<&str> = set.questions.iter().map(|q| q.id.as_str()).collect();
+        assert_eq!(ids, ["U1", "U2", "Q1"]);
+        assert_eq!(set.questions[2].question, "Who reviews?");
+        // A later question of the user's goes after the user's, before the generated ones.
+        assert_eq!(
+            set.add_user("What broke?", None, Some("history")),
+            Ok("U3".into())
+        );
+        let ids: Vec<&str> = set.questions.iter().map(|q| q.id.as_str()).collect();
+        assert_eq!(ids, ["U1", "U2", "U3", "Q1"]);
+        assert_eq!(set.count(Origin::User), (3, 3));
+        assert_eq!(set.count(Origin::Generated), (1, 1));
+    }
+
+    #[test]
+    fn user_questions_round_trip_and_old_files_load() {
+        let mut set = QuestionSet::empty("/w/p");
+        set.add_user("Why lz4?", Some("Speed."), None).unwrap();
+        set.add_user("May I push?", None, Some("rule")).unwrap();
+        let json = set.to_json();
+        assert_eq!(json["version"], 2);
+        assert_eq!(json["questions"][0]["origin"], "user");
+        assert_eq!(json["questions"][0]["reference_from"], "user");
+        assert_eq!(json["questions"][1]["reference"], Value::Null);
+        assert_eq!(json["questions"][1]["reference_from"], "pending");
+        assert_eq!(QuestionSet::from_json(&json).unwrap(), set);
+        // Hand edits: a reference written into a pending question becomes the user's answer;
+        // a not-found question stays not found; a generated question still needs a reference.
+        let mut edited = json.clone();
+        edited["questions"][1]["reference"] = json!("Never.");
+        let loaded = QuestionSet::from_json(&edited).unwrap();
+        assert_eq!(loaded.questions[1].reference_from, ReferenceFrom::User);
+        let mut edited = json.clone();
+        edited["questions"][1]["reference_from"] = json!("not_found");
+        let loaded = QuestionSet::from_json(&edited).unwrap();
+        assert_eq!(loaded.questions[1].reference_from, ReferenceFrom::NotFound);
+        assert!(loaded.pending().is_empty());
+        // Format 1 (before the user's questions): every question is generated.
+        let old = json!({"version": 1, "project": "/w/p", "generated_at": "2026-11-01T00:00:00Z",
+            "sessions": 1, "cost_usd": 0.1, "confirmed": true, "questions": [
+            {"id": "Q1", "category": "rule", "question": "q", "reference": "r",
+             "sources": ["turn:s1:0"], "excerpts": ["never push"], "keep": true}]});
+        let loaded = QuestionSet::from_json(&old).unwrap();
+        assert_eq!(loaded.questions[0].origin, Origin::Generated);
+        assert_eq!(
+            loaded.questions[0].reference_from,
+            ReferenceFrom::Transcripts
+        );
+        let mut old = old;
+        old["questions"][0]["reference"] = json!("");
+        assert!(QuestionSet::from_json(&old).is_err());
+        old["version"] = json!(3);
+        assert!(QuestionSet::from_json(&old).is_err());
+    }
+
+    #[test]
+    fn references_are_found_only_when_grounded_in_a_turn() {
+        let mut set = QuestionSet::empty("/w/p");
+        for q in ["May I push?", "Why lz4?", "Who reviews?", "What broke?"] {
+            set.add_user(q, None, None).unwrap();
+        }
+        let ids: Vec<String> = set.pending().into_iter().map(|(id, _)| id).collect();
+        let prompt = reference_prompt("/w/p", &set.pending(), &excerpt());
+        assert!(prompt.contains("\n- [U1] May I push?"), "{prompt}");
+        assert!(prompt.contains("[turn:s1:0] USER: never push"), "{prompt}");
+        let answer = json!({"structured_output": {"answers": [
+            {"id": "U1", "found": true, "reference": "No.", "sources": ["turn:s1:0"]},
+            {"id": "U2", "found": true, "reference": "Speed.", "sources": ["turn:other:9"]},
+            {"id": "U3", "found": false, "reference": "", "sources": []},
+        ]}});
+        let found = parse_references(&answer, &excerpt(), &ids).unwrap();
+        assert_eq!(found.len(), 4);
+        assert_eq!(
+            found[0].1,
+            Some((
+                "No.".into(),
+                vec!["turn:s1:0".into()],
+                vec!["never push".into()]
+            ))
+        );
+        assert_eq!(
+            found[1].1, None,
+            "a source outside the excerpt is no grounding"
+        );
+        assert_eq!(found[2].1, None);
+        assert_eq!(found[3].1, None, "left out by the answer: not found");
+        set.confirmed = true;
+        assert_eq!(set.apply_references(found), (1, 3));
+        assert!(
+            !set.confirmed,
+            "a found reference is reviewed like a generated one"
+        );
+        assert_eq!(set.questions[0].reference_from, ReferenceFrom::Transcripts);
+        assert_eq!(set.questions[0].sources, ["turn:s1:0"]);
+        assert!(
+            set.questions[1..]
+                .iter()
+                .all(|q| q.reference.is_none() && q.reference_from == ReferenceFrom::NotFound)
+        );
+        assert!(set.pending().is_empty());
+        assert!(parse_references(&json!({"result": "sorry"}), &excerpt(), &ids).is_err());
+    }
+
+    #[test]
+    fn import_files_are_plain_lines_qa_pairs_or_json() {
+        // One question per line; comments and empty lines left out.
+        let (got, skipped) = parse_import("\u{feff}# mine\nMay I push?\n\n  Why lz4?  \n").unwrap();
+        assert_eq!(
+            got.iter().map(|q| q.question.as_str()).collect::<Vec<_>>(),
+            ["May I push?", "Why lz4?"]
+        );
+        assert!(got.iter().all(|q| q.answer.is_none()));
+        assert!(skipped.is_empty());
+        // Q:/A: pairs: an answer under its question, continuation lines, a question without one.
+        let text = "intro line\nQ: May I push?\nA: No,\nnever without asking.\nq: Why lz4?\n\
+                    Q: Who\nreviews?\nA: Ann.\nA: twice\nQ:\n";
+        let (got, skipped) = parse_import(text).unwrap();
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(got[0].question, "May I push?");
+        assert_eq!(got[0].answer.as_deref(), Some("No, never without asking."));
+        assert_eq!(got[1].question, "Why lz4?");
+        assert_eq!(got[1].answer, None);
+        assert_eq!(got[2].question, "Who reviews?");
+        assert_eq!(got[2].answer.as_deref(), Some("Ann."));
+        assert_eq!(skipped.len(), 3, "{skipped:?}");
+        assert!(skipped[0].starts_with("a line before the first Q"));
+        assert!(skipped[1].starts_with("an answer without its question"));
+        assert_eq!(skipped[2], "an empty Q:");
+        // JSON: a list or an object with questions, in the question file's entry shape.
+        let json = r#"{"questions": [
+            {"question": "May I push?", "reference": "No.", "category": "rule"},
+            {"question": "Why lz4?", "answer": "Speed."},
+            "Who reviews?",
+            {"question": "Gossip?", "category": "gossip"},
+            {"reference": "orphan"}]}"#;
+        let (got, skipped) = parse_import(json).unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].category.as_deref(), Some("rule"));
+        assert_eq!(got[0].answer.as_deref(), Some("No."));
+        assert_eq!(got[1].answer.as_deref(), Some("Speed."));
+        assert_eq!(got[2].question, "Who reviews?");
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        let (got, _) = parse_import(r#"[{"question": "q"}]"#).unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(parse_import("[not json").is_err());
+        assert!(parse_import(r#"{"other": 1}"#).is_err());
     }
 }

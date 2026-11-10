@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cli::{
-    BenchAction, BenchArm, Cli, Command, Harness, Profile, ProjectsAction, SummariesAction,
+    BenchAction, BenchArm, Cli, Command, Harness, Profile, ProjectsAction, QuestionsEdit,
+    SummariesAction,
 };
 use crate::config::{self, Config};
 use crate::daemon::{self, DaemonOptions};
@@ -276,6 +277,7 @@ pub fn run_cli(
         } => {
             let request = match action {
                 Some(BenchAction::Questions {
+                    edit,
                     questions,
                     review,
                     budget,
@@ -283,20 +285,50 @@ pub fn run_cli(
                     claude_dir,
                     dry_run,
                     yes,
-                }) => BenchRequest {
-                    questions_only: true,
-                    review: *review,
-                    arms: Vec::new(),
-                    questions: *questions,
-                    repeats: 1,
-                    budget: *budget,
-                    project: project.clone(),
-                    claude_dir: claude_dir.clone(),
-                    dry_run: *dry_run,
-                    yes: *yes,
-                },
+                }) => {
+                    let (edit, edit_project) = match edit {
+                        None => (None, None),
+                        Some(QuestionsEdit::Add {
+                            question,
+                            answer,
+                            category,
+                            project,
+                        }) => (
+                            Some(bench::Edit::Add {
+                                question: question.clone(),
+                                answer: answer.clone(),
+                                category: category.map(|c| c.name().to_string()),
+                            }),
+                            project.clone(),
+                        ),
+                        Some(QuestionsEdit::Import { file, project }) => (
+                            Some(bench::Edit::Import {
+                                file: absolute(file),
+                            }),
+                            project.clone(),
+                        ),
+                        Some(QuestionsEdit::Remove { id, project }) => (
+                            Some(bench::Edit::Remove { id: id.clone() }),
+                            project.clone(),
+                        ),
+                    };
+                    BenchRequest {
+                        questions_only: true,
+                        edit,
+                        review: *review,
+                        arms: Vec::new(),
+                        questions: *questions,
+                        repeats: 1,
+                        budget: *budget,
+                        project: edit_project.or_else(|| project.clone()),
+                        claude_dir: claude_dir.clone(),
+                        dry_run: *dry_run,
+                        yes: *yes,
+                    }
+                }
                 None => BenchRequest {
                     questions_only: false,
+                    edit: None,
                     review: false,
                     arms: arms.clone(),
                     questions: *questions,
@@ -1130,6 +1162,8 @@ fn run_hook(
 pub struct BenchRequest {
     /// `bench questions`.
     pub questions_only: bool,
+    /// `bench questions add|import|remove`.
+    pub edit: Option<bench::Edit>,
     /// `bench questions --review`.
     pub review: bool,
     /// The arms.
@@ -1162,6 +1196,7 @@ pub fn bench_options(
     request: &BenchRequest,
 ) -> Result<bench::Options, String> {
     let settings = Config::load(data_dir)?;
+    let terminal = terminal();
     Ok(bench::Options {
         arms: request.arms.clone(),
         questions: request.questions as usize,
@@ -1169,6 +1204,8 @@ pub fn bench_options(
         budget_usd: request.budget,
         dry_run: request.dry_run,
         yes: request.yes,
+        interactive: terminal && !request.yes && !request.dry_run && !request.review,
+        color: terminal && crate::prompt::color_allowed(&|name| std::env::var(name).ok()),
         project,
         claude,
         opencode,
@@ -1213,7 +1250,9 @@ fn run_bench(
     } else {
         Box::new(bench::Process)
     };
-    if request.questions_only {
+    if let Some(edit) = &request.edit {
+        bench::edit_command(&options, edit, out)
+    } else if request.questions_only {
         bench::questions_command(&options, request.review, harness.as_mut(), input, out)
     } else {
         bench::run(&options, harness.as_mut(), input, out)

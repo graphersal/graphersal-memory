@@ -164,15 +164,16 @@ pub enum Command {
     /// Codex's `codex exec --oss` with a local model).
     #[command(args_conflicts_with_subcommands = true)]
     Bench {
-        /// `questions`: generate or review the question set only.
+        /// `questions`: generate, review or add to the question set only.
         #[command(subcommand)]
         action: Option<BenchAction>,
         /// The arms to compare, comma-separated: none (no memory), files (your file memory),
         /// graph (graphersal-memory on a copy of your store).
         #[arg(long, value_enum, value_delimiter = ',', default_values_t = [BenchArm::None, BenchArm::Files, BenchArm::Graph])]
         arms: Vec<BenchArm>,
-        /// How many questions to generate when the project has no question set yet.
-        #[arg(long, value_name = "N", default_value_t = 12, value_parser = clap::value_parser!(u32).range(1..=60))]
+        /// How many generated questions to add to your own (generated when the project has
+        /// none yet); 0 asks only your own questions (`bench questions add`).
+        #[arg(long, value_name = "N", default_value_t = 12, value_parser = clap::value_parser!(u32).range(0..=60))]
         questions: u32,
         /// How often every question is answered per arm (the spread between runs).
         #[arg(long, value_name = "R", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=10))]
@@ -306,11 +307,16 @@ fn parse_model(text: &str) -> Result<String, String> {
 /// What `bench questions` does.
 #[derive(Debug, Subcommand, PartialEq)]
 pub enum BenchAction {
-    /// Generate a new question set from your raw transcripts (asks before spending), or with
-    /// --review show the current one and confirm it.
+    /// Generate a new question set from your raw transcripts (asks before spending; your own
+    /// questions are kept and their missing references looked up), with --review show the
+    /// current one and confirm it, or add your own questions (`add`, `import`, `remove`).
+    #[command(args_conflicts_with_subcommands = true)]
     Questions {
-        /// How many questions to generate.
-        #[arg(long, value_name = "N", default_value_t = 12, value_parser = clap::value_parser!(u32).range(1..=60))]
+        /// Add, import or remove your own questions (no model is called).
+        #[command(subcommand)]
+        edit: Option<QuestionsEdit>,
+        /// How many questions to generate (0: only look up the references of your own).
+        #[arg(long, value_name = "N", default_value_t = 12, value_parser = clap::value_parser!(u32).range(0..=60))]
         questions: u32,
         /// Show the current question set with its references and sources, and confirm it
         /// (edit the file first to fix or drop questions).
@@ -333,6 +339,67 @@ pub enum BenchAction {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+}
+
+/// What `bench questions add|import|remove` does.
+#[derive(Debug, Subcommand, PartialEq)]
+pub enum QuestionsEdit {
+    /// Add a question of your own: something you want the assistant to remember.
+    Add {
+        /// The question, as you would ask it.
+        question: String,
+        /// The right answer (the judge scores against it); without it, the bench looks the
+        /// answer up in your past sessions.
+        #[arg(long, value_name = "TEXT")]
+        answer: Option<String>,
+        /// The category in the report (default: other).
+        #[arg(long, value_enum)]
+        category: Option<QuestionCategory>,
+        /// The project (default: the git repository root of the current directory).
+        #[arg(long, value_name = "ROOT")]
+        project: Option<PathBuf>,
+    },
+    /// Add the questions of a file: one per line, `Q:`/`A:` pairs (an answer under its
+    /// question), or JSON entries like the question file's; duplicates are skipped.
+    Import {
+        /// The file.
+        file: PathBuf,
+        /// The project (default: the git repository root of the current directory).
+        #[arg(long, value_name = "ROOT")]
+        project: Option<PathBuf>,
+    },
+    /// Remove a question by its id (U2, Q3; `bench questions --review` lists them).
+    Remove {
+        /// The question's id.
+        id: String,
+        /// The project (default: the git repository root of the current directory).
+        #[arg(long, value_name = "ROOT")]
+        project: Option<PathBuf>,
+    },
+}
+
+/// The category of a question of your own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum QuestionCategory {
+    /// A standing instruction (how to work, what never to do).
+    #[value(name = "rules", alias = "rule")]
+    Rules,
+    /// A choice made, with its reason.
+    #[value(name = "decisions", alias = "decision")]
+    Decisions,
+    /// What happened in a session.
+    History,
+}
+
+impl QuestionCategory {
+    /// The category's name in the question file.
+    pub fn name(self) -> &'static str {
+        match self {
+            QuestionCategory::Rules => "rule",
+            QuestionCategory::Decisions => "decision",
+            QuestionCategory::History => "history",
+        }
+    }
 }
 
 /// One arm of the A/B.
@@ -732,8 +799,80 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(parse(&["bench", "--arms", "files,mem0"]).is_err());
-        assert!(parse(&["bench", "--questions", "0"]).is_err());
+        // 0 generated questions: only the user's own are asked.
+        match parse(&["bench", "--questions", "0"]).unwrap().command {
+            Command::Bench { questions, .. } => assert_eq!(questions, 0),
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["bench", "--questions", "61"]).is_err());
         assert!(parse(&["bench", "--budget", "-1"]).is_err());
+    }
+
+    #[test]
+    fn bench_questions_add_import_remove_parse() {
+        let edit = |args: &[&str]| match parse(args).unwrap().command {
+            Command::Bench {
+                action: Some(BenchAction::Questions { edit, .. }),
+                ..
+            } => edit,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            edit(&[
+                "bench",
+                "questions",
+                "add",
+                "Which database?",
+                "--answer",
+                "SQLite",
+                "--category",
+                "decisions",
+            ]),
+            Some(QuestionsEdit::Add {
+                question: "Which database?".into(),
+                answer: Some("SQLite".into()),
+                category: Some(QuestionCategory::Decisions),
+                project: None,
+            })
+        );
+        assert_eq!(
+            edit(&["bench", "questions", "add", "Q?", "--category", "rule"]),
+            Some(QuestionsEdit::Add {
+                question: "Q?".into(),
+                answer: None,
+                category: Some(QuestionCategory::Rules),
+                project: None,
+            })
+        );
+        assert_eq!(QuestionCategory::Rules.name(), "rule");
+        assert_eq!(QuestionCategory::Decisions.name(), "decision");
+        assert_eq!(QuestionCategory::History.name(), "history");
+        assert_eq!(
+            edit(&[
+                "bench",
+                "questions",
+                "import",
+                "mine.txt",
+                "--project",
+                "/w/p"
+            ]),
+            Some(QuestionsEdit::Import {
+                file: PathBuf::from("mine.txt"),
+                project: Some(PathBuf::from("/w/p")),
+            })
+        );
+        assert_eq!(
+            edit(&["bench", "questions", "remove", "U2"]),
+            Some(QuestionsEdit::Remove {
+                id: "U2".into(),
+                project: None,
+            })
+        );
+        assert_eq!(edit(&["bench", "questions", "--questions", "0"]), None);
+        assert!(parse(&["bench", "questions", "add"]).is_err());
+        assert!(parse(&["bench", "questions", "add", "Q?", "--category", "gossip"]).is_err());
+        // An edit takes no generation options.
+        assert!(parse(&["bench", "questions", "--review", "add", "Q?"]).is_err());
     }
 
     #[test]

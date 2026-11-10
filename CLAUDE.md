@@ -144,15 +144,21 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `Harness` trait (`Process`: the real `claude -p` through `harness::run`; `DryRun`: canned,
     no cost), the estimate and the cost guard (refuse above the budget, `--max-budget-usd` per
     call, stop at the budget), the run (warm-up per arm, run id at the start of every prompt,
-    repeats, a judge call per answer), `Usage` and the verdict parsing;
-    `bench/questions.rs` the question set (generated from RAW transcripts with turn ids, never
-    from our summaries; `bench/questions/<project slug>.json`, user-editable, confirmed by
-    `--review`); `bench/arms.rs` the sandbox per arm (`mcp.json`, `settings.json`, `system.md`,
+    repeats, a judge call per answer; none for a question without a reference), `Usage` and the
+    verdict parsing; `edit_command` (`bench questions add|import|remove`, no model) and the
+    optional interactive step `ask_own_questions`; `find_references` (`Kind::Reference`: the
+    user's questions without an answer looked up in the same raw transcripts);
+    `bench/questions.rs` the question set (format 2: `origin` user|generated, `reference_from`
+    transcripts|user|pending|not_found; format 1 loads as all generated; generated from RAW
+    transcripts with turn ids, never from our summaries; `bench/questions/<project slug>.json`,
+    user-editable, confirmed by `--review`; a regeneration keeps the user's questions;
+    `parse_import` of text, `Q:`/`A:` and JSON); `bench/arms.rs` the sandbox per arm (`mcp.json`, `settings.json`, `system.md`,
     `cwd/`; the graph arm on `Store::fork_dir` of the live store served by `mcp --no-daemon`);
-    `bench/report.rs` the aggregation and `report.md`/`report.json` in `bench/<timestamp>/`;
+    `bench/report.rs` the aggregation (per category, per origin, unjudged rows in no mean) and
+    `report.md`/`report.json` in `bench/<timestamp>/`;
   - `src/bench_tests.rs`: `bench` in-process with a scripted harness on a temporary home and data
     directory (the live files unchanged, the sandboxes never naming them, report numbers, budget
-    refusal and stop, confirmation, dry run);
+    refusal and stop, confirmation, dry run, the user's own questions);
   - `src/projects.rs`: project identity, `<data dir>/projects.json`: a stable id per project
     (its path at first sight; legacy entries keep their path), looked up at every connection and
     indexed session by git remote (normalized, origin first), then path; a root commit shared

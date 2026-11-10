@@ -14,10 +14,14 @@ graphersal-memory bench --dry-run              # plan, sandboxes, estimate; a fa
 graphersal-memory bench                        # estimate, ask, generate questions if needed, run
 graphersal-memory bench questions              # generate a new question set only (asks first)
 graphersal-memory bench questions --review     # show the question set with its sources, confirm it
+graphersal-memory bench questions add "Which database do we use?" --answer "SQLite"   # your own
+graphersal-memory bench questions import my-questions.txt   # your own, from a file
+graphersal-memory bench questions remove U2     # drop a question by its id
 ```
 
-Options of `bench`: `--arms none,files,graph` (the default: all three), `--questions N` (12; used
-when the project has no question set yet), `--repeats R` (1), `--budget USD` (3), `--project
+Options of `bench`: `--arms none,files,graph` (the default: all three), `--questions N` (12: how
+many generated questions are asked besides your own, generated when the project has none yet;
+`0` asks only your own), `--repeats R` (1), `--budget USD` (3), `--project
 ROOT` (default: the git root of the current directory), `--claude-dir DIR` (read the memory
 files, instruction files and transcripts from another Claude Code directory, for example a copy;
 the harness keeps its own), `--yes` (do not ask), `--dry-run`. The harness command is
@@ -86,6 +90,49 @@ that no file and no argument names the live configuration or store.
   false` to drop a question, then confirm. `bench` asks before it uses an unconfirmed set;
   `--yes` accepts it, and the report then says it was not reviewed.
 
+### Your own questions
+
+Besides the generated questions you can add your own: the things you want the assistant to
+remember. They are kept in the same file, marked `"origin": "user"` (ids `U1`, `U2`, ...; the
+generated ones are `"generated"`, `Q1`, `Q2`, ...).
+
+- **Adding.** `bench questions add "<question>" [--answer "<the right answer>"] [--category
+  rules|decisions|history]` adds one; without a category it is reported as **other**, so a
+  question you did not classify does not change the generated categories' numbers.
+  `bench questions import FILE` adds the questions of a file: one per line, or `Q:` / `A:` pairs
+  (the answer under its question; a line without a prefix continues the line before; lines
+  starting with `#` are comments), or JSON (a list, or an object with `questions`, of entries
+  like the question file's: `question`, optional `reference` or `answer`, optional `category`).
+  It reports what it added and what it skipped; a question already in the set (the same words,
+  ignoring case and punctuation) is skipped. `bench questions remove U2` drops one by its id;
+  `"keep": false` in the file drops it as it drops a generated one.
+- **Interactively.** When `bench` or `bench questions` runs in a terminal (without `--yes` and
+  outside `--dry-run`), it first offers one optional step, "Add your own questions?": type a
+  question, then its right answer or just Enter; an empty question line ends the step.
+- **Mixing.** Your questions are always asked. `--questions N` is the number of generated
+  questions asked besides them (the first N kept ones of the set); `--questions 0` asks only
+  yours. Generating a new set (`bench questions`) replaces the generated questions and keeps
+  yours; a generated question with the same words as one of yours is left out.
+- **References.** With `--answer` (or an `A:` line, or a `reference` in JSON), your answer IS the
+  reference (`"reference_from": "user"`). Without one, the next `bench questions` or `bench`
+  asks your harness to find the answer in the same raw transcripts the generator reads (never
+  graphersal-memory's summaries) and to name the turns it comes from; that call is part of the
+  estimate shown before anything is spent. A found reference is reviewed like a generated one
+  (`"reference_from": "transcripts"`, with its source turns). When the transcripts do not
+  answer the question (`"reference_from": "not_found"`, `"reference": null`), it is still asked
+  to every arm and its answers are shown in the report under "Questions without a reference",
+  but it is **not judged and is in no score or mean**: judging without a reference could only
+  reward a plausible guess. Write a reference into the file to have it scored, or set
+  `"reference_from": "pending"` to have it looked up again.
+- **The caveat of your own answers.** A question with your own answer is judged against your
+  wording: a short note or an answer phrased differently can score differently than against a
+  reference written from the transcripts. The judge is told the reference is yours and to compare
+  facts, and the report counts these questions in its caveats.
+- **The report** breaks the scores down by origin (your questions, generated questions) as well
+  as by category; the headline mean holds every judged answer of both.
+- A question file from before your own questions (format version 1) still loads: all its
+  questions count as generated.
+
 ### Running
 
 - **Per-run id.** Every question starts with the run id. Otherwise a repeated run reuses the
@@ -98,8 +145,9 @@ that no file and no argument names the live configuration or store.
 
 A separate call (the same harness, no tools) scores each answer from 0 to 5 against the reference
 and flags **confidently wrong** answers: wrong facts stated as true, which are worse than "I don't
-know". A failed answer or judging counts as 0 and is named in the caveats. The report gives, per
-arm and per category:
+know". A failed answer or judging counts as 0 and is named in the caveats. An answer to a question
+without a reference is not judged (see [Your own questions](#your-own-questions)). The report
+gives, per arm and per category (and per origin when your own questions are in the run):
 
 - mean score, and the number of confidently wrong answers;
 - mean cost (list price, as `claude -p` reports it), input tokens (plain, cache writes and cache
@@ -110,8 +158,8 @@ arm and per category:
 ### Cost guard
 
 Before anything is spent, `bench` prints an estimate (questions x arms x repeats x about $0.05
-per answer and $0.02 per judging, plus a warm-up per arm and the generation of the questions) and
-asks. A run whose estimate is above `--budget` is refused; every call carries a
+per answer and $0.02 per judging, plus a warm-up per arm, the generation of the questions and the
+lookup of the references of your own questions) and asks. A run whose estimate is above `--budget` is refused; every call carries a
 `--max-budget-usd` cap; and the run stops, with a partial report, when its real spend would pass
 the budget. `--dry-run` builds everything with a fake harness that calls no model.
 
