@@ -156,6 +156,7 @@ pub fn run(
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             Ok(None) => {
+                kill_tree(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
@@ -174,6 +175,20 @@ pub fn run(
         stdout: String::from_utf8_lossy(&out).into_owned(),
         stderr: String::from_utf8_lossy(&err).into_owned(),
     })
+}
+
+/// Windows: ends the process `pid` with its children (`taskkill /T`). npm's `claude.cmd` runs
+/// in `cmd.exe`, which starts `node.exe`: killing `cmd.exe` alone would leave the harness
+/// running (and spending). Elsewhere the harness is the child itself; nothing to do.
+fn kill_tree(pid: u32) {
+    if cfg!(windows) {
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 #[cfg(test)]
@@ -278,5 +293,67 @@ mod tests {
         );
         assert!(slow.unwrap_err().contains("did not finish"));
         assert!(run(&[], "", dir.path(), &[], Duration::from_secs(1)).is_err());
+    }
+
+    /// npm's `claude.cmd` the way std runs it: through `cmd.exe`, the arguments quoted for it
+    /// (a JSON schema and an empty argument as `summaries::harness_args` passes them), the
+    /// prompt on stdin; a timeout ends the batch file's children too.
+    #[cfg(windows)]
+    #[test]
+    fn a_batch_file_runs_with_quoted_arguments_and_its_tree_is_killed_on_timeout() {
+        let dir = crate::mcp_tests::TempDir::new("harness-cmd");
+        std::fs::write(
+            dir.path().join("fake.cmd"),
+            "@echo off\r\necho ARGS %*\r\nfindstr \"^\"\r\necho err 1>&2\r\nexit /b 3\r\n",
+        )
+        .unwrap();
+        let program = dir.path().join("fake").display().to_string();
+        let schema = r#"{"type":"object","properties":{"a":{"type":"string"}}}"#;
+        let out = run(
+            &[
+                program,
+                "-p".into(),
+                "--json-schema".into(),
+                schema.into(),
+                "--tools".into(),
+                String::new(),
+            ],
+            "hello\nworld",
+            dir.path(),
+            &[("X", "1")],
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert_eq!(out.code, Some(3), "{out:?}");
+        assert!(
+            out.stdout.contains("hello") && out.stdout.contains("world"),
+            "{out:?}"
+        );
+        assert!(out.stdout.contains("--json-schema"), "{out:?}");
+        assert!(out.stdout.contains("properties"), "{out:?}");
+        assert_eq!(out.stderr.trim(), "err");
+
+        std::fs::write(
+            dir.path().join("slow.cmd"),
+            "@echo off\r\nping -n 30 127.0.0.1 > nul\r\n",
+        )
+        .unwrap();
+        let started = Instant::now();
+        let slow = run(
+            &[dir.path().join("slow").display().to_string()],
+            "",
+            dir.path(),
+            &[],
+            Duration::from_millis(500),
+        );
+        assert!(slow.unwrap_err().contains("did not finish"));
+        assert!(started.elapsed() < Duration::from_secs(20));
+        // The batch file's child (`ping`) is gone with it.
+        let left = Command::new("tasklist")
+            .args(["/NH", "/FI", "IMAGENAME eq PING.EXE"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&left.stdout).to_lowercase();
+        assert!(!text.contains("ping.exe"), "{text}");
     }
 }

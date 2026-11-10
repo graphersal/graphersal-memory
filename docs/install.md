@@ -8,6 +8,13 @@ repository) with two Claude Code memory files and a `settings.json` of `{"theme"
 Colour was off (`NO_COLOR=1`); in a colour terminal the step titles are bold, the explanations
 dim and the default green. An answer of Enter shows as nothing after the prompt.
 
+On Windows the same commands write the same parts into the same files under your profile
+directory (`%USERPROFILE%\.claude.json`, `%USERPROFILE%\.claude\`, `%USERPROFILE%\.config\opencode\`,
+`%USERPROFILE%\.codex\`, `%USERPROFILE%\.cursor\`), the data directory is
+`%LOCALAPPDATA%\graphersal-memory`, and Cursor's hook commands are written for PowerShell. These
+outputs were not captured on Windows; what is tested there and what is not yet is in
+[Supported harnesses: Windows](harnesses.md#windows).
+
 ## `graphersal-memory install`
 
 Answers: Enter, Enter, Enter, Enter, `2`, `2`, Enter. The model download is real (Hugging Face);

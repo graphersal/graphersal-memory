@@ -303,7 +303,7 @@ pub struct OpenCodePaths {
 impl OpenCodePaths {
     /// Resolves the paths from the environment (`env` reads one variable) and detects the line
     /// (`opencode --version` on `PATH`, else its data): `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
-    /// `OPENCODE_DB`, 2.x `OPENCODE_CONFIG_DIR`, home `HOME` else `USERPROFILE`.
+    /// `OPENCODE_DB`, 2.x `OPENCODE_CONFIG_DIR`, home [`crate::store::home_dir`].
     pub fn resolve(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         Self::resolve_for(env, detect(env, None, true)?)
     }
@@ -314,11 +314,7 @@ impl OpenCodePaths {
         detected: Detected,
     ) -> Result<Self, String> {
         let set = |name: &str| env(name).filter(|value| !value.is_empty());
-        let home = PathBuf::from(
-            set("HOME")
-                .or_else(|| set("USERPROFILE"))
-                .ok_or("cannot find the home directory (HOME is not set)")?,
-        );
+        let home = crate::store::home_dir(env)?;
         let xdg_config = set("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config"))
@@ -692,7 +688,7 @@ pub fn plugin_text(exe: &Path, dir_args: &[String]) -> String {
 // When a session starts it runs `graphersal-memory hook session-start --harness opencode`\n\
 // (queues the indexing of past sessions; 1.x shows its line as a toast); when opencode shuts\n\
 // down it runs `session-end` for the sessions it saw. Both are detached: a session never\n\
-// waits for them.\n\
+// waits for them (and on Windows no console window opens).\n\
 import {{ spawn }} from \"node:child_process\";\n\
 \n\
 const COMMAND = {command};\n\
@@ -709,6 +705,7 @@ const server = async ({{ client }}) => {{\n\
         stdin: new Blob([JSON.stringify(input)]),\n\
         stdout: show ? \"pipe\" : \"ignore\",\n\
         stderr: \"ignore\",\n\
+        windowsHide: true,\n\
       }});\n\
       if (show) {{\n\
         new Response(child.stdout).text().then((line) => {{\n\
@@ -743,7 +740,7 @@ const setup = async (ctx) => {{\n\
   const run = (event, input) => {{\n\
     if (off()) return;\n\
     try {{\n\
-      const child = spawn(COMMAND[0], args(event), {{ stdio: [\"pipe\", \"ignore\", \"ignore\"], detached: true }});\n\
+      const child = spawn(COMMAND[0], args(event), {{ stdio: [\"pipe\", \"ignore\", \"ignore\"], detached: true, windowsHide: true }});\n\
       child.on(\"error\", () => {{}});\n\
       child.stdin.on(\"error\", () => {{}});\n\
       child.stdin.end(JSON.stringify(input));\n\
@@ -924,14 +921,15 @@ mod tests {
         let text = home.path().display().to_string();
         let env = |name: &str| match name {
             "HOME" => Some(text.clone()),
-            "OPENCODE_CONFIG_DIR" => Some("/oc".to_string()),
+            "OPENCODE_CONFIG_DIR" => Some(crate::mcp_tests::abs("/oc")),
             _ => None,
         };
         let custom = OpenCodePaths::resolve_for(&env, Detected::given(Major::V2)).unwrap();
-        assert_eq!(custom.config_dir, PathBuf::from("/oc"));
+        let oc = PathBuf::from(crate::mcp_tests::abs("/oc"));
+        assert_eq!(custom.config_dir, oc);
         assert_eq!(
             custom.plugin_file,
-            PathBuf::from("/oc/plugins/graphersal-memory.js")
+            oc.join("plugins").join("graphersal-memory.js")
         );
         let old = OpenCodePaths::resolve_for(&env, Detected::given(Major::V1)).unwrap();
         assert_eq!(

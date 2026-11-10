@@ -556,6 +556,34 @@ Cursor command. With Cursor alone, summaries stay off unless another harness's c
 (`claude -p`, `opencode run`, `codex exec`) is installed and set as `summaries.harness_command`;
 the raw turns are indexed either way.
 
+## Windows
+
+Windows 10 version 1803 or later, x86_64. CI runs the whole test suite on Windows, including the
+daemon and the install/hook/uninstall tests through the real binary; no harness has been run live
+on Windows yet. The home directory is your profile directory (`%USERPROFILE%`), as the harnesses
+themselves resolve `~` there (Node's and Bun's `os.homedir()`, Rust's `dirs::home_dir`); a `HOME`
+variable set by Git Bash or Cygwin is used only when `USERPROFILE` is missing.
+
+| Harness | Files on Windows | Hooks run in | Source |
+|---|---|---|---|
+| Claude Code | `%USERPROFILE%\.claude.json`, `%USERPROFILE%\.claude\` (or `%CLAUDE_CONFIG_DIR%`) | Git Bash; PowerShell when Git Bash is not installed (see below) | [settings](https://code.claude.com/docs/en/settings) ("On Windows, `~/.claude` means `%USERPROFILE%\.claude`"), [hooks](https://code.claude.com/docs/en/hooks) |
+| opencode 1.x and 2.x | `%USERPROFILE%\.config\opencode\` and `%USERPROFILE%\.local\share\opencode\opencode.db` (the XDG layout, also on Windows; `XDG_CONFIG_HOME`/`XDG_DATA_HOME` move them) | the plugin starts the binary directly (no shell), without a console window | [1.x `global.ts`](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/core/src/global.ts), [2.x `global-roots.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/util/src/global-roots.ts) |
+| Codex | `%USERPROFILE%\.codex\` (or `%CODEX_HOME%`, which Codex canonicalizes; so does install, so the hook trust keys Codex records match) | `cmd.exe /C` (`%ComSpec%`) | [`utils/home-dir`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/utils/home-dir/src/lib.rs), [`hooks/src/engine/command_runner.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/hooks/src/engine/command_runner.rs) |
+| Cursor | `%USERPROFILE%\.cursor\` | PowerShell, so install writes the hook commands in PowerShell's form (`& 'C:\...\graphersal-memory.exe' hook ...`) | [hooks](https://cursor.com/docs/hooks) ("On Windows, the desktop app runs hook commands through PowerShell") |
+
+- **Hook commands** for Claude Code and Codex start with the binary's path in double quotes,
+  which Git Bash and `cmd.exe` both run. PowerShell does not (a quoted path is a string there),
+  so a Claude Code without Git Bash, which then runs hooks in PowerShell, does not run our hooks
+  yet: the memory tools work, the session start line and the indexing at session start and end
+  do not (`import --sessions` indexes them).
+- **The daemon** listens on an `AF_UNIX` socket (`%LOCALAPPDATA%\graphersal-memory\run\daemon.sock`),
+  which Windows has had since version 1803; it is started detached, without a console window.
+- **Summaries and `bench`** find npm's `claude.cmd` through `PATH` and `PATHEXT`; a run that
+  exceeds its time limit is ended with its child processes (`taskkill /T`), since `claude.cmd`
+  runs `node.exe` under `cmd.exe`.
+- **Recorded paths** (edited files in transcripts and opencode's database) are compared without
+  case and with either separator, and stored relative to the project with `/`.
+
 ## Without a terminal (later)
 
 Analysts, testers and managers who use desktop apps such as Claude Desktop instead of a CLI agent

@@ -1860,7 +1860,10 @@ fn opencode_uninstall_exports_every_memory_as_markdown_and_deletes_nothing() {
         b"",
     );
     assert_eq!(code, 0, "{out}");
-    let export = home.path().join("graphersal-memory-export/opencode");
+    let export = home
+        .path()
+        .join("graphersal-memory-export")
+        .join("opencode");
     assert!(out.contains(&export.display().to_string()), "{out}");
     assert!(out.contains("opencode has no file memory"), "{out}");
     let dir = export.join(crate::import::claude_slug(&project));
@@ -2080,7 +2083,7 @@ fn codex_writes_into_its_config_and_uninstall_still_removes_only_our_parts() {
     // Codex records project trust and the trust of our hooks (as it does after `/hooks`).
     let hooks = setup.codex.hooks_file.display().to_string();
     let added = format!(
-        "\n[projects.\"/w/app\"]\ntrust_level = \"trusted\"\n\n[hooks.state.\"{hooks}:session_start:0:0\"]\ntrusted_hash = \"sha256:1\"\n\n[hooks.state.\"{hooks}:session_end:0:0\"]\ntrusted_hash = \"sha256:2\"\n"
+        "\n[projects.\"/w/app\"]\ntrust_level = \"trusted\"\n\n[hooks.state.'{hooks}:session_start:0:0']\ntrusted_hash = \"sha256:1\"\n\n[hooks.state.'{hooks}:session_end:0:0']\ntrusted_hash = \"sha256:2\"\n"
     );
     let mut text = read(&setup.codex.config_file);
     text.push_str(&added);
@@ -2663,7 +2666,7 @@ fn cursor_uninstall_exports_every_memory_as_markdown() {
         b"",
     );
     assert_eq!(code, 0, "{out}");
-    let export = home.path().join("graphersal-memory-export/cursor");
+    let export = home.path().join("graphersal-memory-export").join("cursor");
     assert!(out.contains(&export.display().to_string()), "{out}");
     assert!(out.contains("Cursor has no file memory"), "{out}");
     assert!(out.contains("~/.cursor/rules"), "{out}");

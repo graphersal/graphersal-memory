@@ -132,14 +132,21 @@ pub fn project_key(flag: Option<&Path>, cwd: &Path) -> String {
 /// `path` canonicalized (without Windows' verbatim prefix), else as given.
 pub(crate) fn canonical(path: &Path) -> PathBuf {
     match std::fs::canonicalize(path) {
-        Ok(path) => {
-            let text = path.display().to_string();
-            match text.strip_prefix(r"\\?\") {
-                Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
-                _ => path,
-            }
-        }
+        Ok(path) => without_verbatim_prefix(path),
         Err(_) => path.to_path_buf(),
+    }
+}
+
+/// `path` without Windows' verbatim prefix: `\\?\C:\x` is `C:\x`, `\\?\UNC\server\share` is
+/// `\\server\share` (as Codex normalizes its home, `codex-rs/utils/absolute-path`).
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.display().to_string();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(share) => PathBuf::from(format!(r"\\{share}")),
+            None => PathBuf::from(rest),
+        },
+        None => path,
     }
 }
 
@@ -547,5 +554,17 @@ mod tests {
         let flagged = project_key(Some(&nested), &dir);
         assert_eq!(flagged, canonical(&nested).display().to_string());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_verbatim_prefix_is_dropped() {
+        let strip = |text: &str| {
+            without_verbatim_prefix(PathBuf::from(text))
+                .display()
+                .to_string()
+        };
+        assert_eq!(strip(r"\\?\C:\Users\u"), r"C:\Users\u");
+        assert_eq!(strip(r"\\?\UNC\server\share\x"), r"\\server\share\x");
+        assert_eq!(strip("/home/u"), "/home/u");
     }
 }

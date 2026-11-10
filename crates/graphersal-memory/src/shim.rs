@@ -175,6 +175,7 @@ fn spawn_daemon(location: &DaemonLocation) -> Result<Child, String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        keep_std_handles_from_children();
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -186,6 +187,42 @@ fn spawn_daemon(location: &DaemonLocation) -> Result<Child, String> {
             location.exe.display()
         )
     })
+}
+
+/// Windows: makes this process's standard handles non-inheritable before the daemon is spawned.
+///
+/// std creates every child with handle inheritance on (`bInheritHandles`), so a child gets every
+/// inheritable handle of its parent, not only the three it is given. The standard handles of a
+/// shim or a hook are the harness's pipes, inheritable because the harness passed them down; a
+/// daemon inheriting them would hold the harness's pipes open for its whole life (hours), and
+/// the harness would wait for the end of the output of a process that has long exited. Unix
+/// needs nothing: the child's 0, 1 and 2 are replaced, and every other descriptor std opens is
+/// close-on-exec. std's `CommandExt::inherit_handles` would do this per child, but it is
+/// unstable (rust-lang/rust#146407).
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn keep_std_handles_from_children() {
+    use std::os::windows::io::AsRawHandle;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    let handles = [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ];
+    for handle in handles {
+        if !handle.is_null() {
+            // SAFETY: SetHandleInformation only changes the inherit flag of a handle this
+            // process owns for its whole life (a standard handle); an invalid or pseudo handle
+            // makes the call fail, which changes nothing and is ignored.
+            unsafe {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
 }
 
 /// Sends one line and reads the one-line answer as JSON.

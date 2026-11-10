@@ -431,13 +431,8 @@ fn build_v2(
         ..Transcript::default()
     };
     let mut hashed: Vec<u8> = Vec::new();
-    let absolute = |file: &str| -> String {
-        if file.is_empty() || Path::new(file).is_absolute() || directory.is_empty() {
-            file.to_string()
-        } else {
-            Path::new(directory).join(file).display().to_string()
-        }
-    };
+    // Recorded text, maybe of another platform: joined as text, not as a local path.
+    let absolute = |file: &str| -> String { crate::transcript::join_text(directory, file) };
     for (message_id, kind, at, data) in messages {
         hashed.extend_from_slice(data.as_bytes());
         hashed.push(b'\n');

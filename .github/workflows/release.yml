@@ -163,6 +163,26 @@ jobs:
           grep -q '"id":2,.*"name":"remember"' mcp.out
           grep '"id":3,' mcp.out | grep -q '"isError":false'
           grep '"id":4,' mcp.out | grep -q 'Smoke test memory'
+
+          # The same read through the daemon (the shim starts it on demand; AF_UNIX on every
+          # platform, Windows included), which then exits after its short idle time.
+          export GRAPHERSAL_MEMORY_IDLE=3s
+          {
+            echo "$init"
+            echo "$inited"
+            echo '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"memories","arguments":{}}}'
+          } | "${run[@]}" mcp --data-dir "$data" --project "$project" > daemon.out
+          cut -c1-300 daemon.out
+          grep '"id":5,' daemon.out | grep -q 'Smoke test memory'
+          "${run[@]}" status --data-dir "$data" > status.txt
+          cat status.txt
+          grep -q 'daemon: running' status.txt
+          for _ in $(seq 1 60); do
+            "${run[@]}" status --data-dir "$data" > status.txt
+            grep -q 'daemon: not running' status.txt && break
+            sleep 1
+          done
+          grep -q 'daemon: not running' status.txt
       - name: Archive
         run: |
           set -euo pipefail

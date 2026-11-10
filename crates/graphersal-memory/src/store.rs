@@ -41,6 +41,27 @@ impl Platform {
     }
 }
 
+/// The user's home directory as the harnesses see it (`env` reads one variable): on Windows
+/// `USERPROFILE`, else `HOME` (Node's and Bun's `os.homedir()` and Rust's `dirs::home_dir` read
+/// the profile directory there; a `HOME` set by Git Bash or Cygwin may differ); elsewhere
+/// `HOME`, else `USERPROFILE`.
+pub fn home_dir(env: &dyn Fn(&str) -> Option<String>) -> Result<PathBuf, String> {
+    home_dir_for(env, cfg!(windows))
+}
+
+fn home_dir_for(env: &dyn Fn(&str) -> Option<String>, windows: bool) -> Result<PathBuf, String> {
+    let set = |name: &str| env(name).filter(|value| !value.is_empty());
+    let (first, second) = if windows {
+        ("USERPROFILE", "HOME")
+    } else {
+        ("HOME", "USERPROFILE")
+    };
+    set(first)
+        .or_else(|| set(second))
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("cannot find the home directory ({first} is not set)"))
+}
+
 /// Resolves the data directory from the flag, the environment (`env` reads one variable) and
 /// the platform. Fails when no directory can be found (no home directory).
 pub fn resolve_data_dir(
@@ -149,6 +170,33 @@ mod tests {
             resolve_data_dir(None, &env, Platform::MacOs).unwrap(),
             PathBuf::from("/from/env")
         );
+    }
+
+    #[test]
+    fn the_home_directory_is_the_profile_on_windows() {
+        let both = env_of(&[("HOME", "/home/u"), ("USERPROFILE", "/profile")]);
+        assert_eq!(
+            home_dir_for(&both, false).unwrap(),
+            PathBuf::from("/home/u")
+        );
+        assert_eq!(
+            home_dir_for(&both, true).unwrap(),
+            PathBuf::from("/profile")
+        );
+        let home = env_of(&[("HOME", "/home/u")]);
+        assert_eq!(home_dir_for(&home, true).unwrap(), PathBuf::from("/home/u"));
+        let profile = env_of(&[("USERPROFILE", "/profile")]);
+        assert_eq!(
+            home_dir_for(&profile, false).unwrap(),
+            PathBuf::from("/profile")
+        );
+        let none = env_of(&[]);
+        assert!(
+            home_dir_for(&none, true)
+                .unwrap_err()
+                .contains("USERPROFILE")
+        );
+        assert!(home_dir_for(&none, false).unwrap_err().contains("HOME"));
     }
 
     #[test]

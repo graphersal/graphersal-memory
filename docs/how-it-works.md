@@ -77,8 +77,10 @@ or `GRAPHERSAL_MEMORY_DIR` gets `<data dir>/run`, so each data directory has a d
 ## Socket, trust and the handshake
 
 - On every platform, the shim and the daemon talk over a Unix domain socket (`AF_UNIX`, also
-  available on Windows 10 1803 and later). Windows named pipes are the fallback if `AF_UNIX`
-  proves unreliable there.
+  available on Windows 10 1803 and later; the end-to-end daemon tests run over it in CI on
+  Windows too). Windows named pipes stay the fallback if `AF_UNIX` proves unreliable there. On
+  Windows the process that starts the daemon first makes its own standard handles
+  non-inheritable, so the detached daemon never holds the harness's pipes open.
 - The trust boundary is your OS user. On Unix the socket file is readable only by you (`0600`), in
   a directory only you can open (`0700`). On Windows the run directory is inside your own
   `%LOCALAPPDATA%`. Any process of your user can connect, which is no more than it could already

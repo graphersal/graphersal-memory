@@ -130,9 +130,19 @@ pub fn mcp_entry(setup: &Setup, profile: &str) -> Value {
     setup.cursor_agent().mcp_entry(&setup.exe, &args)
 }
 
-/// The hook command of an event (`session-start`, `session-end`).
+/// The hook command of an event (`session-start`, `session-end`). On Windows Cursor runs hook
+/// commands through PowerShell (cursor.com/docs/hooks), so the command is PowerShell's.
 pub fn hook_command(setup: &Setup, event: &str) -> String {
-    format!("{} --harness cursor", setup.hook_command(event))
+    hook_command_for(setup, event, cfg!(windows))
+}
+
+fn hook_command_for(setup: &Setup, event: &str, powershell: bool) -> String {
+    let command = if powershell {
+        setup.powershell_hook_command(event)
+    } else {
+        setup.hook_command(event)
+    };
+    format!("{command} --harness cursor")
 }
 
 /// The hook entry of an event, as it goes into `hooks.json`.
@@ -789,6 +799,27 @@ pub fn doctor(setup: &Setup) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_windows_hook_command_is_powershell() {
+        let tmp = crate::mcp_tests::TempDir::new("cu-ps");
+        let mut setup = crate::install_tests::setup_in(tmp.path(), tmp.path());
+        setup.exe = std::path::PathBuf::from(r"C:\Users\O'Neil\gm\graphersal-memory.exe");
+        setup.dir_args = vec!["--data-dir".into(), r"C:\d $x".into()];
+        assert_eq!(
+            hook_command_for(&setup, "session-start", true),
+            r"& 'C:\Users\O''Neil\gm\graphersal-memory.exe' hook session-start --data-dir 'C:\d $x' --harness cursor"
+        );
+        assert_eq!(
+            hook_command_for(&setup, "session-end", false),
+            r#""C:\Users\O'Neil\gm\graphersal-memory.exe" hook session-end --data-dir "C:\d $x" --harness cursor"#
+        );
+        assert!(is_our_command(&hook_command_for(
+            &setup,
+            "session-start",
+            true
+        )));
+    }
 
     #[test]
     fn the_rule_file_has_front_matter_and_the_block() {

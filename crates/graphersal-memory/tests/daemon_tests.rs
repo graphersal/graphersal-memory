@@ -3,15 +3,14 @@
 //! the user's, never a running daemon of the user). Every daemon a test starts is stopped (and
 //! killed if it does not stop) when the test ends.
 //!
-//! Unix only for now: the tests kill processes with `kill` and speak to the socket with
-//! `std::os::unix::net`; Windows builds the same code in CI.
+//! Every platform: the socket is AF_UNIX on Unix (`std::os::unix::net`) and on Windows
+//! (`uds_windows`, the product's own transport); processes are checked and killed with `kill` on
+//! Unix and `tasklist`/`taskkill` on Windows. Only the permission test is Unix only.
 
-#![cfg(unix)]
 // Test helpers outside `#[test]` functions: clippy's allow-unwrap-in-tests does not reach them.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +18,9 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+
+mod support;
+use support::{UnixStream, alive, kill};
 
 const BIN: &str = env!("CARGO_BIN_EXE_graphersal-memory");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -64,6 +66,9 @@ impl Env {
             .env("GRAPHERSAL_MEMORY_RUN_DIR", self.run_dir())
             .env("GRAPHERSAL_MEMORY_IDLE", self.idle)
             .env("HOME", &self.root)
+            // Windows: the home directory is the profile; the data directory is set above.
+            .env("USERPROFILE", &self.root)
+            .env("LOCALAPPDATA", &self.root)
             .env_remove("XDG_RUNTIME_DIR")
             .env_remove("CLAUDECODE")
             .current_dir(&self.root);
@@ -171,21 +176,23 @@ impl Drop for Env {
     }
 }
 
-fn alive(pid: u64) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+/// Leaves a socket file nobody listens on, as a crash does.
+#[cfg(unix)]
+fn stale_socket(path: &Path) {
+    // The file is made by a datagram socket, never a listening one: on macOS std sets
+    // close-on-exec on a new socket only after creating it, so a shim another test spawns at
+    // that moment inherits the descriptor (and passes it on to its daemon); an inherited
+    // LISTENING socket would keep accepting connections into its backlog, so the "stale" socket
+    // answered nobody's handshake and this test failed whenever it ran beside the others. A
+    // stream connect to a datagram socket is refused, whoever holds its descriptor.
+    drop(std::os::unix::net::UnixDatagram::bind(path).unwrap());
 }
 
-fn kill(pid: u64) {
-    let _ = Command::new("kill")
-        .arg("-9")
-        .arg(pid.to_string())
-        .stderr(Stdio::null())
-        .status();
+/// Leaves a socket file nobody listens on, as a crash does (Windows keeps the file of a closed
+/// listening socket; it has no datagram AF_UNIX sockets).
+#[cfg(windows)]
+fn stale_socket(path: &Path) {
+    drop(uds_windows::UnixListener::bind(path).unwrap());
 }
 
 /// One shim process with a test client on its stdio.
@@ -395,14 +402,8 @@ fn the_daemon_exits_after_the_idle_time() {
 fn a_stale_socket_file_is_recovered() {
     let env = Env::new("10m");
     std::fs::create_dir_all(env.run_dir()).unwrap();
-    // A socket file nobody listens on, and an unlocked pid file: what a crash leaves. The file
-    // is made by a datagram socket, never a listening one: on macOS std sets close-on-exec on a
-    // new socket only after creating it, so a shim another test spawns at that moment inherits
-    // the descriptor (and passes it on to its daemon); an inherited LISTENING socket would keep
-    // accepting connections into its backlog, so the "stale" socket answered nobody's handshake
-    // and this test failed whenever it ran beside the others. A stream connect to a datagram
-    // socket is refused, whoever holds its descriptor.
-    drop(UnixDatagram::bind(env.socket()).unwrap());
+    // A socket file nobody listens on, and an unlocked pid file: what a crash leaves.
+    stale_socket(&env.socket());
     std::fs::write(env.run_dir().join("daemon.pid"), "999999\n").unwrap();
     assert!(env.socket().exists());
     assert!(UnixStream::connect(env.socket()).is_err());
@@ -630,6 +631,7 @@ fn the_daemon_and_status_commands_report_the_daemon() {
     assert!(stderr.contains("another daemon already runs"), "{stderr}");
 }
 
+#[cfg(unix)]
 #[test]
 fn the_socket_and_run_directory_are_private() {
     use std::os::unix::fs::PermissionsExt;

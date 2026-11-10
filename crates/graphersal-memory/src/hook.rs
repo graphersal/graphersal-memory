@@ -802,8 +802,10 @@ mod tests {
     #[test]
     fn the_codex_hook_queues_its_rollout_and_adds_one_line_at_the_start() {
         use std::sync::{Arc, Mutex};
-        let sessions = PathBuf::from("/c/.codex/sessions");
-        let rollout = "/c/.codex/sessions/2026/11/09/rollout-2026-11-09T10-00-00-abc.jsonl";
+        let sessions = PathBuf::from(crate::mcp_tests::abs("/c/.codex/sessions"));
+        let rollout = &crate::mcp_tests::abs(
+            "/c/.codex/sessions/2026/11/09/rollout-2026-11-09T10-00-00-abc.jsonl",
+        );
         for (event, lines) in [(HookEvent::SessionStart, 1), (HookEvent::SessionEnd, 0)] {
             let seen: Arc<Mutex<Option<crate::sessions::Request>>> = Arc::default();
             let keep = seen.clone();
