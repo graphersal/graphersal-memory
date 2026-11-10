@@ -353,14 +353,23 @@ struct Parsed {
     transcript: Transcript,
     id: String,
     uuid: String,
+    /// The project's directory (its path; edited files are relative to it).
     project: String,
+    /// The project's stable id (`crate::projects`): what the graph records and routes by.
+    key: String,
     files: Vec<String>,
     title: String,
     started_at: String,
     source: String,
 }
 
-fn parse_file(file: &Path, modified: u64) -> Result<Option<Parsed>, String> {
+/// Parses a transcript; with `data_dir` its project's directory is resolved to the project's
+/// stable id (`crate::projects::resolve`), else the id is the directory.
+fn parse_file(
+    file: &Path,
+    modified: u64,
+    data_dir: Option<&Path>,
+) -> Result<Option<Parsed>, String> {
     let bytes =
         std::fs::read(file).map_err(|err| format!("cannot read {}: {err}", file.display()))?;
     let uuid = file
@@ -382,6 +391,10 @@ fn parse_file(file: &Path, modified: u64) -> Result<Option<Parsed>, String> {
         .iter()
         .filter_map(|path| transcript::relative_file(path, &project))
         .collect();
+    let key = match data_dir {
+        Some(data_dir) => crate::projects::resolve(data_dir, &project)?.id,
+        None => project.clone(),
+    };
     let title = if transcript.title.is_empty() {
         format!("Session {}", uuid.chars().take(8).collect::<String>())
     } else {
@@ -403,6 +416,7 @@ fn parse_file(file: &Path, modified: u64) -> Result<Option<Parsed>, String> {
         transcript,
         uuid,
         project,
+        key,
         files,
         title,
         started_at,
@@ -420,7 +434,7 @@ impl Parsed {
             "ended_at": if t.ended_at.is_empty() { &self.started_at } else { &t.ended_at },
             "branches": t.branches, "files_edited": self.files, "source": self.source,
             "source_bytes": t.bytes, "visibility": "private", "origin": "sessions",
-            "harness": HARNESS, "project": self.project,
+            "harness": HARNESS, "project": self.key,
         });
         if !t.compact.is_empty() {
             p["compact_summaries"] = json!(clip(&t.compact.join("\n\n---\n\n"), CAP));
@@ -446,7 +460,7 @@ impl Parsed {
                         "summary": clip(&turn.user, 300),
                         "embed_text": format!("{name}: {}", clip(&turn.user, 500)),
                         "source": self.source, "visibility": "private", "origin": "sessions",
-                        "project": self.project,
+                        "project": self.key,
                     },
                 });
                 (size, row)
@@ -465,7 +479,7 @@ impl Parsed {
                 let mut p = json!({
                     "name": clip(&text, 80), "summary": clip(&text, 1500), "fact_kind": kind,
                     "n": i, "at": self.started_at, "source": self.source,
-                    "visibility": "private", "origin": "sessions", "project": self.project,
+                    "visibility": "private", "origin": "sessions", "project": self.key,
                     "embed_text": embed,
                 });
                 if !why.is_empty() {
@@ -481,7 +495,7 @@ impl Parsed {
 /// fingerprint). Returns the turns written.
 fn write_session(writer: &mut dyn Writer, parsed: &Parsed) -> Result<usize, String> {
     writer.call(
-        &parsed.project,
+        &parsed.key,
         "index_session",
         json!({"id": parsed.id, "p": parsed.session_properties()}),
     )?;
@@ -500,7 +514,7 @@ fn write_session(writer: &mut dyn Writer, parsed: &Parsed) -> Result<usize, Stri
                 String::new()
             };
             writer.call(
-                &parsed.project,
+                &parsed.key,
                 "index_turns",
                 json!({"id": parsed.id, "rows": std::mem::take(&mut batch),
                        "fingerprint": fingerprint}),
@@ -600,7 +614,9 @@ pub fn run(
             }
             continue;
         }
-        match index_one(&file, size, modified, writer, &mut cache, &mut state) {
+        match index_one(
+            &file, size, modified, data_dir, writer, &mut cache, &mut state,
+        ) {
             Ok(Indexed::Empty) => report.empty += 1,
             Ok(Indexed::Unchanged { summarized }) => {
                 report.unchanged += 1;
@@ -631,7 +647,7 @@ pub fn run(
                 break;
             }
             report.done += 1;
-            match summarize_one(&file, writer, summarizer, &mut state) {
+            match summarize_one(&file, data_dir, writer, summarizer, &mut state) {
                 Ok(Summarized::Done { facts }) => {
                     report.summarized += 1;
                     report.facts += facts;
@@ -670,15 +686,16 @@ fn index_one(
     file: &Path,
     size: u64,
     modified: u64,
+    data_dir: &Path,
     writer: &mut dyn Writer,
     cache: &mut BTreeMap<String, Known>,
     state: &mut State,
 ) -> Result<Indexed, String> {
-    let Some(parsed) = parse_file(file, modified)? else {
+    let Some(parsed) = parse_file(file, modified, Some(data_dir))? else {
         *state.entry_mut(file) = json!({"size": size, "mtime": modified, "empty": true});
         return Ok(Indexed::Empty);
     };
-    let known = known_of(writer, cache, &parsed.project)?;
+    let known = known_of(writer, cache, &parsed.key)?;
     let fingerprint = parsed.transcript.fingerprint.clone();
     let (stored, summarized) = known.get(&parsed.id).cloned().unwrap_or_default();
     let outcome = if stored == fingerprint {
@@ -698,7 +715,7 @@ fn index_one(
     };
     *state.entry_mut(file) = json!({
         "size": size, "mtime": modified, "fingerprint": fingerprint,
-        "session": parsed.id, "project": parsed.project,
+        "session": parsed.id, "project": parsed.key,
         "turns": parsed.transcript.turns.len(), "started_at": parsed.started_at,
         "prompt_chars": summaries::prompt(&parsed.transcript, &parsed.files, &parsed.project)
             .chars().count(),
@@ -720,6 +737,7 @@ enum Summarized {
 
 fn summarize_one(
     file: &Path,
+    data_dir: &Path,
     writer: &mut dyn Writer,
     summarizer: &mut Summarizer,
     state: &mut State,
@@ -747,7 +765,7 @@ fn summarize_one(
     let Some((_, modified)) = stamp(file) else {
         return Ok(Summarized::Waiting);
     };
-    let parsed = match parse_file(file, modified) {
+    let parsed = match parse_file(file, modified, Some(data_dir)) {
         Ok(Some(parsed)) if parsed.transcript.fingerprint == fingerprint => parsed,
         // Changed since its indexing: the next run indexes it again first.
         Ok(_) => return Ok(Summarized::Waiting),
@@ -786,7 +804,7 @@ fn summarize_one(
     });
     writer
         .call(
-            &parsed.project,
+            &parsed.key,
             "set_summary",
             json!({"id": parsed.id, "p": p, "facts": facts}),
         )
@@ -849,7 +867,7 @@ pub fn estimate(
         } else if same && entry["empty"] == true {
             continue;
         } else {
-            match parse_file(&file, modified) {
+            match parse_file(&file, modified, None) {
                 Ok(Some(parsed)) => (
                     summaries::prompt(&parsed.transcript, &parsed.files, &parsed.project)
                         .chars()

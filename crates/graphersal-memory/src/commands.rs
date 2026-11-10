@@ -1,5 +1,5 @@
 //! Running a command. In this pre-release `install`, `uninstall`, `status`, `doctor`, `import`
-//! (also `--sessions`), `summaries` and `bench` (Claude Code), `mcp` (the shim, or
+//! (also `--sessions`), `export --to-files`, `projects`, `summaries` and `bench` (Claude Code), `mcp` (the shim, or
 //! `--no-daemon`), `daemon` and the hidden `hook` work; every other command reports which stage
 //! delivers it.
 
@@ -7,7 +7,9 @@ use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::cli::{BenchAction, BenchArm, Cli, Command, Harness, Profile, SummariesAction};
+use crate::cli::{
+    BenchAction, BenchArm, Cli, Command, Harness, Profile, ProjectsAction, SummariesAction,
+};
 use crate::config::{self, Config};
 use crate::daemon::{self, DaemonOptions};
 use crate::import::{self, Caller, ImportState};
@@ -34,6 +36,7 @@ pub fn planned_stage(command: &Command) -> (&'static str, &'static str) {
         Command::Status | Command::Doctor | Command::Hook { .. } => {
             ("M3", "one-click install for Claude Code")
         }
+        Command::Projects { .. } => ("M6b", "project identity"),
         Command::Import { .. } => ("M3", "import of the file memory"),
         Command::Summaries { .. } => ("M4", "sessions and facts"),
         Command::Export { .. } => (
@@ -62,6 +65,7 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::Import { .. } => "import",
         Command::Summaries { .. } => "summaries",
         Command::Export { .. } => "export",
+        Command::Projects { .. } => "projects",
         Command::Hook { .. } => "hook",
     }
 }
@@ -108,7 +112,10 @@ pub fn run_cli(
             harness,
             dry_run,
             yes,
-            with_model,
+            language,
+            model,
+            no_import,
+            keep_auto_memory,
             enable_develop,
             summaries,
         } => {
@@ -116,12 +123,18 @@ pub fn run_cli(
                 let _ = writeln!(stderr, "{}", harness_not_implemented(name, *harness));
                 return EXIT_NOT_IMPLEMENTED;
             }
+            let terminal = terminal();
             let options = InstallOptions {
                 dry_run: *dry_run,
                 yes: *yes,
-                with_model: *with_model,
+                language: language.map(crate::cli::LanguageArg::language),
+                model: model.clone(),
+                no_import: *no_import,
+                keep_auto_memory: *keep_auto_memory,
                 enable_develop: *enable_develop,
                 summaries: *summaries,
+                interactive: terminal,
+                color: terminal && crate::prompt::color_allowed(&|name| std::env::var(name).ok()),
             };
             setup(cli).and_then(|setup| {
                 let mut connect = daemon_connector(&setup);
@@ -140,6 +153,7 @@ pub fn run_cli(
             yes,
             purge,
             disable_develop,
+            no_export,
         } => {
             if *harness != Harness::ClaudeCode {
                 let _ = writeln!(stderr, "{}", harness_not_implemented(name, *harness));
@@ -150,11 +164,44 @@ pub fn run_cli(
                 yes: *yes,
                 purge: *purge,
                 disable_develop_only: *disable_develop,
+                no_export: *no_export,
+                interactive: terminal(),
             };
             setup(cli).and_then(|setup| {
-                install::uninstall(&setup, &options, &mut BufReader::new(stdin), &mut stdout)
+                let mut source = DaemonSource(setup_location(&setup));
+                install::uninstall_with(
+                    &setup,
+                    &options,
+                    Some(&mut source),
+                    &mut BufReader::new(stdin),
+                    &mut stdout,
+                )
             })
         }
+        Command::Export {
+            harness,
+            dry_run,
+            to_files: true,
+            project,
+        } => {
+            if *harness != Harness::ClaudeCode {
+                let _ = writeln!(stderr, "{}", harness_not_implemented(name, *harness));
+                return EXIT_NOT_IMPLEMENTED;
+            }
+            setup(cli).and_then(|setup| {
+                let mut source = DaemonSource(setup_location(&setup));
+                export_files(
+                    &setup,
+                    project.as_deref(),
+                    *dry_run,
+                    &mut source,
+                    &mut stdout,
+                )
+            })
+        }
+        Command::Projects { action } => setup(cli).and_then(|setup| {
+            run_projects(&setup, action, &mut BufReader::new(stdin), &mut stdout)
+        }),
         Command::Doctor => setup(cli).map(|setup| doctor(&setup, &mut stdout)),
         Command::Import {
             dry_run,
@@ -238,7 +285,10 @@ pub fn run_cli(
             };
             run_bench(cli, &request, &mut BufReader::new(stdin), &mut stdout)
         }
-        command @ (Command::Ui | Command::Export { .. }) => {
+        command @ (Command::Ui
+        | Command::Export {
+            to_files: false, ..
+        }) => {
             return run(command, stderr);
         }
     };
@@ -285,7 +335,177 @@ fn setup(cli: &Cli) -> Result<Setup, String> {
         run_dir,
         exe: mcp::canonical(&exe),
         dir_args,
+        source: crate::download::Source::from_env(&env),
     })
+}
+
+/// Whether stdin and stdout are terminals (the wizard asks then).
+fn terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+/// The memories of the daemon's store (`export_memories` control line).
+pub struct DaemonSource(pub DaemonLocation);
+
+impl crate::export::Source for DaemonSource {
+    fn memories(&mut self, project: &str) -> Result<Vec<crate::export::Row>, String> {
+        let answer = shim::request(
+            &self.0,
+            &serde_json::json!({"protocol": protocol::PROTOCOL, "control": "export_memories",
+                                "project": project}),
+        )?;
+        if answer["ok"] != true {
+            return Err(answer["error"]["message"]
+                .as_str()
+                .unwrap_or("the daemon refused the export")
+                .to_string());
+        }
+        Ok(crate::export::rows(&answer["memories"]))
+    }
+}
+
+/// `export --to-files [--project ROOT]`.
+pub fn export_files(
+    setup: &Setup,
+    project: Option<&Path>,
+    dry_run: bool,
+    source: &mut dyn crate::export::Source,
+    out: &mut dyn Write,
+) -> Result<u8, String> {
+    let id = match project {
+        Some(root) => {
+            let key = mcp::project_key(Some(root), &absolute(root));
+            let projects = crate::projects::Projects::load(&setup.data_dir)?;
+            match projects.find(&key) {
+                Some(found) => found.id,
+                None => {
+                    return Err(format!(
+                        "the memory knows no project at {key} (`graphersal-memory projects \
+                         list` shows them)"
+                    ));
+                }
+            }
+        }
+        None => String::new(),
+    };
+    let rows = source.memories(&id)?;
+    let agent = crate::agents::ClaudeCode::new(setup.paths.clone());
+    if dry_run {
+        let projects: std::collections::BTreeSet<&str> = rows
+            .iter()
+            .map(|r| r.project.as_str())
+            .filter(|p| !p.is_empty())
+            .collect();
+        let _ = writeln!(
+            out,
+            "Dry run: {} memories of {} project(s) and {} global one(s) would be written into \
+             {}'s file memory; nothing was written.",
+            rows.iter().filter(|r| !r.project.is_empty()).count(),
+            projects.len(),
+            rows.iter().filter(|r| r.project.is_empty()).count(),
+            crate::agents::Agent::display_name(&agent)
+        );
+        return Ok(0);
+    }
+    if rows.is_empty() {
+        let _ = writeln!(out, "Nothing to export: the graph holds no memories.");
+        return Ok(0);
+    }
+    let report = crate::export::write(&agent, &setup.data_dir, &rows)?;
+    for line in report.lines() {
+        let _ = writeln!(out, "{line}");
+    }
+    Ok(if report.problems.is_empty() {
+        0
+    } else {
+        EXIT_FAILED
+    })
+}
+
+/// `projects list` and `projects merge`.
+fn run_projects(
+    setup: &Setup,
+    action: &ProjectsAction,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn Write,
+) -> Result<u8, String> {
+    let projects = crate::projects::Projects::load(&setup.data_dir)?;
+    match action {
+        ProjectsAction::List => {
+            let list = projects.list();
+            if list.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "No projects yet: a project is recorded when a session starts in it."
+                );
+            }
+            for project in &list {
+                let _ = writeln!(out, "{}", project.id);
+                let _ = writeln!(out, "  paths: {}", project.paths.join(", "));
+                if !project.remotes.is_empty() {
+                    let _ = writeln!(out, "  remotes: {}", project.remotes.join(", "));
+                }
+                if let Some(root) = &project.root_commit {
+                    let _ = writeln!(out, "  first commit: {root}");
+                }
+            }
+            for (what, how) in crate::projects::look_alike_lines(&setup.data_dir) {
+                let _ = writeln!(out, "\nnote: {what}\n      {how}");
+            }
+            Ok(0)
+        }
+        ProjectsAction::Merge { from, into, yes } => {
+            let find = |name: &str| {
+                projects.find(name).ok_or_else(|| {
+                    format!("no project {name} (`graphersal-memory projects list` shows them)")
+                })
+            };
+            let (source, target) = (find(from)?, find(into)?);
+            if source.id == target.id {
+                return Err(format!("{from} and {into} are the same project"));
+            }
+            let _ = writeln!(
+                out,
+                "Merge project {} ({}) into {} ({}): its memories, sessions, turns and facts \
+                 move, a memory of the same name keeps the more recently updated text, and {} \
+                 is found by {}'s paths and remotes from then on.",
+                source.id,
+                source.paths.join(", "),
+                target.id,
+                target.paths.join(", "),
+                target.id,
+                source.id
+            );
+            if !yes && !install::confirm("Merge?", input, out) {
+                let _ = writeln!(out, "Nothing was merged.");
+                return Ok(1);
+            }
+            let answer = shim::request(
+                &setup_location(setup),
+                &serde_json::json!({"protocol": protocol::PROTOCOL, "control": "merge_projects",
+                                    "from": source.id, "into": target.id}),
+            )?;
+            if answer["ok"] != true {
+                return Err(answer["error"]["message"]
+                    .as_str()
+                    .unwrap_or("the daemon refused the merge")
+                    .to_string());
+            }
+            let merged = &answer["merged"];
+            let _ = writeln!(
+                out,
+                "Merged: {} memories moved, {} kept from {} (newer there), {} replaced, {} \
+                 sessions, turns and facts moved.",
+                merged["memories_moved"],
+                merged["memories_kept"],
+                target.id,
+                merged["memories_replaced"],
+                merged["others"]
+            );
+            Ok(0)
+        }
+    }
 }
 
 /// Connections of the product's own calls: through the daemon, `use` profile.
@@ -587,7 +807,15 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
                 let _ = writeln!(out, "          fix: {fix}");
             }
         } else {
-            let _ = writeln!(out, "  ok      {}", finding.text);
+            match &finding.fix {
+                Some(hint) => {
+                    let _ = writeln!(out, "  note    {}", finding.text);
+                    let _ = writeln!(out, "          {hint}");
+                }
+                None => {
+                    let _ = writeln!(out, "  ok      {}", finding.text);
+                }
+            }
         }
     }
     let _ = writeln!(

@@ -56,22 +56,43 @@ pub struct Cli {
 /// The product's commands.
 #[derive(Debug, Subcommand, PartialEq)]
 pub enum Command {
-    /// Set up graph memory for an agent harness: MCP servers, hooks, import of the existing
-    /// memory, the managed rule block.
+    /// Set up graph memory for an agent harness: a short wizard (memory language, embedding
+    /// model, import of the existing memory, the harness's own memory, summaries, the develop
+    /// server), then the MCP servers, hooks and the managed rule block.
+    #[command(long_about = "Set up graph memory for an agent harness.\n\n\
+            In a terminal, install asks a few questions (Step N of M; Enter takes the default) \
+            and shows the full plan before it changes anything. With --yes, or without a \
+            terminal, every question takes its default (or the flag that answers it; on an \
+            installed system: the current answer); without --yes it still asks once before \
+            applying. Running install again changes only what differs.\n\n\
+            The embedding model download (Hugging Face, once, into the data directory) is the \
+            one network access of install; if it fails, the built-in embedder stays.")]
     Install {
         /// The harness to set up.
         #[arg(long, value_enum, default_value_t = Harness::ClaudeCode)]
         harness: Harness,
-        /// Show what would change without changing anything.
+        /// Show what would change without changing anything (no questions).
         #[arg(long)]
         dry_run: bool,
-        /// Do not ask before changing anything.
+        /// Do not ask: every question takes its default or its flag.
         #[arg(long, short = 'y')]
         yes: bool,
-        /// Also download a better embedding model (planned: today the built-in embedder is
-        /// used and this only says so).
+        /// The memory language: english (default: stored and searched in English) or any
+        /// (stored in the language of the conversation).
+        #[arg(long, value_enum, value_name = "LANGUAGE")]
+        language: Option<LanguageArg>,
+        /// The embedding model: a Hugging Face repository of a Model2Vec model (default:
+        /// minishlab/potion-retrieval-32M for English, minishlab/potion-multilingual-128M for
+        /// any language) or `builtin` (no download, weaker search).
+        #[arg(long, value_name = "REPO|builtin", value_parser = parse_model)]
+        model: Option<String>,
+        /// Do not import the existing file memory now.
         #[arg(long)]
-        with_model: bool,
+        no_import: bool,
+        /// Keep the harness's own auto-memory on (default: switched off; uninstall switches it
+        /// back on).
+        #[arg(long)]
+        keep_auto_memory: bool,
         /// Also register the develop MCP server (structure tools; off by default).
         #[arg(long)]
         enable_develop: bool,
@@ -97,6 +118,10 @@ pub enum Command {
         /// Only unregister the develop MCP server; everything else stays installed.
         #[arg(long)]
         disable_develop: bool,
+        /// Do not write the memories back into the harness's file memory first (default: every
+        /// memory is exported before anything is removed).
+        #[arg(long, conflicts_with = "disable_develop")]
+        no_export: bool,
     },
     /// Show the daemon, the stores and what is installed where.
     Status,
@@ -182,14 +207,29 @@ pub enum Command {
         #[command(subcommand)]
         action: SummariesAction,
     },
-    /// Export rules from the graph into the harness's instruction files (managed block only).
+    /// Export the memories back into the harness's file memory (--to-files; what uninstall
+    /// does first). The export of rules into instruction files is planned.
     Export {
-        /// The harness to export rules for.
+        /// The harness to export for.
         #[arg(long, value_enum, default_value_t = Harness::ClaudeCode)]
         harness: Harness,
-        /// Show the managed block without writing it.
+        /// Show what would be written without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Write every memory as the harness's memory files (MEMORY.md and one file per
+        /// memory per project; the global ones into one file every project loads). A file
+        /// that differs is kept and the graph's version written beside it.
+        #[arg(long)]
+        to_files: bool,
+        /// Only this project (its root directory) and the global memories.
+        #[arg(long, value_name = "ROOT", requires = "to_files")]
+        project: Option<PathBuf>,
+    },
+    /// The projects the memory knows (their ids and lookup keys), and merging one into another.
+    Projects {
+        /// What to do.
+        #[command(subcommand)]
+        action: ProjectsAction,
     },
     /// Run a harness hook (the hooks `install` adds call this; not for you).
     #[command(hide = true)]
@@ -198,6 +238,57 @@ pub enum Command {
         #[arg(value_enum)]
         event: crate::hook::HookEvent,
     },
+}
+
+/// What `projects` does.
+#[derive(Debug, Subcommand, PartialEq)]
+pub enum ProjectsAction {
+    /// List the projects: id, paths, remotes, root commit, and look-alikes that may have moved.
+    List,
+    /// Move every memory, session and fact of project FROM into project INTO (both an id or a
+    /// path `projects list` shows), and FROM's lookup keys with them; FROM is gone afterwards.
+    Merge {
+        /// The project that goes away.
+        from: String,
+        /// The project that stays.
+        into: String,
+        /// Do not ask.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+}
+
+/// The memory language of `install --language`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LanguageArg {
+    /// Store and search in English.
+    English,
+    /// Store in the language of the conversation.
+    Any,
+}
+
+impl LanguageArg {
+    /// The language.
+    pub fn language(self) -> crate::language::Language {
+        match self {
+            LanguageArg::English => crate::language::Language::English,
+            LanguageArg::Any => crate::language::Language::Any,
+        }
+    }
+}
+
+/// Parses `--model`: a repository name, or `builtin` (stored as `hash-ngram/1`).
+fn parse_model(text: &str) -> Result<String, String> {
+    if text == "builtin" || text == crate::models::BUILTIN {
+        Ok(crate::models::BUILTIN.to_string())
+    } else if crate::download::is_repo_name(text) && text.contains('/') {
+        Ok(text.to_string())
+    } else {
+        Err(format!(
+            "'{text}' is neither `builtin` nor a Hugging Face repository (owner/name, for \
+             example minishlab/potion-retrieval-32M)"
+        ))
+    }
 }
 
 /// What `bench questions` does.
@@ -355,7 +446,10 @@ mod tests {
                 harness: Harness::ClaudeCode,
                 dry_run: false,
                 yes: false,
-                with_model: false,
+                language: None,
+                model: None,
+                no_import: false,
+                keep_auto_memory: false,
                 enable_develop: false,
                 summaries: false
             }
@@ -391,7 +485,8 @@ mod tests {
                 dry_run: true,
                 yes: false,
                 purge: false,
-                disable_develop: false
+                disable_develop: false,
+                no_export: false
             }
         );
         assert_eq!(
@@ -488,14 +583,17 @@ mod tests {
     #[test]
     fn install_and_uninstall_options_parse() {
         assert_eq!(
-            parse(&["install", "--yes", "--with-model", "--enable-develop"])
+            parse(&["install", "--yes", "--model", "builtin", "--enable-develop"])
                 .unwrap()
                 .command,
             Command::Install {
                 harness: Harness::ClaudeCode,
                 dry_run: false,
                 yes: true,
-                with_model: true,
+                language: None,
+                model: Some(crate::models::BUILTIN.to_string()),
+                no_import: false,
+                keep_auto_memory: false,
                 enable_develop: true,
                 summaries: false
             }
@@ -507,7 +605,8 @@ mod tests {
                 dry_run: false,
                 yes: true,
                 purge: true,
-                disable_develop: false
+                disable_develop: false,
+                no_export: false
             }
         );
         assert_eq!(
@@ -606,6 +705,69 @@ mod tests {
         assert!(parse(&["bench", "--arms", "files,mem0"]).is_err());
         assert!(parse(&["bench", "--questions", "0"]).is_err());
         assert!(parse(&["bench", "--budget", "-1"]).is_err());
+    }
+
+    #[test]
+    fn wizard_flags_export_and_projects_parse() {
+        match parse(&[
+            "install",
+            "--language",
+            "any",
+            "--model",
+            "acme/model-1",
+            "--no-import",
+            "--keep-auto-memory",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Install {
+                language,
+                model,
+                no_import,
+                keep_auto_memory,
+                ..
+            } => {
+                assert_eq!(language, Some(LanguageArg::Any));
+                assert_eq!(model.as_deref(), Some("acme/model-1"));
+                assert!(no_import && keep_auto_memory);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["install", "--model", "not a repo"]).is_err());
+        assert!(parse(&["install", "--model", "plain"]).is_err());
+        assert!(
+            parse(&["install", "--with-model"]).is_err(),
+            "--with-model became --model"
+        );
+        assert!(parse(&["install", "--language", "klingon"]).is_err());
+        match parse(&["export", "--to-files", "--project", "/w"])
+            .unwrap()
+            .command
+        {
+            Command::Export {
+                to_files, project, ..
+            } => assert!(to_files && project == Some(PathBuf::from("/w"))),
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["export", "--project", "/w"]).is_err());
+        assert_eq!(
+            parse(&["projects", "merge", "/a", "/b", "-y"])
+                .unwrap()
+                .command,
+            Command::Projects {
+                action: ProjectsAction::Merge {
+                    from: "/a".into(),
+                    into: "/b".into(),
+                    yes: true
+                }
+            }
+        );
+        assert!(parse(&["projects", "list"]).is_ok());
+        match parse(&["uninstall", "--no-export"]).unwrap().command {
+            Command::Uninstall { no_export, .. } => assert!(no_export),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

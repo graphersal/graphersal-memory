@@ -68,6 +68,8 @@ impl Env {
             .env("GRAPHERSAL_MEMORY_DIR", self.data_dir())
             .env("GRAPHERSAL_MEMORY_RUN_DIR", self.run_dir())
             .env("GRAPHERSAL_MEMORY_IDLE", "60s")
+            // No network in tests: the model download of `install --yes` fails at once.
+            .env("GRAPHERSAL_MEMORY_HF_ENDPOINT", "http://127.0.0.1:1")
             .args(args);
         command
     }
@@ -325,7 +327,7 @@ fn install_import_status_doctor_hook_uninstall_and_purge() {
 
     // Undo the test's own edit of a memory file (install never changes them).
     std::fs::write(&release_day, original).unwrap();
-    let removed = env.run(&["uninstall", "--yes"]);
+    let removed = env.run(&["uninstall", "--yes", "--no-export"]);
     assert!(removed.status.success(), "{}", text(&removed));
     assert_eq!(env.home_snapshot(), before, "{}", text(&removed));
     assert!(env.data_dir().join("stores").exists(), "memories stay");
@@ -420,4 +422,93 @@ fn the_daemon_reads_its_idle_time_from_the_settings_file() {
         "the environment wins over the file: {}",
         text(&shown)
     );
+}
+
+/// One MCP tool call through the real shim (and the daemon), waiting for its answer.
+fn call_tool(env: &Env, project: &std::path::Path, name: &str, arguments: Value) -> Value {
+    let mut child = env
+        .command(&["mcp", "--project", &project.display().to_string()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "t", "version": "1"}}});
+    let inited = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+    let call = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                      "params": {"name": name, "arguments": arguments}});
+    writeln!(stdin, "{init}\n{inited}\n{call}").unwrap();
+    stdin.flush().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let answer = loop {
+        let mut line = String::new();
+        assert!(
+            reader.read_line(&mut line).unwrap() > 0,
+            "the shim ended early"
+        );
+        let message: Value = serde_json::from_str(&line).unwrap();
+        if message["id"] == json!(2) {
+            break message;
+        }
+    };
+    drop(stdin);
+    let _ = child.wait();
+    answer
+}
+
+#[test]
+fn uninstall_writes_every_memory_back_into_the_file_memory_through_the_daemon() {
+    let env = Env::new();
+    let project = fixture(&env);
+    let installed = env.run(&["install", "--yes", "--model", "builtin"]);
+    assert!(installed.status.success(), "{}", text(&installed));
+    let settings: Value =
+        serde_json::from_slice(&std::fs::read(env.home().join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(settings["autoMemoryEnabled"], false, "{settings}");
+    // A memory the agent adds after install.
+    let saved = call_tool(
+        &env,
+        &project,
+        "remember",
+        json!({"slug": "added-after-install", "kind": "project",
+               "summary": "Added through MCP after install", "body": "It must survive uninstall."}),
+    );
+    assert_eq!(saved["result"]["isError"], json!(false), "{saved}");
+    let listed = env.run(&["projects", "list"]);
+    assert!(
+        text(&listed).contains(&project.display().to_string()),
+        "{}",
+        text(&listed)
+    );
+    let dry = env.run(&["export", "--to-files", "--dry-run"]);
+    assert!(
+        text(&dry).contains("3 memories of 1 project(s)"),
+        "{}",
+        text(&dry)
+    );
+
+    let removed = env.run(&["uninstall", "--yes"]);
+    assert!(removed.status.success(), "{}", text(&removed));
+    let out = text(&removed);
+    assert!(out.contains("exported 3 memories"), "{out}");
+    let memory_dir = env
+        .home()
+        .join(".claude/projects")
+        .join(
+            project
+                .display()
+                .to_string()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect::<String>(),
+        )
+        .join("memory");
+    let added = std::fs::read_to_string(memory_dir.join("added-after-install.md")).unwrap();
+    assert!(added.contains("It must survive uninstall."), "{added}");
+    // install created the settings file, so it is gone again, auto-memory switch included.
+    assert!(!env.home().join(".claude/settings.json").exists());
 }

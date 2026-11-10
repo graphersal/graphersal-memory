@@ -16,10 +16,32 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/cli.rs`: the clap command definitions and help text, plus parsing tests;
   - `src/commands.rs`: running a command (`run_cli`): `mcp` runs the shim (`--no-daemon`:
     serves in this process), `daemon` runs (`--foreground`) or starts the daemon, `install`,
-    `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench` and the hidden `hook` work on
-    Claude Code (`Setup` from the environment; `bench_options` for `bench`); `ui`, `export`
-    report their planned stage and exit with code 2;
-  - `src/install.rs`: Claude Code's paths (`ClaudePaths`: `~/.claude.json`, `~/.claude/` or
+    `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects` and the
+    hidden `hook` work on Claude Code (`Setup` from the environment, with the model download
+    `Source`; `bench_options` for `bench`; `DaemonSource` reads the memories for the export);
+    `ui` and `export` without `--to-files` report their planned stage and exit with code 2; the
+    wizard is interactive when stdin and stdout are terminals;
+  - `src/agents.rs`: the harness abstraction (`Agent`: MCP configuration, settings and
+    instruction files, projects and memory directories, the global memory file, the auto-memory
+    key, the headless command) and `ClaudeCode`; new harnesses implement it (opencode next);
+  - `src/prompt.rs`: the wizard's console (`Console`: "Step N of M", numbered choices, the
+    default on Enter, re-ask; colour only on a terminal without `NO_COLOR`);
+  - `src/language.rs`: the memory language (`english` | `any`) and its rule text, filled into
+    `mcp/use.md`'s `{language_rule}` and into the rule block;
+  - `src/models.rs`: the offered embedding models (sizes and licences from the Hugging Face
+    metadata, approximate), the model cache `<data dir>/models/<repo>`, `describe`/`check` for
+    `status`/`doctor`;
+  - `src/download.rs`: the Model2Vec download, COPIED from graphersal-cli's `embed_model.rs`
+    (marker at its top: change both); `GRAPHERSAL_MEMORY_HF_ENDPOINT`, `HF_TOKEN`;
+  - `src/export.rs`: memories back into the harness's file memory (per project `MEMORY.md` +
+    `<slug>.md` as the import reads them, global ones into the agent's global memory file;
+    identical files skipped, differing ones kept with `<name>.graphersal.md` beside them);
+  - `src/install.rs`: the wizard (`Current` = the current answers, `default_answers` for
+    `--yes`/no terminal, `ask` for the interactive steps, `plan_install`, `install`), the
+    auto-memory switch (`autoMemoryEnabled`, its previous value recorded in the settings file's
+    state entry, restored by uninstall), the rule block per language (`RULE_BLOCK`,
+    `RULE_BLOCK_ANY`, `PREVIOUS_BLOCK_FINGERPRINTS`), `uninstall_with` (export first, then the
+    removal), Claude Code's paths (`ClaudePaths`: `~/.claude.json`, `~/.claude/` or
     `$CLAUDE_CONFIG_DIR`), the plan and apply of `install` (MCP members, hook groups, the managed
     rule block `RULE_BLOCK` with its fingerprinted begin line), the state and backups in
     `<data dir>/install/`, `uninstall` (restore an untouched file from its backup, else remove our
@@ -37,9 +59,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     changed memory files, then one `index_sessions` control line to the daemon (`run_with`'s
     `Enqueue`; start: its transcript is `active`, end: `ended`), one status line at session
     start, always exit 0; `GRAPHERSAL_MEMORY_HOOK=off` makes it do nothing;
-  - `src/config.rs`: `<data dir>/config.json` (`daemon.idle`, `summaries.enabled|harness_command|
-    monthly_budget_usd|since`, `with_summaries` edits the switch in place); flag > env > file >
-    default;
+  - `src/config.rs`: `<data dir>/config.json` (`daemon.idle`, `memory.language`,
+    `embedding.model`, `summaries.enabled|harness_command|monthly_budget_usd|since`;
+    `with_summaries` and `with_values` edit in place); flag > env > file > default;
   - `src/transcript.rs`: the Claude Code transcript parser (turns, title, times, branches, edited
     files, compaction summaries; sidechains and generated records left out; unknown records,
     bad lines and a partial last line skipped; fingerprint of the complete lines);
@@ -70,8 +92,11 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/bench_tests.rs`: `bench` in-process with a scripted harness on a temporary home and data
     directory (the live files unchanged, the sandboxes never naming them, report numbers, budget
     refusal and stop, confirmation, dry run);
-  - `src/projects.rs`: `<data dir>/projects.json`: each project's git remote (credentials removed),
-    recorded by the daemon when a project first connects (for re-mapping moved repositories later);
+  - `src/projects.rs`: project identity, `<data dir>/projects.json`: a stable id per project
+    (its path at first sight; legacy entries keep their path), looked up at every connection and
+    indexed session by git remote (normalized, origin first), then path; a root commit shared
+    with an older project is only a hint (`look_alike_lines`, `projects merge` through the
+    daemon's `merge_projects` control line and the internal function `merge_project`);
   - `src/fsutil.rs`: atomic writes and the FNV-1a fingerprint;
   - `src/ipc.rs`: the run directory (`--run-dir`, `GRAPHERSAL_MEMORY_RUN_DIR`, `<data dir>/run`
     for an explicit data directory, the platform's default), its files (`daemon.sock`,
@@ -101,13 +126,20 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/mcp.rs` + `src/mcp/{use,develop}.md`: the two profiles (configuration, instructions,
     tool lists), the project of a session (`--project`, else the git root of the cwd),
     `StoreRuntime` (one open store: `graphersal-serve`'s session thread, one `Context` per
-    profile over it sharing one `Mcp` endpoint, the job ticker (`JobTicker`, stopped by `close`,
+    profile over it sharing one `Mcp` endpoint, `serve_with` (the connection's memory language),
+    `switch_embedder` (import the cached model into the store, then rules off, old vectors
+    dropped, rules on with the model: the engine checks old vectors against a new dimension
+    before the fill), the job ticker (`JobTicker`, stopped by `close`,
     which then waits for `background_runs` to reach 0 before it closes the store), `serve` of one
     connection through `graphersal-mcp`'s `serve_lines` with the connection's project bound by
     the engine (`Profile::with_bound_params`: `project` is hidden in `tools/list`, set on every
     call of a saved query that declares it, left out of the answer's `call:` line), `close`),
     and `serve` (`--no-daemon`);
-  - `src/mcp_tests.rs`: MCP round trips over in-memory pipes with temporary data directories.
+  - `src/mcp_tests.rs`: MCP round trips over in-memory pipes with temporary data directories
+    (also the memory language in the instructions and project identity across moves/clones).
+  - `src/model_tests.rs`: the model download from a local fake Hugging Face server (tiny
+    synthetic Model2Vec model), install's model step, the store switching its vector rules to the
+    model and back (`StoreRuntime::switch_embedder`).
   - `src/install_tests.rs`: install/uninstall/import/status/doctor/hooks on temporary homes with
     the store served in the test process (byte-identical round trips, idempotence, dry run,
     conflicts, structural uninstall, develop on/off, import of a fixture memory directory).
@@ -133,8 +165,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
 
 - Labels `memory`, `session`, `turn`, `fact`; edges `relates_to`, `supersedes`, `about`,
   `contains`, `edited` (`src/catalog/schema.json`, mode `open`; `emb` is a vector rule over
-  `embed_text` with the built-in `hash-ngram/1` embedder).
-- Project scoping: a vertex with a `project` property (the project key: the canonical root path)
+  `embed_text`; the schema file names the built-in `hash-ngram/1`, `catalog::apply` keeps the
+  embedder the store has, and the daemon switches it to `embedding.model` of `config.json`).
+- Project scoping: a vertex with a `project` property (the project's stable id, `crate::projects`)
   is visible only from that project; one without it is global. Memory ids are
   `memory:<slug>@<project>` (project) and `memory:<slug>` (global); `memory`, `forget` and
   `links` look in the project first, then in the global memory.
@@ -143,8 +176,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   (`fact_kind` decision | correction | outcome | open_thread), all with the session's `project`;
   `session -contains-> turn|fact`. They are written only by the internal catalog functions
   (`src/catalog/internal.json`: `indexed_sessions`, `index_session`, `index_turns`,
-  `set_summary`), which the daemon runs on the store's session thread (`catalog::call`); they
-  are never tools of the `use` server (its tool list is `FUNCTIONS`).
+  `set_summary`; plus `merge_project` and `export_memories`), which the daemon runs on the
+  store's session thread (`catalog::call`); they are never tools of the `use` server (its tool
+  list is `FUNCTIONS`).
 - **No LLM call without consent**: summaries run only when `summaries.enabled` is true, only
   through the user's harness command, never from a hook; tests use a fake harness script and
   assert zero calls when disabled.

@@ -29,6 +29,11 @@ pub(crate) fn setup_in(home: &Path, data: &Path) -> Setup {
         run_dir: short_run_dir(),
         exe: PathBuf::from("/opt/gm/bin/graphersal-memory"),
         dir_args: vec!["--data-dir".into(), data.display().to_string()],
+        // No network in tests: a model download fails at once (nothing listens on port 1).
+        source: crate::download::Source {
+            endpoint: "http://127.0.0.1:1".into(),
+            token: None,
+        },
     }
 }
 
@@ -127,8 +132,11 @@ fn run_uninstall(setup: &Setup, options: UninstallOptions) -> (u8, String) {
 }
 
 fn uninstall_yes() -> UninstallOptions {
+    // These tests check what uninstall gives back of the harness's files; the export of the
+    // memories into the file memory has its own tests (`export_*`).
     UninstallOptions {
         yes: true,
+        no_export: true,
         ..UninstallOptions::default()
     }
 }
@@ -675,6 +683,7 @@ fn purge_refuses_a_directory_that_is_not_ours() {
         &UninstallOptions {
             yes: true,
             purge: true,
+            no_export: true,
             ..UninstallOptions::default()
         },
         &mut &b""[..],
@@ -889,5 +898,366 @@ fn a_block_of_an_unknown_version_is_kept_by_install_and_removed_by_uninstall() {
         !setup.paths.instructions.exists()
             || !read(&setup.paths.instructions).contains("graphersal-memory:begin")
     );
+    memory.close();
+}
+
+// ------------------------------------------------------------------------------------------
+// M6b: the wizard, the auto-memory switch, the embedding model, the export back to files.
+// ------------------------------------------------------------------------------------------
+
+/// The memories of the store served in this process (as the daemon's `export_memories`).
+struct InProcess<'a>(&'a Memory);
+
+impl crate::export::Source for InProcess<'_> {
+    fn memories(&mut self, project: &str) -> Result<Vec<crate::export::Row>, String> {
+        let answer = self
+            .0
+            .runtime
+            .call("export_memories", json!({"project": project}))?;
+        Ok(crate::export::rows(&answer))
+    }
+}
+
+fn run_uninstall_exporting(
+    setup: &Setup,
+    memory: &Memory,
+    options: UninstallOptions,
+    input: &[u8],
+) -> (u8, String) {
+    let mut out = Vec::new();
+    let mut source = InProcess(memory);
+    let mut input = input;
+    let code =
+        install::uninstall_with(setup, &options, Some(&mut source), &mut input, &mut out).unwrap();
+    (code, String::from_utf8(out).unwrap())
+}
+
+fn run_wizard(setup: &Setup, memory: &Memory, input: &str) -> (u8, String) {
+    let mut connect = memory.connector();
+    let mut out = Vec::new();
+    let options = InstallOptions {
+        interactive: true,
+        ..InstallOptions::default()
+    };
+    let mut input = input.as_bytes();
+    let code = install::install(setup, &options, &mut connect, &mut input, &mut out).unwrap();
+    (code, String::from_utf8(out).unwrap())
+}
+
+fn settings_json(setup: &Setup) -> Value {
+    serde_json::from_str(&read(&setup.paths.settings)).unwrap()
+}
+
+#[test]
+fn the_wizard_asks_each_step_and_its_answers_change_what_install_does() {
+    let home = TempDir::new("wiz-home");
+    let data = TempDir::new("wiz-data");
+    let work = TempDir::new("wiz-work");
+    let project_dir = mcp::canonical(work.path());
+    memory_fixture(home.path(), &project_dir);
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    // Language: any (2); model: built-in (3); import: Enter (yes); auto-memory: Enter (off);
+    // summaries: an invalid answer, then Enter (asked again: no default), then 2 (no);
+    // develop: 1 (yes); summary: Enter applies.
+    let (code, out) = run_wizard(&setup, &memory, "2\n3\n\n\nx\n\n2\n1\n\n");
+    assert_eq!(code, 0, "{out}");
+    for step in [
+        "Step 1 of 7 \u{b7} Memory language",
+        "Step 2 of 7 \u{b7} Embedding model",
+        "Step 3 of 7 \u{b7} Import existing file memory",
+        "Step 4 of 7 \u{b7} Claude Code's auto-memory",
+        "Step 5 of 7 \u{b7} Session summaries",
+        "Step 6 of 7 \u{b7} The develop server",
+        "Step 7 of 7 \u{b7} Summary",
+    ] {
+        assert!(out.contains(step), "{step}\n{out}");
+    }
+    assert!(out.contains("potion-retrieval-32M"), "{out}");
+    assert!(out.contains("English, ~130 MB, MIT"), "{out}");
+    assert!(out.contains("100+ languages, ~530 MB, MIT"), "{out}");
+    assert!(out.contains("not meaning; weaker search"), "{out}");
+    assert!(out.contains("Please type a number from 1 to 2"), "{out}");
+    assert!(out.matches(install::NOTHING_IS_LOST).count() >= 2, "{out}");
+    // The answers took effect.
+    let config = crate::config::Config::load(data.path()).unwrap();
+    assert_eq!(config.language, Some(crate::language::Language::Any));
+    assert_eq!(config.model.as_deref(), Some(crate::models::BUILTIN));
+    assert!(!config.summaries.enabled);
+    assert_eq!(settings_json(&setup)["autoMemoryEnabled"], false);
+    let user_config: Value = serde_json::from_str(&read(&setup.paths.user_config)).unwrap();
+    assert_eq!(
+        user_config["mcpServers"]["graphersal-memory-develop"],
+        setup.mcp_entry("develop")
+    );
+    let rules = read(&setup.paths.instructions);
+    assert!(rules.contains(install::RULE_BLOCK_ANY), "{rules}");
+    assert!(out.contains("imported 3 memories"), "{out}");
+    let status = install::status_lines(&setup).join("\n");
+    assert!(status.contains("memory language: any language"), "{status}");
+    assert!(
+        status.contains("rule block") && status.contains(": installed"),
+        "{status}"
+    );
+    assert!(
+        status.contains("auto-memory") && status.contains("set by install"),
+        "{status}"
+    );
+
+    // Again: the current answers are the defaults, Enter everywhere changes nothing.
+    let installed = snapshot(home.path());
+    let (code, out) = run_wizard(&setup, &memory, "\n\n\n\n\n\n\n");
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("already up to date"), "{out}");
+    assert_eq!(snapshot(home.path()), installed);
+
+    // Cancel at the summary (now 6 steps: nothing left to import): nothing changes.
+    let (code, out) = run_wizard(&setup, &memory, "1\n\n\n\n\nn\n");
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("Cancelled"), "{out}");
+    assert_eq!(snapshot(home.path()), installed);
+    // The input ends before a question without a default: nothing changes either.
+    let fresh_home = TempDir::new("wiz-home2");
+    let fresh = setup_in(fresh_home.path(), data.path());
+    std::fs::remove_dir_all(data.path().join("install")).unwrap();
+    let (code, out) = run_wizard(&fresh, &memory, "\n\n\n");
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("Aborted: no answer"), "{out}");
+    assert!(!fresh.paths.user_config.exists());
+    memory.close();
+}
+
+#[test]
+fn the_auto_memory_switch_goes_back_to_what_it_was() {
+    let home = TempDir::new("am-home");
+    let data = TempDir::new("am-data");
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(
+        home.path().join(".claude/settings.json"),
+        "{\"autoMemoryEnabled\": true, \"model\": \"opus\"}\n",
+    )
+    .unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(settings_json(&setup)["autoMemoryEnabled"], false);
+    assert!(out.contains(install::NOTHING_IS_LOST), "{out}");
+    // Re-run with --keep-auto-memory: back to true, the hooks stay.
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            yes: true,
+            keep_auto_memory: true,
+            ..InstallOptions::default()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(settings_json(&setup)["autoMemoryEnabled"], true);
+    assert!(settings_json(&setup)["hooks"]["SessionStart"].is_array());
+    // The next plain re-run keeps that answer.
+    run_install(&setup, &memory, yes());
+    assert_eq!(settings_json(&setup)["autoMemoryEnabled"], true);
+    // Switch off again in the wizard (language, model, auto-memory: 1, summaries, develop,
+    // apply); the user edits the file; the structural uninstall restores `true`.
+    let (code, out) = run_wizard(&setup, &memory, "\n\n1\n\n\n\n");
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(settings_json(&setup)["autoMemoryEnabled"], false);
+    let edited = read(&setup.paths.settings).replacen('{', "{\"theme\": \"light\", ", 1);
+    std::fs::write(&setup.paths.settings, &edited).unwrap();
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    let settings = settings_json(&setup);
+    assert_eq!(settings["autoMemoryEnabled"], true, "{settings}");
+    assert_eq!(settings["theme"], "light");
+    assert_eq!(settings["model"], "opus");
+    assert!(settings.get("hooks").is_none(), "{settings}");
+    memory.close();
+}
+
+#[test]
+fn uninstall_exports_every_memory_back_including_ones_added_later_and_keeps_edited_files() {
+    let home = TempDir::new("exp-home");
+    let data = TempDir::new("exp-data");
+    let work = TempDir::new("exp-work");
+    let project_dir = mcp::canonical(work.path());
+    let memory_dir = memory_fixture(home.path(), &project_dir);
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let project = project_dir.display().to_string();
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    // A memory added through MCP after install, and a global one.
+    for (slug, scope) in [("added-later", "project"), ("tabs-not-spaces", "global")] {
+        let saved = memory.call(
+            &project,
+            "remember",
+            json!({"slug": slug, "kind": "feedback", "summary": format!("{slug} summary"),
+                   "body": format!("{slug} body"), "why": "because", "scope": scope,
+                   "links": ["graph-first"]}),
+        );
+        assert!(saved.to_string().contains(slug), "{saved}");
+    }
+    // The user edited one memory file since the import.
+    let edited = memory_dir.join("release-plan.md");
+    std::fs::write(&edited, "my own text\n").unwrap();
+
+    let (code, out) = run_uninstall_exporting(
+        &setup,
+        &memory,
+        UninstallOptions {
+            yes: true,
+            ..UninstallOptions::default()
+        },
+        b"",
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("export 5 memories of 1 project (1 global)"),
+        "{out}"
+    );
+    assert!(out.contains("exported 5 memories"), "{out}");
+    let added = read(&memory_dir.join("added-later.md"));
+    assert!(
+        added.starts_with(
+            "---\nname: added-later\ndescription: added-later summary\nmetadata:\n  type: feedback\n---\n"
+        ),
+        "{added}"
+    );
+    assert!(added.contains("Related: [[graph-first]]"), "{added}");
+    assert!(added.contains("**Why:** because"), "{added}");
+    // The edited file is kept; the graph's version goes beside it.
+    assert_eq!(read(&edited), "my own text\n");
+    assert!(read(&memory_dir.join("release-plan.graphersal.md")).contains("Friday releases."));
+    assert!(out.contains("release-plan.graphersal.md"), "{out}");
+    // The index differs from the fixture's: kept, ours beside it.
+    assert!(read(&memory_dir.join("MEMORY.graphersal.md")).contains("(added-later.md)"));
+    // The global memory: a user rules file every project loads.
+    let global = read(
+        &home
+            .path()
+            .join(".claude/rules/graphersal-memory-global.md"),
+    );
+    assert!(global.contains("tabs-not-spaces summary"), "{global}");
+    // Claude Code's settings are gone (install created them), the auto-memory with them.
+    assert!(!setup.paths.settings.exists());
+    // A second export finds everything in place.
+    let report = crate::export::write(
+        &setup.agent(),
+        data.path(),
+        &InProcess(&memory).memories_all(),
+    )
+    .unwrap();
+    assert!(report.written.is_empty(), "{report:?}");
+    memory.close();
+}
+
+impl InProcess<'_> {
+    fn memories_all(&mut self) -> Vec<crate::export::Row> {
+        crate::export::Source::memories(self, "").unwrap()
+    }
+}
+
+#[test]
+fn importing_an_export_gives_the_same_memories_back() {
+    let home = TempDir::new("rtx-home");
+    let data = TempDir::new("rtx-data");
+    let work = TempDir::new("rtx-work");
+    let project_dir = mcp::canonical(work.path());
+    let original_dir = memory_fixture(home.path(), &project_dir);
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    run_install(&setup, &memory, yes());
+    let other = TempDir::new("rtx-home2");
+    let elsewhere = setup_in(other.path(), data.path());
+    let rows = InProcess(&memory).memories_all();
+    let report = crate::export::write(&elsewhere.agent(), data.path(), &rows).unwrap();
+    assert_eq!(report.memories, 3, "{report:?}");
+    let exported_dir = crate::agents::Agent::memory_dir(&elsewhere.agent(), &project_dir);
+    let project = Some(project_dir.display().to_string());
+    let before = import::read_dir(&original_dir, project.clone());
+    let after = import::read_dir(&exported_dir, project);
+    assert!(after.problems.is_empty(), "{:?}", after.problems);
+    let key = |f: &import::MemoryFile| {
+        (
+            f.slug.clone(),
+            f.kind.clone(),
+            f.summary.clone(),
+            f.body.clone(),
+            f.why.clone(),
+            f.how_to_apply.clone(),
+            f.links.clone(),
+        )
+    };
+    let mut a: Vec<_> = before.files.iter().map(key).collect();
+    let mut b: Vec<_> = after.files.iter().map(key).collect();
+    a.sort();
+    b.sort();
+    assert_eq!(a, b);
+    // The listed memories keep their index line and order too.
+    for slug in ["graph-first", "release-plan"] {
+        let find = |dir: &import::MemoryDir| {
+            let f = dir.files.iter().find(|f| f.slug == slug).unwrap();
+            (f.title.clone(), f.hook.clone(), f.order)
+        };
+        assert_eq!(find(&before), find(&after), "{slug}");
+    }
+    memory.close();
+}
+
+#[test]
+fn uninstall_asks_before_exporting_and_no_export_skips_it() {
+    let home = TempDir::new("ask-exp-home");
+    let data = TempDir::new("ask-exp-data");
+    let work = TempDir::new("ask-exp-work");
+    let project_dir = mcp::canonical(work.path());
+    memory_fixture(home.path(), &project_dir);
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    run_install(&setup, &memory, yes());
+    let (code, out) = run_uninstall_exporting(
+        &setup,
+        &memory,
+        UninstallOptions {
+            interactive: true,
+            dry_run: true,
+            ..UninstallOptions::default()
+        },
+        b"",
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("export every memory back"), "{out}");
+    // Interactive: "n" to the export, "y" to proceed.
+    let (code, out) = run_uninstall_exporting(
+        &setup,
+        &memory,
+        UninstallOptions {
+            interactive: true,
+            ..UninstallOptions::default()
+        },
+        b"n\ny\n",
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("Export 3 memories of 1 project back to Claude Code's file memory? [Y/n]"),
+        "{out}"
+    );
+    assert!(out.contains("not exported (you answered no)"), "{out}");
+    // Without a source the export cannot run, and nothing is removed.
+    run_install(&setup, &memory, yes());
+    let mut out = Vec::new();
+    let err = install::uninstall(
+        &setup,
+        &UninstallOptions {
+            yes: true,
+            ..UninstallOptions::default()
+        },
+        &mut &b""[..],
+        &mut out,
+    )
+    .unwrap_err();
+    assert!(err.contains("nothing was removed"), "{err}");
+    assert!(setup.paths.user_config.exists());
     memory.close();
 }

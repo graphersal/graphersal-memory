@@ -102,16 +102,42 @@ or `GRAPHERSAL_MEMORY_DIR` gets `<data dir>/run`, so each data directory has a d
 - **One shared store by default.** Every memory carries its project, and search defaults to the
   current project plus your global memory: preferences and cross-project rules. The global
   memories live in the same store, without a project.
-- **The settings file** (`config.json` in the data directory, written with the defaults by
-  `install`): `{"version": 1, "daemon": {"idle": "2h"}, "summaries": {"enabled": false,
-  "harness_command": "claude -p --model sonnet", "monthly_budget_usd": 5}}` (plus the optional
-  `summaries.since`, a date). A missing file means the defaults; keys this version does not know
-  are ignored, and `doctor` names them.
-- **The project records** (`projects.json` in the data directory): every project that connected,
-  with its git remote URL (the `origin` remote, else the first one, without credentials) and when it
-  was first seen. The project key stays the canonical root path, so moving a repository orphans its
-  memories for now; the recorded remote lets a later version find the moved repository and re-map
-  them. The daemon records a project the first time it connects in the daemon's life.
+- **The settings file** (`config.json` in the data directory, written by `install` with the
+  defaults and your answers): `{"version": 1, "daemon": {"idle": "2h"}, "memory": {"language":
+  "english"}, "embedding": {"model": "minishlab/potion-retrieval-32M"}, "summaries": {"enabled":
+  false, "harness_command": "claude -p --model sonnet", "monthly_budget_usd": 5}}` (plus the
+  optional `summaries.since`, a date). `memory.language` (`english` or `any`) is the memory
+  language rule of the `use` server's instructions and of the rule block; the daemon reads it for
+  every new connection. `embedding.model` (a Hugging Face repository, or `hash-ngram/1` for the
+  built-in embedder) is the model the daemon makes every store use; without it a store keeps the
+  embedder it has. A missing file means the defaults; keys this version does not know are
+  ignored, and `doctor` names them.
+- **The embedding model.** Every memory, session, turn and fact has a vector (`emb`) the search
+  compares, kept in step with its text by a vector rule of the schema. The built-in
+  `hash-ngram/1` compares character n-grams: it finds shared words and spellings, not meaning.
+  `install` offers a Model2Vec model instead (a static embedding model that runs on the CPU):
+  it downloads the model once from Hugging Face into `models/<owner>/<name>/` in the data
+  directory (checked against the SHA-256 Hugging Face states, with its model card, licence files
+  and a manifest; a failed download leaves nothing behind), and names it in `config.json`. The
+  daemon, when it opens a store (or when `install` tells a running daemon), imports the model
+  into the store (it becomes the store's default model, and every copy of the store carries it
+  with its licence) and switches the vector rules to it, which embeds every vertex again. That
+  runs on a thread of its own, so no handshake waits; while the store re-embeds, memory calls
+  wait for it (Model2Vec embeds tens of thousands of short texts per second).
+- **Project identity** (`projects.json` in the data directory). Every project has a stable id,
+  which memories, sessions, turns and facts carry: the project's root path when the memory first
+  saw it, never changed afterwards (projects recorded before ids existed keep their path, so
+  nothing had to be migrated). A session's directory is mapped to an id by up to three keys, in
+  this order: (1) the git remote (`origin` first, then the others; normalized, so
+  `git@github.com:me/app.git` and `https://github.com/me/app` are the same, credentials never
+  stored): the same project wherever the clone is, so a moved repository keeps its memories and
+  two clones of one remote share them, on purpose; (2) the path: a project seen there before,
+  which records a remote the repository has now; (3) the root commit (`git rev-list
+  --max-parents=0 HEAD`): never merged automatically, because forks and repositories made from a
+  template share it, but `doctor`, `install` and `projects list` say "looks like project X,
+  moved", and `graphersal-memory projects merge <from> <into>` moves the memories, sessions and
+  facts of one project into the other (a memory of the same name keeps the more recently updated
+  text) and the lookup keys with them.
 - **The store registry** (`registry.json` in the data directory) says which store serves which
   project: `{"version": 1, "default": "default", "projects": {}}`. Today every project goes to
   the default store; the registry is where isolated projects will be listed.
@@ -202,3 +228,17 @@ The import of the file memory goes through the memory functions like any agent c
 opens a `use` connection to the daemon for each project and calls `remember`, so the store keeps a
 single writer. `import/claude-code.json` in the data directory remembers the fingerprint of every
 imported file, so only new and changed files are sent again.
+
+The export back (`uninstall`, `export --to-files`) asks the daemon for every memory and writes
+them in the format the import reads: per project `MEMORY.md` and `<slug>.md` with the front matter
+`name`, `description`, `metadata.type` in the project's memory directory, the global memories into
+one file the harness loads in every project (Claude Code: `~/.claude/rules/graphersal-memory-global.md`).
+A file that already holds the same text is left alone; a file that differs is kept and the
+graph's version written beside it as `<name>.graphersal.md`; nothing is deleted. Importing an
+export gives the same memories back (a test checks it); links the body does not show get a
+`Related: [[slug]]` line.
+
+The installation code talks to the harness through one interface (`src/agents.rs`: its MCP
+configuration file, settings file, instruction file, projects directory, memory directory of a
+project, global memory file, auto-memory switch and headless command), so the next harness is a
+new implementation of it rather than a new code path.

@@ -29,6 +29,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use graphersal_mcp::Mcp;
 use serde_json::json;
 
+use crate::config::Config;
 use crate::ipc::{self, LockFile, Stream};
 use crate::mcp::{self, StoreRuntime};
 use crate::protocol::{self, Handshake, Opening, Refusal};
@@ -167,8 +168,9 @@ struct Daemon {
     registry: Registry,
     mcp: Arc<Mcp>,
     stores: Mutex<BTreeMap<String, Arc<StoreRuntime>>>,
-    /// The projects recorded in `projects.json` during this daemon's life.
-    projects_seen: Mutex<std::collections::BTreeSet<String>>,
+    /// The embedder switches running (`StoreRuntime::switch_embedder`): work for the idle
+    /// clock.
+    embedding: Arc<std::sync::atomic::AtomicUsize>,
     state: Mutex<State>,
     started_at: SystemTime,
     started: Instant,
@@ -236,7 +238,7 @@ pub fn run(options: DaemonOptions) -> Result<(), String> {
         registry,
         mcp: Arc::new(mcp::endpoint()),
         stores: Mutex::new(BTreeMap::new()),
-        projects_seen: Mutex::new(std::collections::BTreeSet::new()),
+        embedding: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         state: Mutex::new(State {
             connections: 0,
             last_change: Instant::now(),
@@ -409,7 +411,7 @@ impl Daemon {
         let tick = (self.options.idle / 4).clamp(Duration::from_millis(50), Duration::from_secs(5));
         loop {
             std::thread::sleep(tick);
-            let indexing = self.lock_indexer().running;
+            let indexing = self.lock_indexer().running || self.embedding.load(Ordering::SeqCst) > 0;
             let background: usize = self
                 .stores
                 .lock()
@@ -476,18 +478,123 @@ impl Daemon {
         std::process::exit(0)
     }
 
-    /// Records a project (its git remote) in `projects.json` the first time it connects in
-    /// this daemon's life.
-    fn note_project(&self, project: &str) {
-        let mut seen = self
-            .projects_seen
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if seen.insert(project.to_string())
-            && let Err(err) = crate::projects::record(&self.options.data_dir, project)
-        {
-            log(&format!("cannot record the project {project}: {err}"));
+    /// The stable id of the project at `path` (`crate::projects::resolve`: by its git remote,
+    /// else its path; a new project is recorded). A projects file that cannot be read leaves
+    /// the path as the id (logged).
+    fn resolve_project(&self, path: &str) -> String {
+        match crate::projects::resolve(&self.options.data_dir, path) {
+            Ok(resolved) => {
+                if resolved.created && !resolved.look_alikes.is_empty() {
+                    log(&format!(
+                        "new project {path} has the first commit of {}: if it moved, \
+                         `graphersal-memory projects merge` keeps its memories",
+                        resolved.look_alikes.join(", ")
+                    ));
+                }
+                resolved.id
+            }
+            Err(err) => {
+                log(&format!("cannot resolve the project {path}: {err}"));
+                path.to_string()
+            }
         }
+    }
+
+    /// Makes `store` use the embedding model of the settings file (`embedding.model`), on a
+    /// thread of its own: the import and the re-embedding never hold up a connection's
+    /// handshake (MCP calls wait while the store re-embeds). Without the setting nothing
+    /// changes.
+    fn apply_embedder(&self, store: Arc<StoreRuntime>) {
+        let wanted = match Config::load(&self.options.data_dir) {
+            Ok(config) => config.model,
+            Err(err) => {
+                log(&err);
+                None
+            }
+        };
+        let Some(wanted) = wanted else {
+            return;
+        };
+        let data_dir = self.options.data_dir.clone();
+        let running = self.embedding.clone();
+        running.fetch_add(1, Ordering::SeqCst);
+        let spawned = std::thread::Builder::new()
+            .name("embedder".into())
+            .spawn(move || {
+                match store.switch_embedder(&data_dir, &wanted) {
+                    Ok(true) => log(&format!(
+                        "the store {} uses the embedding model {wanted} now (re-embedded)",
+                        store.name()
+                    )),
+                    Ok(false) => {}
+                    Err(err) => log(&format!(
+                        "the store {} keeps its embedder: {err}",
+                        store.name()
+                    )),
+                }
+                running.fetch_sub(1, Ordering::SeqCst);
+            });
+        if let Err(err) = spawned {
+            self.embedding.fetch_sub(1, Ordering::SeqCst);
+            log(&format!("cannot start the embedder switch: {err}"));
+        }
+    }
+
+    /// `apply_settings`: the settings file changed (install): every open store switches to the
+    /// embedding model it names.
+    fn apply_settings(&self) -> serde_json::Value {
+        let stores: Vec<Arc<StoreRuntime>> = self
+            .stores
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        let count = stores.len();
+        for store in stores {
+            self.apply_embedder(store);
+        }
+        json!({"ok": true, "stores": count})
+    }
+
+    /// `merge_projects`: moves every memory, session, turn and fact of project `from` into
+    /// project `into` (the internal function `merge_project` on the store's session thread),
+    /// then moves `from`'s lookup keys to `into` in `projects.json`.
+    fn merge_projects(&self, line: &[u8]) -> Result<serde_json::Value, String> {
+        let request: serde_json::Value =
+            serde_json::from_slice(line).map_err(|err| err.to_string())?;
+        let from = request["from"].as_str().unwrap_or_default();
+        let into = request["into"].as_str().unwrap_or_default();
+        if from.is_empty() || into.is_empty() || from == into {
+            return Err("merge_projects needs two different project ids, from and into".into());
+        }
+        let projects = crate::projects::Projects::load(&self.options.data_dir)?;
+        for id in [from, into] {
+            if projects.get(id).is_none() {
+                return Err(format!(
+                    "no project {id} (`graphersal-memory projects list`)"
+                ));
+            }
+        }
+        let store = self.store_for(into)?;
+        if self.registry.store_for(from) != store.name() {
+            return Err(format!("{from} and {into} live in different stores"));
+        }
+        let moved = store.call("merge_project", json!({"from": from, "into": into}))?;
+        crate::projects::merge_records(&self.options.data_dir, from, into)?;
+        log(&format!("merged project {from} into {into}: {moved}"));
+        Ok(json!({"ok": true, "merged": moved}))
+    }
+
+    /// `export_memories`: every memory (or one project's and the global ones) with what the
+    /// file memory format keeps (`uninstall`, `export --to-files`).
+    fn export_memories(&self, line: &[u8]) -> Result<serde_json::Value, String> {
+        let request: serde_json::Value =
+            serde_json::from_slice(line).map_err(|err| err.to_string())?;
+        let project = request["project"].as_str().unwrap_or_default();
+        let store = self.store_for(project)?;
+        let memories = store.call("export_memories", json!({"project": project}))?;
+        Ok(json!({"ok": true, "memories": memories}))
     }
 
     /// The runtime of the store that serves `project`, opened on first use.
@@ -507,6 +614,8 @@ impl Daemon {
         }
         log(&format!("opened the store {name} ({})", dir.display()));
         stores.insert(name.to_string(), store.clone());
+        drop(stores);
+        self.apply_embedder(store.clone());
         Ok(store)
     }
 
@@ -587,6 +696,15 @@ impl Daemon {
                         }
                     }
                     sessions::CONTROL_STATUS => answer(self.sessions_status().to_string()),
+                    "apply_settings" => answer(self.apply_settings().to_string()),
+                    "export_memories" => match self.export_memories(&line) {
+                        Ok(done) => answer(done.to_string()),
+                        Err(err) => answer(protocol::refusal(Refusal::Store, &err)),
+                    },
+                    "merge_projects" => match self.merge_projects(&line) {
+                        Ok(done) => answer(done.to_string()),
+                        Err(err) => answer(protocol::refusal(Refusal::Store, &err)),
+                    },
                     "stop" => {
                         answer(
                             json!({"ok": true, "daemon_version": self.options.version}).to_string(),
@@ -597,7 +715,8 @@ impl Daemon {
                         Refusal::BadHandshake,
                         &format!(
                             "unknown control request '{other}' (expected status, stop, \
-                             index_sessions or sessions_status)"
+                             index_sessions, sessions_status, apply_settings, export_memories or \
+                             merge_projects)"
                         ),
                     )),
                 }
@@ -623,7 +742,8 @@ impl Daemon {
         let Some(registered) = self.register(&handshake, &mut answer) else {
             return;
         };
-        let store = match self.store_for(&handshake.project) {
+        let project = self.resolve_project(&handshake.project);
+        let store = match self.store_for(&project) {
             Ok(store) => store,
             Err(err) => {
                 log(&err);
@@ -635,22 +755,29 @@ impl Daemon {
             json!({"ok": true, "daemon_version": self.options.version, "store": store.name()})
                 .to_string(),
         );
-        self.note_project(&handshake.project);
         let _ = reader.get_ref().set_read_timeout(None);
         let profile = match handshake.profile {
             crate::cli::Profile::Use => "use",
             crate::cli::Profile::Develop => "develop",
         };
         log(&format!(
-            "connection opened: profile {profile}, project {}, harness {}, store {}",
-            handshake.project,
+            "connection opened: profile {profile}, project {project}{}, harness {}, store {}",
+            if project == handshake.project {
+                String::new()
+            } else {
+                format!(" (at {})", handshake.project)
+            },
             handshake.harness,
             store.name()
         ));
-        let served = store.serve(
+        let language = Config::load(&self.options.data_dir)
+            .map(|config| config.language())
+            .unwrap_or_default();
+        let served = store.serve_with(
             handshake.profile,
-            &handshake.project,
+            &project,
             Some(&handshake.harness),
+            language,
             &mut reader,
             &mut writer,
         );
