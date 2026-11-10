@@ -137,20 +137,28 @@ jobs:
           "${run[@]}" --help > help.txt
           grep -qF "Usage: graphersal-memory" help.txt
 
-          # One MCP session over stdin on a temporary data directory: initialize, the tool list,
-          # a write and a read of the memory. End of input ends the session.
+          # Two MCP sessions over stdin on one temporary data directory: the first initializes,
+          # lists the tools and writes a memory; the second reads it back. Calls of one session
+          # may run concurrently and answer out of order (MCP allows it), so the read must not
+          # share a session with the write. End of input ends a session.
           data="$RUNNER_TEMP/gm-data"
           project="$RUNNER_TEMP/gm-project"
           mkdir -p "$data" "$project"
+          init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
+          inited='{"jsonrpc":"2.0","method":"notifications/initialized"}'
           {
-            echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
-            echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+            echo "$init"
+            echo "$inited"
             echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
             echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"remember","arguments":{"slug":"smoke","kind":"project","summary":"Smoke test memory","body":"Written by the release smoke test."}}}'
-            echo '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memories","arguments":{}}}'
           } | "${run[@]}" mcp --no-daemon --data-dir "$data" --project "$project" > mcp.out
+          {
+            echo "$init"
+            echo "$inited"
+            echo '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memories","arguments":{}}}'
+          } | "${run[@]}" mcp --no-daemon --data-dir "$data" --project "$project" >> mcp.out
           cut -c1-300 mcp.out
-          test "$(wc -l < mcp.out)" -ge 4
+          test "$(wc -l < mcp.out)" -ge 5
           grep -q '"id":1,.*"serverInfo":{[^}]*"name":"graphersal-memory"' mcp.out
           grep -q '"id":2,.*"name":"remember"' mcp.out
           grep '"id":3,' mcp.out | grep -q '"isError":false'
