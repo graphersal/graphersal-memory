@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::agents::Kind;
 use crate::cli::Profile as ProfileKind;
 use crate::client::McpClient;
 use crate::import::{self, Caller, ImportState};
@@ -25,6 +26,8 @@ pub(crate) fn setup_in(home: &Path, data: &Path) -> Setup {
         ClaudePaths::resolve(&|name| (name == "HOME").then(|| home.display().to_string())).unwrap();
     Setup {
         paths,
+        opencode: crate::opencode::OpenCodePaths::of_home(home),
+        search_path: Some(std::ffi::OsString::new()),
         data_dir: data.to_path_buf(),
         run_dir: short_run_dir(),
         exe: PathBuf::from("/opt/gm/bin/graphersal-memory"),
@@ -1131,8 +1134,14 @@ fn uninstall_exports_every_memory_back_including_ones_added_later_and_keeps_edit
     assert_eq!(read(&edited), "my own text\n");
     assert!(read(&memory_dir.join("release-plan.graphersal.md")).contains("Friday releases."));
     assert!(out.contains("release-plan.graphersal.md"), "{out}");
-    // The index differs from the fixture's: kept, ours beside it.
-    assert!(read(&memory_dir.join("MEMORY.graphersal.md")).contains("(added-later.md)"));
+    // The index differs from the fixture's: kept, the missing line appended to it (user
+    // decision 2026-11-10: no MEMORY.graphersal.md any more).
+    let index = read(&memory_dir.join("MEMORY.md"));
+    assert!(index.contains("(added-later.md)"), "{index}");
+    assert_eq!(index.matches("(added-later.md)").count(), 1);
+    assert!(!memory_dir.join("MEMORY.graphersal.md").exists());
+    // The fixture's index lists neither added-later nor odd-name.
+    assert!(out.contains("appended 2 index lines"), "{out}");
     // The global memory: a user rules file every project loads.
     let global = read(
         &home
@@ -1150,6 +1159,7 @@ fn uninstall_exports_every_memory_back_including_ones_added_later_and_keeps_edit
     )
     .unwrap();
     assert!(report.written.is_empty(), "{report:?}");
+    assert!(report.appended.is_empty(), "{report:?}");
     memory.close();
 }
 
@@ -1259,5 +1269,396 @@ fn uninstall_asks_before_exporting_and_no_export_skips_it() {
     .unwrap_err();
     assert!(err.contains("nothing was removed"), "{err}");
     assert!(setup.paths.user_config.exists());
+    memory.close();
+}
+
+// ------------------------------------------------------------------------------------------
+// M7a: opencode.
+// ------------------------------------------------------------------------------------------
+
+fn opencode_only() -> InstallOptions {
+    InstallOptions {
+        yes: true,
+        harnesses: Some(vec![Kind::OpenCode]),
+        ..InstallOptions::default()
+    }
+}
+
+fn opencode_uninstall() -> UninstallOptions {
+    UninstallOptions {
+        yes: true,
+        no_export: true,
+        harnesses: Some(vec![Kind::OpenCode]),
+        ..UninstallOptions::default()
+    }
+}
+
+/// A home with an opencode configuration in JSONC (comments, a trailing comma), the user's own
+/// AGENTS.md and plugin.
+fn existing_opencode_home(home: &Path) {
+    let dir = home.join(".config/opencode");
+    std::fs::create_dir_all(dir.join("plugins")).unwrap();
+    std::fs::write(
+        dir.join("opencode.jsonc"),
+        "{\n  // my settings\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"model\": \"opencode/big-pickle\",\n  \"mcp\": {\n    \"other\": {\"type\": \"local\", \"command\": [\"x\"]}, /* keep */\n  },\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("AGENTS.md"), "# My opencode rules\n").unwrap();
+    std::fs::write(
+        dir.join("plugins/mine.js"),
+        "export const Mine = async () => ({})\n",
+    )
+    .unwrap();
+}
+
+fn opencode_setup(home: &Path, data: &Path) -> Setup {
+    // Resolved after the files exist (the configuration file install edits is the one there).
+    setup_in(home, data)
+}
+
+#[test]
+fn opencode_install_then_uninstall_leaves_existing_files_byte_identical() {
+    let home = TempDir::new("oc-rt-home");
+    let data = TempDir::new("oc-rt-data");
+    existing_opencode_home(home.path());
+    let before = snapshot(home.path());
+    let setup = opencode_setup(home.path(), data.path());
+    assert!(setup.opencode.config_file.ends_with("opencode.jsonc"));
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, opencode_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with("graphersal-memory install (opencode)"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("Claude Code"),
+        "no Claude Code wording: {out}"
+    );
+    let text = read(&setup.opencode.config_file);
+    assert!(
+        text.contains("// my settings") && text.contains("/* keep */"),
+        "{text}"
+    );
+    let config = crate::jsonedit::value_of(&text).unwrap();
+    assert_eq!(
+        config["mcp"]["graphersal-memory"],
+        crate::opencode::install::mcp_entry(&setup, "use", true)
+    );
+    assert_eq!(
+        config["mcp"]["graphersal-memory"]["command"][0],
+        "/opt/gm/bin/graphersal-memory"
+    );
+    assert_eq!(config["mcp"]["graphersal-memory-develop"]["enabled"], false);
+    assert_eq!(
+        config["instructions"],
+        json!([setup.opencode.rules_file.display().to_string()])
+    );
+    assert_eq!(config["mcp"]["other"]["command"], json!(["x"]));
+    let rules = read(&setup.opencode.rules_file);
+    assert!(rules.starts_with("<!-- graphersal-memory:begin"), "{rules}");
+    assert!(rules.contains("graphersal-memory_<function>"), "{rules}");
+    assert_eq!(
+        read(&home.path().join(".config/opencode/AGENTS.md")),
+        "# My opencode rules\n",
+        "the user's AGENTS.md is never touched"
+    );
+    let plugin = read(&setup.opencode.plugin_file);
+    assert!(crate::opencode::is_our_plugin(&plugin), "{plugin}");
+    assert!(plugin.contains("\"--data-dir\""), "{plugin}");
+    // Nothing of Claude Code's.
+    assert!(!setup.paths.user_config.exists() && !setup.paths.config_dir.exists());
+    assert!(data.path().join("install/opencode.json").exists());
+    assert!(!data.path().join("install/claude-code.json").exists());
+
+    // Idempotent.
+    let again = snapshot(home.path());
+    let (code, out) = run_install(&setup, &memory, opencode_only());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), again, "{out}");
+    assert!(out.contains("already up to date"), "{out}");
+
+    let (code, out) = run_uninstall(&setup, opencode_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    assert!(!data.path().join("install/opencode.json").exists());
+    memory.close();
+}
+
+#[test]
+fn opencode_install_on_an_empty_home_and_after_an_edit_removes_only_our_parts() {
+    let home = TempDir::new("oc-empty-home");
+    let data = TempDir::new("oc-empty-data");
+    let setup = opencode_setup(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, opencode_only());
+    assert_eq!(code, 0, "{out}");
+    let created = read(&setup.opencode.config_file);
+    assert!(
+        created.starts_with("{\n  \"$schema\": \"https://opencode.ai/config.json\""),
+        "{created}"
+    );
+    // The user (or opencode) adds a setting afterwards.
+    let edited = created.replacen("{\n", "{\n  \"theme\": \"tokyonight\",\n", 1);
+    std::fs::write(&setup.opencode.config_file, &edited).unwrap();
+    let (code, out) = run_uninstall(&setup, opencode_uninstall());
+    assert_eq!(code, 0, "{out}");
+    let left = crate::jsonedit::value_of(&read(&setup.opencode.config_file)).unwrap();
+    assert_eq!(
+        left,
+        json!({"theme": "tokyonight", "$schema": "https://opencode.ai/config.json"})
+    );
+    assert!(!setup.opencode.rules_file.exists() && !setup.opencode.plugin_file.exists());
+    assert!(
+        !setup.opencode.config_dir.join("plugins").exists(),
+        "the directory install made goes"
+    );
+    memory.close();
+
+    // Untouched: nothing is left at all.
+    let home = TempDir::new("oc-empty2-home");
+    let data = TempDir::new("oc-empty2-data");
+    let setup = opencode_setup(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, opencode_only()).0, 0);
+    let (code, out) = run_uninstall(&setup, opencode_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        snapshot(home.path()).is_empty(),
+        "{:?}",
+        snapshot(home.path())
+    );
+    memory.close();
+}
+
+#[test]
+fn opencode_conflicts_are_kept_and_the_develop_server_switches() {
+    let home = TempDir::new("oc-conf-home");
+    let data = TempDir::new("oc-conf-data");
+    let dir = home.path().join(".config/opencode");
+    std::fs::create_dir_all(dir.join("plugins")).unwrap();
+    std::fs::write(
+        dir.join("opencode.json"),
+        "{\"mcp\": {\"graphersal-memory\": {\"type\": \"remote\", \"url\": \"http://x\"}}}",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("plugins/graphersal-memory.js"),
+        "// someone else's\n",
+    )
+    .unwrap();
+    let setup = opencode_setup(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, opencode_only());
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("mcp.graphersal-memory exists and is not ours"),
+        "{out}"
+    );
+    assert!(
+        out.contains("graphersal-memory.js: the file exists"),
+        "{out}"
+    );
+    assert_eq!(
+        read(&dir.join("plugins/graphersal-memory.js")),
+        "// someone else's\n"
+    );
+    let config = crate::jsonedit::value_of(&read(&dir.join("opencode.json"))).unwrap();
+    assert_eq!(config["mcp"]["graphersal-memory"]["type"], "remote");
+    memory.close();
+
+    // The develop server: disabled until enabled, then disabled again by uninstall
+    // --disable-develop.
+    let home = TempDir::new("oc-dev-home");
+    let data = TempDir::new("oc-dev-data");
+    let setup = opencode_setup(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let options = InstallOptions {
+        enable_develop: true,
+        ..opencode_only()
+    };
+    assert_eq!(run_install(&setup, &memory, options).0, 0);
+    let develop = |setup: &Setup| {
+        crate::jsonedit::value_of(&read(&setup.opencode.config_file)).unwrap()["mcp"]
+            ["graphersal-memory-develop"]["enabled"]
+            .clone()
+    };
+    assert_eq!(develop(&setup), true);
+    let status = crate::opencode::install::status_lines(&setup).join("\n");
+    assert!(
+        status.contains("graphersal-memory-develop: registered, enabled"),
+        "{status}"
+    );
+    let (code, out) = run_uninstall(
+        &setup,
+        UninstallOptions {
+            disable_develop_only: true,
+            ..opencode_uninstall()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(develop(&setup), false);
+    assert!(setup.opencode.plugin_file.exists(), "everything else stays");
+    let (code, out) = run_uninstall(&setup, opencode_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        snapshot(home.path()).is_empty(),
+        "{:?}",
+        snapshot(home.path())
+    );
+    memory.close();
+}
+
+#[test]
+fn both_harnesses_share_one_store_and_the_wizard_asks_which_agents() {
+    let home = TempDir::new("both-home");
+    let data = TempDir::new("both-data");
+    existing_home(home.path());
+    existing_opencode_home(home.path());
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), data.path());
+    assert_eq!(setup.detected(), vec![Kind::ClaudeCode, Kind::OpenCode]);
+    let memory = Memory::open(data.path());
+    // Steps: agents, language, model, auto-memory, summaries, develop, summary.
+    let (code, out) = run_wizard(&setup, &memory, "\n\n3\n\n2\n2\n\n");
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Step 1 of 7 \u{b7} Which agents"), "{out}");
+    assert!(
+        out.contains("1) All of them       Claude Code and opencode  (default)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("graphersal-memory install (Claude Code, opencode)"),
+        "{out}"
+    );
+    assert_eq!(setup.installed(), vec![Kind::ClaudeCode, Kind::OpenCode]);
+    // One store: both registrations start the same binary with the same data directory.
+    let claude: Value = serde_json::from_str(&read(&setup.paths.user_config)).unwrap();
+    let opencode = crate::jsonedit::value_of(&read(&setup.opencode.config_file)).unwrap();
+    let claude_args = claude["mcpServers"]["graphersal-memory"]["args"].clone();
+    let opencode_command = opencode["mcp"]["graphersal-memory"]["command"].clone();
+    assert_eq!(
+        opencode_command.as_array().unwrap()[1..].to_vec(),
+        claude_args.as_array().unwrap().clone()
+    );
+    let status = crate::commands::status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
+    assert!(
+        status.contains("Claude Code (user configuration"),
+        "{status}"
+    );
+    assert!(status.contains("opencode (configuration"), "{status}");
+    // Uninstall without --harness removes both.
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("graphersal-memory uninstall (Claude Code, opencode)"),
+        "{out}"
+    );
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    memory.close();
+
+    // Only opencode chosen in the wizard: no Claude Code question, nothing written there.
+    let data = TempDir::new("both2-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    // Steps: agents (3 = opencode only), language, model, auto-memory (still asked: Claude
+    // Code was possible), summaries, develop, summary.
+    let (code, out) = run_wizard(&setup, &memory, "3\n\n3\n\n2\n2\n\n");
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("This is what install will do"), "{out}");
+    assert!(
+        !setup.paths.settings.exists()
+            || read(&setup.paths.settings) == read_before(&before, ".claude/settings.json")
+    );
+    assert_eq!(setup.installed(), vec![Kind::OpenCode]);
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    memory.close();
+}
+
+fn read_before(before: &[(PathBuf, Vec<u8>)], path: &str) -> String {
+    before
+        .iter()
+        .find(|(p, _)| p == Path::new(path))
+        .map(|(_, b)| String::from_utf8_lossy(b).into_owned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn opencode_uninstall_exports_every_memory_as_markdown_and_deletes_nothing() {
+    let home = TempDir::new("oc-exp-home");
+    let data = TempDir::new("oc-exp-data");
+    let work = TempDir::new("oc-exp-work");
+    let project_dir = mcp::canonical(work.path());
+    let project = project_dir.display().to_string();
+    let setup = opencode_setup(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, opencode_only()).0, 0);
+    for (slug, scope) in [("use-pnpm", "project"), ("tabs-not-spaces", "global")] {
+        let saved = memory.call(
+            &project,
+            "remember",
+            json!({"slug": slug, "kind": "feedback", "summary": format!("{slug} summary"),
+                   "body": format!("{slug} body"), "scope": scope}),
+        );
+        assert!(saved.to_string().contains(slug), "{saved}");
+    }
+    let (code, out) = run_uninstall_exporting(
+        &setup,
+        &memory,
+        UninstallOptions {
+            yes: true,
+            harnesses: Some(vec![Kind::OpenCode]),
+            ..UninstallOptions::default()
+        },
+        b"",
+    );
+    assert_eq!(code, 0, "{out}");
+    let export = home.path().join("graphersal-memory-export/opencode");
+    assert!(out.contains(&export.display().to_string()), "{out}");
+    assert!(out.contains("opencode has no file memory"), "{out}");
+    let dir = export.join(crate::import::claude_slug(&project));
+    assert!(read(&dir.join("use-pnpm.md")).contains("use-pnpm body"));
+    assert!(read(&dir.join("MEMORY.md")).contains("(use-pnpm.md)"));
+    assert!(read(&export.join("global.md")).contains("tabs-not-spaces summary"));
+    // The configuration is gone, the export stays; nothing was deleted from the memory.
+    assert!(!setup.opencode.config_file.exists());
+    let still = InProcess(&memory).memories_all();
+    assert_eq!(still.len(), 2);
+    memory.close();
+}
+
+#[test]
+fn opencode_status_and_doctor_name_its_parts() {
+    let home = TempDir::new("oc-doc-home");
+    let data = TempDir::new("oc-doc-data");
+    let setup = opencode_setup(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let before = crate::opencode::install::status_lines(&setup).join("\n");
+    assert!(before.contains("Not installed: run `graphersal-memory install --harness opencode`"));
+    assert_eq!(run_install(&setup, &memory, opencode_only()).0, 0);
+    let status = crate::opencode::install::status_lines(&setup).join("\n");
+    for part in [
+        "MCP server graphersal-memory (use): installed",
+        "graphersal-memory-develop: registered, disabled",
+        "rules file in instructions: installed",
+        "session plugin",
+        "opencode has none",
+    ] {
+        assert!(status.contains(part), "{part}: {status}");
+    }
+    let findings = crate::opencode::install::doctor(&setup);
+    assert!(findings.iter().all(|f| !f.problem), "{findings:?}");
+    // A hand edit of the rule block is a problem doctor names.
+    let rules = read(&setup.opencode.rules_file).replace("Save with", "Store with");
+    std::fs::write(&setup.opencode.rules_file, rules).unwrap();
+    let findings = crate::opencode::install::doctor(&setup);
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.problem && f.text.contains("edited by hand")),
+        "{findings:?}"
+    );
     memory.close();
 }

@@ -111,6 +111,14 @@ graphersal-memory install
 
 ### What `install` asks, changes, and how `uninstall` reverts it
 
+`install` sets up every agent harness it finds: Claude Code and opencode (`--harness
+claude-code|opencode|all` chooses). With both found, the wizard's first step asks which; every
+chosen agent gets the same memory (one store, one daemon). For opencode it registers the MCP
+servers in `~/.config/opencode/opencode.json`, a rules file listed in `instructions` and a small
+session plugin; `uninstall` exports the memories as Markdown (opencode has no file memory). The
+details are in [docs/harnesses.md](docs/harnesses.md), the captured wizard for opencode and for
+both in [docs/install.md](docs/install.md). The Claude Code steps:
+
 In a terminal, `graphersal-memory install` is a short wizard: "Step N of M", what the step is
 for, numbered choices with the default marked (Enter takes it), and a summary of every change
 before anything happens. The full captured output of an install and an uninstall is in
@@ -286,8 +294,9 @@ add` is not used, because it rewrites the whole file.)
 project `MEMORY.md` and one file per memory in `~/.claude/projects/<project>/memory/` (the format
 `import` reads), and the global memories into `~/.claude/rules/graphersal-memory-global.md`, a user
 rules file Claude Code loads in every project. A file that already says the same is left alone; a
-file you or the agent changed is kept, and the graph's version goes beside it as
-`<name>.graphersal.md` (named in the report); nothing is deleted. In a terminal it asks first
+memory file you or the agent changed is kept, and the graph's version goes beside it as
+`<slug>.graphersal.md` (named in the report); a `MEMORY.md` that differs keeps its lines and gets
+the lines of the memories it lacks appended; nothing is deleted. In a terminal it asks first
 (default yes; `--no-export` skips it). `graphersal-memory export --to-files [--project ROOT]` does
 the same at any time. Then uninstall removes exactly what `install` added: the MCP entries, the
 hooks, the marked block, and the auto-memory switch goes back to what it was. A file nobody
@@ -391,7 +400,7 @@ Details: [docs/privacy.md](docs/privacy.md).
 | Harness | Status |
 |---|---|
 | Claude Code | install, uninstall, import of the file memory, hooks, rule block (M3); past sessions and opt-in summaries (M4); the A/B, `bench` (M5) |
-| opencode | planned (M7) |
+| opencode (1.x) | install, uninstall (Markdown export), rule file, session plugin, past sessions from its database, opt-in summaries and `bench` through `opencode run` (free models cost $0) (M7a) |
 | OpenAI Codex CLI | planned (M7) |
 | Cursor | planned (M7) |
 | Desktop apps without a terminal (e.g. Claude Desktop) | later; the core is designed not to depend on a terminal or hooks |
@@ -411,7 +420,8 @@ Details: [docs/harnesses.md](docs/harnesses.md).
 | Indexing past sessions (`import --sessions`, the hooks), opt-in summaries and facts through your own harness (`summaries estimate`, `status`, `enable`, `disable`), cost estimate and monthly budget cap | available (M4; tested with a fake harness, no model was called in the tests) |
 | Built-in A/B (`bench`, `bench questions`): arms no memory / file memory / graphersal-memory, sandboxed, questions from raw transcripts, judge, report, cost guard, dry run | available (M5; Claude Code; tested with a fake harness, and one small real run). The arm with your whole current setup is planned |
 | Release binaries (macOS arm64/x86_64, Linux x86_64/aarch64 static, Windows x86_64), `install.sh` / `install.ps1` with checksum verification, `SHA256SUMS`, build provenance | built (M6: the release workflow builds and smoke-tests every platform; the installers are tested against a local copy of a release); available once the first release is published |
-| Other harnesses, browser UI, desktop app | planned (M7) |
+| opencode: install/uninstall (`--harness opencode`, or both at once sharing one store), the session plugin, past sessions, summaries and `bench` through `opencode run` | available (M7a; tested on temporary homes with a hand-built database in opencode's format and a fake `opencode`; one real smoke run with opencode 1.18.35 and a free model) |
+| Other harnesses (Codex, Cursor), browser UI, desktop app | planned (M7) |
 
 ### Try it
 

@@ -11,6 +11,11 @@
 //! being written, `session-end` names it as finished. The indexing (and the summaries, when the
 //! user opted in) runs in the daemon, never in the hook.
 //!
+//! opencode's plugin (`crate::opencode`) runs the same subcommand with `--harness opencode`
+//! ([`run_opencode`]): its input is `{"session_id", "cwd"}`; there is no file memory to import,
+//! so it only queues the indexing (its session `<opencode.db>#<id>` active at the start, ended
+//! at the end) and prints the start line, which the plugin shows as a toast.
+//!
 //! A hook never blocks or fails the session: the work runs on a thread with a time limit, every
 //! error becomes a note on stderr, and the exit code is always 0. With
 //! `GRAPHERSAL_MEMORY_HOOK=off` (set for the summaries' own harness runs) a hook does nothing.
@@ -261,6 +266,74 @@ pub fn run_with(
     0
 }
 
+/// The session start line for opencode (its plugin shows it as a toast).
+pub const OPENCODE_START_LINE: &str = "graphersal-memory: your memory is served by the MCP \
+    server graphersal-memory (memories, recall, memory, remember, forget; past sessions: \
+    sessions, session).";
+
+/// The indexing request of opencode's plugin: every session of `db`, with the plugin's own
+/// session active (start) or finished (end).
+pub fn opencode_request(
+    event: HookEvent,
+    db: &Path,
+    session_id: Option<&str>,
+) -> crate::sessions::Request {
+    let mut request = crate::sessions::Request::for_harness(crate::agents::Kind::OpenCode, db);
+    if let Some(id) = session_id.filter(|id| id.starts_with("ses_")) {
+        let unit = crate::opencode::sessions::unit_path(db, id);
+        match event {
+            HookEvent::SessionStart => request.active.insert(unit),
+            HookEvent::SessionEnd => request.ended.insert(unit),
+        };
+    }
+    request
+}
+
+/// `hook session-start|session-end --harness opencode`: queues the indexing within the time
+/// limit, prints the start line; never fails (exit code 0).
+pub fn run_opencode(
+    event: HookEvent,
+    db: PathBuf,
+    enqueue: Option<Enqueue>,
+    stdin: impl Read + Send + 'static,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
+    let (done, result) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("hook".into())
+        .spawn(move || {
+            let mut input = String::new();
+            let _ = stdin.take(MAX_INPUT).read_to_string(&mut input);
+            let value: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+            let request = opencode_request(event, &db, value["session_id"].as_str());
+            let mut notes = Vec::new();
+            if let Some(enqueue) = enqueue
+                && let Err(err) = enqueue(request)
+            {
+                notes.push(format!("cannot queue the session indexing: {err}"));
+            }
+            let _ = done.send(notes);
+        });
+    let notes = match spawned {
+        Ok(_) => result.recv_timeout(BUDGET).unwrap_or_else(|_| {
+            vec![format!(
+                "the hook stopped after {}s; the memory daemon may still be starting",
+                BUDGET.as_secs()
+            )]
+        }),
+        Err(err) => vec![format!("cannot start the hook: {err}")],
+    };
+    if event == HookEvent::SessionStart {
+        let _ = writeln!(stdout, "{OPENCODE_START_LINE}");
+        let _ = stdout.flush();
+    }
+    for note in &notes {
+        let _ = writeln!(stderr, "graphersal-memory hook: {note}");
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +472,46 @@ mod tests {
             deadline,
         );
         assert_eq!(end, Outcome::default());
+    }
+
+    #[test]
+    fn the_opencode_hook_queues_its_session_and_prints_one_line_at_the_start() {
+        use std::sync::{Arc, Mutex};
+        let db = PathBuf::from("/d/opencode.db");
+        for (event, lines) in [(HookEvent::SessionStart, 1), (HookEvent::SessionEnd, 0)] {
+            let seen: Arc<Mutex<Option<crate::sessions::Request>>> = Arc::default();
+            let keep = seen.clone();
+            let enqueue: Enqueue = Box::new(move |request| {
+                *keep.lock().unwrap() = Some(request);
+                Ok(())
+            });
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let input = br#"{"session_id": "ses_abc", "cwd": "/w/app"}"#.as_slice();
+            let code = run_opencode(event, db.clone(), Some(enqueue), input, &mut out, &mut err);
+            assert_eq!(code, 0);
+            let out = String::from_utf8(out).unwrap();
+            assert_eq!(out.lines().count(), lines, "{out}");
+            assert!(err.is_empty());
+            let request = seen.lock().unwrap().clone().unwrap();
+            assert_eq!(request.harness, crate::agents::Kind::OpenCode);
+            let unit = crate::opencode::sessions::unit_path(&db, "ses_abc");
+            match event {
+                HookEvent::SessionStart => assert!(request.active.contains(&unit)),
+                HookEvent::SessionEnd => assert!(request.ended.contains(&unit)),
+            }
+        }
+        // A failing daemon is a note, never a failure; bad input queues the whole database.
+        let enqueue: Enqueue = Box::new(|_| Err("no daemon".to_string()));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run_opencode(
+            HookEvent::SessionEnd,
+            db,
+            Some(enqueue),
+            b"not json".as_slice(),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 0);
+        assert!(String::from_utf8(err).unwrap().contains("no daemon"));
     }
 }

@@ -40,6 +40,11 @@ ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 # SHA-256 (and the git blob SHA-1) of the downloaded model files; already in the tree as the
 # crypto provider of rustls (through `ureq`), the same version: no new crate.
 ring = "0.17"
+# Reading opencode's past sessions: opencode 1.x keeps sessions, messages and parts in a SQLite
+# database (`~/.local/share/opencode/opencode.db`, WAL mode); it is opened read-only. Bundled
+# SQLite (a C file built with the C compiler `ring` already needs), so no system library is
+# required on any release platform.
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [profile.release]
 # One codegen unit, as the engine's own release builds use.

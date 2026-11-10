@@ -1,7 +1,11 @@
-//! Indexing of past Claude Code sessions: every finished transcript
-//! (`<claude config>/projects/<project>/<session>.jsonl`, parsed by `crate::transcript`) becomes
-//! a `session` vertex with its `turn`s, and, when the user opted in, an English summary split into
-//! `fact`s (`crate::summaries`).
+//! Indexing of past sessions: every finished Claude Code transcript
+//! (`<claude config>/projects/<project>/<session>.jsonl`, parsed by `crate::transcript`) and every
+//! finished opencode session (its database, read by `crate::opencode::sessions`) becomes a
+//! `session` vertex with its `turn`s, and, when the user opted in, an English summary split into
+//! `fact`s (`crate::summaries`). A [`Request`] names one harness; each harness has its own state
+//! file. An opencode session is addressed like a file, as `<opencode.db>#<session id>`
+//! ([`crate::opencode::sessions::unit_path`]), so the hooks' `active`/`ended` lists and the state
+//! work the same for both.
 //!
 //! - **Finished**: a transcript unchanged for [`IDLE`] (30 minutes), or one a `SessionEnd` hook
 //!   named; a transcript the current session writes (`active`) is left alone. A session that
@@ -25,12 +29,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use crate::agents::Kind;
 use crate::fsutil;
 use crate::summaries::{self, Refused, Summarizer};
 use crate::transcript::{self, CAP, Transcript, clip};
-
-/// The harness these transcripts come from.
-pub const HARNESS: &str = "claude-code";
 
 /// A transcript unchanged for this long counts as finished.
 pub const IDLE: Duration = Duration::from_secs(30 * 60);
@@ -58,7 +60,11 @@ pub trait Writer {
 /// What one indexing run is asked to do.
 #[derive(Debug, Clone, Default)]
 pub struct Request {
-    /// The harness's projects directory (`~/.claude/projects`).
+    /// The harness whose sessions these are.
+    pub harness: Kind,
+    /// Where the harness keeps its sessions: Claude Code's projects directory
+    /// (`~/.claude/projects`), opencode's data directory (`~/.local/share/opencode`, holding
+    /// `opencode.db`).
     pub projects_dir: PathBuf,
     /// Transcripts known to be finished (a `SessionEnd` named them).
     pub ended: BTreeSet<PathBuf>,
@@ -75,10 +81,17 @@ pub const CONTROL_INDEX: &str = "index_sessions";
 pub const CONTROL_STATUS: &str = "sessions_status";
 
 impl Request {
-    /// A request for the transcripts under `projects_dir`, with the default idle time.
+    /// A request for the Claude Code transcripts under `projects_dir`, with the default idle
+    /// time.
     pub fn new(projects_dir: &Path) -> Self {
+        Self::for_harness(Kind::ClaudeCode, projects_dir)
+    }
+
+    /// A request for the sessions of `harness` kept in `dir`, with the default idle time.
+    pub fn for_harness(harness: Kind, dir: &Path) -> Self {
         Self {
-            projects_dir: projects_dir.to_path_buf(),
+            harness,
+            projects_dir: dir.to_path_buf(),
             idle: IDLE,
             ..Self::default()
         }
@@ -91,13 +104,19 @@ impl Request {
         };
         json!({
             "protocol": crate::protocol::PROTOCOL, "control": CONTROL_INDEX,
+            "harness": self.harness.id(),
             "projects_dir": self.projects_dir.display().to_string(),
             "ended": paths(&self.ended), "active": paths(&self.active),
         })
     }
 
-    /// The request of a control line (the idle time is always [`IDLE`]).
+    /// The request of a control line (the idle time is always [`IDLE`]; without `harness`:
+    /// Claude Code).
     pub fn from_control(line: &Value) -> Result<Self, String> {
+        let harness = match line["harness"].as_str() {
+            None => Kind::ClaudeCode,
+            Some(id) => Kind::from_id(id).ok_or_else(|| format!("unknown harness {id}"))?,
+        };
         let dir = line["projects_dir"]
             .as_str()
             .filter(|dir| Path::new(dir).is_absolute())
@@ -112,6 +131,7 @@ impl Request {
                 .collect()
         };
         Ok(Self {
+            harness,
             projects_dir: PathBuf::from(dir),
             ended: paths("ended"),
             active: paths("active"),
@@ -119,7 +139,7 @@ impl Request {
         })
     }
 
-    /// Adds a later request to this one (a run not started yet does both).
+    /// Adds a later request of the same harness to this one (a run not started yet does both).
     pub fn merge(&mut self, later: Request) {
         self.projects_dir = later.projects_dir;
         self.ended.extend(later.ended);
@@ -133,14 +153,16 @@ impl Request {
 /// What the indexing would do now, from the state alone (nothing is parsed or written):
 /// transcripts found, still being written, new or changed, unchanged.
 pub fn plan(request: &Request, data_dir: &Path) -> Result<(usize, usize, usize, usize), String> {
-    let state = State::load(data_dir)?;
+    let state = State::load_for(data_dir, request.harness)?;
     let now = SystemTime::now();
     let (mut found, mut active, mut todo, mut unchanged) = (0, 0, 0, 0);
-    for file in scan(&request.projects_dir) {
+    for Unit {
+        path: file,
+        size,
+        modified,
+    } in units(request)?
+    {
         found += 1;
-        let Some((size, modified)) = stamp(&file) else {
-            continue;
-        };
         if !finished(request, &file, modified, now) {
             active += 1;
             continue;
@@ -202,6 +224,38 @@ impl Report {
     }
 }
 
+/// One session to index: a transcript file, or an opencode session (`<db>#<id>`), with its size
+/// and modification time (seconds), which say whether it changed since its last indexing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unit {
+    /// The transcript file, or `<opencode.db>#<session id>`.
+    pub path: PathBuf,
+    /// Its size (opencode: the bytes of its stored messages and parts).
+    pub size: u64,
+    /// Its modification time, seconds since the epoch.
+    pub modified: u64,
+}
+
+/// The sessions of `request`'s harness. Claude Code: the transcripts ([`scan`]); a file that
+/// cannot be read is skipped. opencode: the top-level sessions of its database (none when it
+/// has no database yet; `Err` when the database cannot be read).
+pub fn units(request: &Request) -> Result<Vec<Unit>, String> {
+    match request.harness {
+        Kind::ClaudeCode => Ok(scan(&request.projects_dir)
+            .into_iter()
+            .filter_map(|path| {
+                let (size, modified) = stamp(&path)?;
+                Some(Unit {
+                    path,
+                    size,
+                    modified,
+                })
+            })
+            .collect()),
+        Kind::OpenCode => crate::opencode::sessions::units(&request.projects_dir),
+    }
+}
+
 /// The transcripts under `projects_dir`: `<dir>/<session>.jsonl` (the sub-agents' transcripts
 /// in `<dir>/<session>/subagents/` are not taken), sorted.
 pub fn scan(projects_dir: &Path) -> Vec<PathBuf> {
@@ -227,22 +281,34 @@ pub fn scan(projects_dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The indexing state of every transcript (`<data dir>/sessions/claude-code.json`).
+/// The indexing state of every session of one harness (`<data dir>/sessions/<harness>.json`:
+/// `claude-code.json`, `opencode.json`).
 #[derive(Debug, Clone, Default)]
 pub struct State {
+    harness: Kind,
     files: BTreeMap<String, Value>,
 }
 
 impl State {
+    #[cfg(test)]
     fn path(data_dir: &Path) -> PathBuf {
-        data_dir.join("sessions").join(format!("{HARNESS}.json"))
+        Self::path_for(data_dir, Kind::ClaudeCode)
     }
 
-    /// Reads the state of `data_dir` (empty when there is none).
-    pub fn load(data_dir: &Path) -> Result<Self, String> {
-        let path = Self::path(data_dir);
+    fn path_for(data_dir: &Path, harness: Kind) -> PathBuf {
+        data_dir
+            .join("sessions")
+            .join(format!("{}.json", harness.id()))
+    }
+
+    /// Reads the state of `harness` in `data_dir` (empty when there is none).
+    pub fn load_for(data_dir: &Path, harness: Kind) -> Result<Self, String> {
+        let path = Self::path_for(data_dir, harness);
         let Some(bytes) = fsutil::read_optional(&path)? else {
-            return Ok(Self::default());
+            return Ok(Self {
+                harness,
+                files: BTreeMap::new(),
+            });
         };
         let value: Value = serde_json::from_slice(&bytes)
             .map_err(|err| format!("{} is invalid: {err}", path.display()))?;
@@ -250,6 +316,7 @@ impl State {
             return Err(format!("{}: unsupported version", path.display()));
         }
         Ok(Self {
+            harness,
             files: value["files"]
                 .as_object()
                 .map(|files| files.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -259,7 +326,7 @@ impl State {
 
     /// Writes the state.
     pub fn save(&self, data_dir: &Path) -> Result<(), String> {
-        let path = Self::path(data_dir);
+        let path = Self::path_for(data_dir, self.harness);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
@@ -339,17 +406,25 @@ pub fn project_of(transcript: &Transcript, file: &Path) -> Option<String> {
     Some(crate::mcp::project_key(None, &dir))
 }
 
-/// The session's id in the graph: `session:<transcript file name>`.
+/// The session's id in the graph: `session:<transcript file name>` (opencode:
+/// `session:<session id>`).
 pub fn session_id(file: &Path) -> String {
-    let stem = file
-        .file_stem()
+    format!("session:{}", unit_uuid(file))
+}
+
+/// The session's own id: the transcript's file name, or the opencode session id.
+fn unit_uuid(file: &Path) -> String {
+    if let Some((_, id)) = crate::opencode::sessions::split_unit(file) {
+        return id;
+    }
+    file.file_stem()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    format!("session:{stem}")
+        .unwrap_or_default()
 }
 
 /// One parsed transcript with what the indexing derives from it.
 struct Parsed {
+    harness: Kind,
     transcript: Transcript,
     id: String,
     uuid: String,
@@ -370,13 +445,28 @@ fn parse_file(
     modified: u64,
     data_dir: Option<&Path>,
 ) -> Result<Option<Parsed>, String> {
-    let bytes =
-        std::fs::read(file).map_err(|err| format!("cannot read {}: {err}", file.display()))?;
-    let uuid = file
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let transcript = transcript::parse(&bytes, &uuid);
+    let uuid = unit_uuid(file);
+    let (harness, transcript, source) = match crate::opencode::sessions::split_unit(file) {
+        Some((db, id)) => (
+            Kind::OpenCode,
+            crate::opencode::sessions::read(&db, &id)?,
+            format!("opencode:{id}"),
+        ),
+        None => {
+            let bytes = std::fs::read(file)
+                .map_err(|err| format!("cannot read {}: {err}", file.display()))?;
+            (
+                Kind::ClaudeCode,
+                transcript::parse(&bytes, &uuid),
+                format!(
+                    "transcript:{}",
+                    file.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                ),
+            )
+        }
+    };
     if transcript.turns.is_empty() {
         return Ok(None);
     }
@@ -406,13 +496,9 @@ fn parse_file(
         transcript.started_at.clone()
     };
     Ok(Some(Parsed {
+        harness,
         id: session_id(file),
-        source: format!(
-            "transcript:{}",
-            file.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default()
-        ),
+        source,
         transcript,
         uuid,
         project,
@@ -434,7 +520,7 @@ impl Parsed {
             "ended_at": if t.ended_at.is_empty() { &self.started_at } else { &t.ended_at },
             "branches": t.branches, "files_edited": self.files, "source": self.source,
             "source_bytes": t.bytes, "visibility": "private", "origin": "sessions",
-            "harness": HARNESS, "project": self.key,
+            "harness": self.harness.id(), "project": self.key,
         });
         if !t.compact.is_empty() {
             p["compact_summaries"] = json!(clip(&t.compact.join("\n\n---\n\n"), CAP));
@@ -569,8 +655,10 @@ pub fn run(
         phase: "scan".into(),
         ..Report::default()
     };
-    let mut state = match State::load(data_dir) {
-        Ok(state) => state,
+    let loaded = State::load_for(data_dir, request.harness)
+        .and_then(|state| units(request).map(|units| (state, units)));
+    let (mut state, units) = match loaded {
+        Ok(both) => both,
         Err(err) => {
             report.problems.push(err);
             report.phase = "done".into();
@@ -579,11 +667,13 @@ pub fn run(
     };
     let now = SystemTime::now();
     let mut todo = Vec::new();
-    for file in scan(&request.projects_dir) {
+    for Unit {
+        path: file,
+        size,
+        modified,
+    } in units
+    {
         report.found += 1;
-        let Some((size, modified)) = stamp(&file) else {
-            continue;
-        };
         if !finished(request, &file, modified, now) {
             report.active += 1;
             continue;
@@ -762,8 +852,12 @@ fn summarize_one(
     if attempts >= SUMMARY_ATTEMPTS {
         return Ok(Summarized::Waiting);
     }
-    let Some((_, modified)) = stamp(file) else {
-        return Ok(Summarized::Waiting);
+    let modified = match crate::opencode::sessions::split_unit(file) {
+        Some(_) => entry["mtime"].as_u64().unwrap_or(0),
+        None => match stamp(file) {
+            Some((_, modified)) => modified,
+            None => return Ok(Summarized::Waiting),
+        },
     };
     let parsed = match parse_file(file, modified, Some(data_dir)) {
         Ok(Some(parsed)) if parsed.transcript.fingerprint == fingerprint => parsed,
@@ -834,24 +928,39 @@ pub struct Estimate {
 
 /// Estimates the summaries of every finished transcript under `projects_dir` (read only: the
 /// state of `data_dir` and the transcripts; nothing is written, no model is called).
+#[cfg(test)]
 pub fn estimate(
     projects_dir: &Path,
     data_dir: &Path,
     idle: Duration,
     since: Option<&str>,
 ) -> Result<Estimate, String> {
-    let state = State::load(data_dir)?;
+    estimate_for(Kind::ClaudeCode, projects_dir, data_dir, idle, since)
+}
+
+/// [`estimate`] for the sessions of `harness` kept in `dir`.
+pub fn estimate_for(
+    harness: Kind,
+    dir: &Path,
+    data_dir: &Path,
+    idle: Duration,
+    since: Option<&str>,
+) -> Result<Estimate, String> {
+    let state = State::load_for(data_dir, harness)?;
     let request = Request {
-        projects_dir: projects_dir.to_path_buf(),
+        harness,
+        projects_dir: dir.to_path_buf(),
         idle,
         ..Request::default()
     };
     let now = SystemTime::now();
     let mut out = Estimate::default();
-    for file in scan(projects_dir) {
-        let Some((size, modified)) = stamp(&file) else {
-            continue;
-        };
+    for Unit {
+        path: file,
+        size,
+        modified,
+    } in units(&request)?
+    {
         if !finished(&request, &file, modified, now) {
             continue;
         }
@@ -1332,5 +1441,181 @@ mod tests {
     #[cfg(unix)]
     fn estimate_since(projects: &Path, data: &Path, since: &str) -> Estimate {
         estimate(projects, data, Duration::ZERO, Some(since)).unwrap()
+    }
+
+    fn opencode_setup(tmp: &Path) -> (PathBuf, PathBuf) {
+        let work = crate::mcp::canonical(tmp).join("work");
+        std::fs::create_dir_all(work.join(".git")).unwrap();
+        let db = tmp.join("share/opencode/opencode.db");
+        crate::opencode::sessions::tests::fixture(&db, &work.display().to_string());
+        (db, work)
+    }
+
+    fn opencode_request(db: &Path) -> Request {
+        Request {
+            idle: Duration::ZERO,
+            ..Request::for_harness(Kind::OpenCode, db)
+        }
+    }
+
+    #[test]
+    fn opencode_sessions_are_indexed_once_and_again_when_they_grow() {
+        let tmp = crate::mcp_tests::TempDir::new("oc-idx");
+        let data = crate::mcp_tests::TempDir::new("oc-idx-data");
+        let (db, work) = opencode_setup(tmp.path());
+        let mut store = Direct::new();
+        let first = index(&opencode_request(&db), data.path(), &mut store);
+        assert_eq!(first.problems, Vec::<String>::new());
+        assert_eq!((first.found, first.indexed, first.turns), (1, 1, 3));
+        let session = store.query(
+            "g.v(\"session:ses_abc\").project(\"name\", \"project\", \"harness\", \"files\", \"source\")\
+             .by(\"name\").by(\"project\").by(\"harness\").by(\"files_edited\").by(\"source\").next()",
+        );
+        assert_eq!(session[0]["name"], "Parser cache");
+        assert_eq!(session[0]["project"], work.display().to_string());
+        assert_eq!(session[0]["harness"], "opencode");
+        assert_eq!(session[0]["files"], json!(["src/parse.rs"]));
+        assert_eq!(session[0]["source"], "opencode:ses_abc");
+        assert_eq!(
+            store.query("g.v(\"turn:ses_abc:0\").values(\"tools\").next()"),
+            json!(["edit"])
+        );
+        assert!(data.path().join("sessions/opencode.json").exists());
+        assert!(!data.path().join("sessions/claude-code.json").exists());
+        // Unchanged: nothing is read or written again.
+        store.calls.clear();
+        let second = index(&opencode_request(&db), data.path(), &mut store);
+        assert_eq!((second.indexed, second.unchanged), (0, 1));
+        assert!(store.calls.is_empty(), "{:?}", store.calls);
+        // Grown: indexed again.
+        crate::opencode::sessions::tests::grow(&db);
+        let grown = index(&opencode_request(&db), data.path(), &mut store);
+        assert_eq!((grown.indexed, grown.turns), (1, 4), "{grown:?}");
+        // A running session waits; an ended one does not.
+        let unit = crate::opencode::sessions::unit_path(&db, "ses_abc");
+        let mut active = opencode_request(&db);
+        active.idle = Duration::from_secs(3600 * 24 * 365 * 100);
+        active.active.insert(unit.clone());
+        assert_eq!(index(&active, data.path(), &mut store).active, 1);
+        // The control line carries the harness.
+        let line = opencode_request(&db).to_control();
+        assert_eq!(line["harness"], "opencode");
+        assert_eq!(
+            Request::from_control(&line).unwrap().harness,
+            Kind::OpenCode
+        );
+        let old = json!({"projects_dir": "/x", "ended": [], "active": []});
+        assert_eq!(
+            Request::from_control(&old).unwrap().harness,
+            Kind::ClaudeCode
+        );
+    }
+
+    /// A fake `opencode`: records its arguments, environment and prompt, answers `--format
+    /// json` events with a summary and a cost of 0 (a free model).
+    #[cfg(unix)]
+    fn fake_opencode(dir: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = dir.join("calls.log");
+        let summary = json!({"headline": "Added a parser cache",
+            "summary": "The user asked for a cache in the parser; it was added.",
+            "decisions": [{"decision": "Use an LRU map", "why": "repeated parses"}],
+            "corrections": [], "outcomes": ["Tests pass"], "open_threads": []});
+        let events = [
+            json!({"type": "step_start", "part": {"type": "step-start"}}),
+            json!({"type": "text", "part": {"type": "text", "text": summary.to_string()}}),
+            json!({"type": "step_finish", "part": {"type": "step-finish", "cost": 0,
+                "tokens": {"input": 900, "output": 100, "reasoning": 0, "cache": {"read": 0, "write": 0}}}}),
+        ]
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let script = bin.join("opencode");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'CALL %s\\n' \"$*\" >> '{log}'\nprintf 'ENV %s %s %s\\n' \"$XDG_CONFIG_HOME\" \"$XDG_DATA_HOME\" \"$GRAPHERSAL_MEMORY_HOOK\" >> '{log}'\ncat >> '{log}'\nprintf '\\nEND\\n' >> '{log}'\ncat <<'JSON'\n{events}\nJSON\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (script, log)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn summaries_through_opencode_run_in_a_sandbox_and_cost_nothing_with_a_free_model() {
+        let tmp = crate::mcp_tests::TempDir::new("oc-sum");
+        let data = crate::mcp_tests::TempDir::new("oc-sum-data");
+        let (db, _) = opencode_setup(tmp.path());
+        // Long enough for a summary.
+        {
+            let c = rusqlite::Connection::open(&db).unwrap();
+            c.execute(
+                "INSERT INTO message VALUES ('msg_09', 'ses_abc', 1767440000000, 1767440000000, ?1)",
+                [json!({"role": "user", "time": {"created": 9}}).to_string()],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO part VALUES ('prt_09', 'msg_09', 'ses_abc', 1767440000000, 1767440000000, ?1)",
+                [json!({"type": "text", "text": "Explain the cache design in detail. ".repeat(60)}).to_string()],
+            )
+            .unwrap();
+        }
+        let (harness, log) = fake_opencode(tmp.path());
+        std::fs::write(
+            crate::config::path(data.path()),
+            json!({"version": 1, "summaries": {"enabled": true,
+                "harness_command": format!("'{}' run --model opencode/big-pickle", harness.display()),
+                "monthly_budget_usd": 0.5}})
+            .to_string(),
+        )
+        .unwrap();
+        let mut store = Direct::new();
+        let report = with_summaries(&opencode_request(&db), data.path(), &mut store);
+        assert_eq!(report.problems, Vec::<String>::new());
+        assert_eq!((report.indexed, report.summarized), (1, 1));
+        let recorded = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            recorded.contains("CALL run --model opencode/big-pickle --format json"),
+            "{recorded}"
+        );
+        let sandbox = data.path().join("sessions/harness/opencode");
+        assert!(
+            recorded.contains(&format!(
+                "ENV {} {} off",
+                sandbox.join("config").display(),
+                sandbox.join("data").display()
+            )),
+            "{recorded}"
+        );
+        assert!(
+            recorded.contains("USER: Add a cache to the parser."),
+            "{recorded}"
+        );
+        let config: Value = serde_json::from_str(
+            &std::fs::read_to_string(sandbox.join("config/opencode/opencode.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(config["permission"]["*"], "deny");
+        assert_eq!(config["mcp"], json!({}));
+        assert_eq!(
+            store.query("g.v(\"session:ses_abc\").values(\"name\").next()"),
+            json!(["Added a parser cache"])
+        );
+        let spend = summaries::Spend::load(data.path()).unwrap();
+        assert_eq!(spend.usd(&summaries::this_month()), 0.0);
+        let estimate =
+            estimate_for(Kind::OpenCode, &db, data.path(), Duration::ZERO, None).unwrap();
+        assert_eq!(estimate.sessions, 1);
+        let line = crate::commands::estimate_line_for(
+            &estimate,
+            &crate::config::split_command("opencode run --model opencode/big-pickle").unwrap(),
+        );
+        assert!(line.contains("$0.00"), "{line}");
     }
 }

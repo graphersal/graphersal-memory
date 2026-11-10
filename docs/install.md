@@ -156,7 +156,10 @@ Claude Code (user configuration /tmp/gmw/h/.claude.json):
 After one more memory was saved through MCP (`staging-first`). Answers: Enter (export), `y`.
 `pnpm.md` and `release-day.md` were already identical to the graph's version and stayed
 untouched; the new memory got its file; `MEMORY.md` now differs (it lacks the new memory), so it
-was kept and the graph's index written beside it. `settings.json` got its original bytes back
+was kept and the graph's index written beside it. (Since stage M7a this is different: a
+`MEMORY.md` that differs keeps every line and gets only the lines of the memories it does not
+list yet appended, here `- [...](staging-first.md) — ...`; the report says "appended 1 index line
+to .../MEMORY.md". The transcript above predates that change.) `settings.json` got its original bytes back
 (`{"theme": "dark"}`, auto-memory on again).
 
 ```text
@@ -180,4 +183,275 @@ Report:
   changed /tmp/gmw/h/.claude/settings.json
   removed /tmp/gmw/h/.claude/CLAUDE.md
   Your memories stay in /tmp/gmw/d (`uninstall --purge` deletes them).
+```
+
+## opencode
+
+Captured on 2026-11-10 like the outputs above, on a throwaway home (`/tmp/gmo/h`, shown with that
+path) holding only an empty `~/.config/opencode/` directory, so opencode was the one harness found
+and the wizard did not ask which agents. Answers: Enter (English), `3` (built-in model, no
+download), `2` (no summaries), `2` (no develop server), Enter (apply). There is no auto-memory
+question: opencode has no memory feature of its own. The summaries step names opencode's own
+headless command with a free model, so its estimate is $0.00.
+
+```text
+3
+2
+2
+graphersal-memory install (opencode)
+A few questions; Enter takes the default. Nothing changes before the last step.
+
+Step 1 of 5 · Memory language
+  Memories are found by meaning. Keeping them in one language lets a search find a
+  memory whatever language you wrote in; or keep each memory in your own words.
+
+  1) English only  the agent stores and searches in English  (default)
+                   (it translates a query before searching)
+  2) Any language  the agent stores in the language of the conversation
+                   (and searches in it and in English)
+Choose [1]: 
+Step 2 of 5 · Embedding model
+  The model turns every memory into a vector, so a search finds related wording,
+  not only the same words. Downloaded once from Hugging Face; it then runs locally.
+
+  1) potion-retrieval-32M      English, ~130 MB, MIT  (default)
+  2) potion-multilingual-128M  100+ languages, ~530 MB, MIT
+  3) Built-in (no download)    works offline, but finds only shared words and spellings,
+                               not meaning; weaker search
+Choose [1]: 
+Step 3 of 5 · Session summaries
+  Past sessions are indexed locally (their raw turns, no model call). Optionally each
+  finished session is summarized through your own `opencode run --model
+  opencode/big-pickle`
+  (decisions, corrections, outcomes, open threads). With this free model:
+  0 finished sessions, 0 without a summary: $0.00 (`opencode run --model
+  opencode/big-pickle` uses a free model of opencode Zen, free for a limited time; the
+  monthly budget still applies)
+
+  1) Yes  summarize, at most $5.00 per month
+  2) No   raw turns only (`graphersal-memory summaries enable` later)
+Choose 1-2: 
+Step 4 of 5 · The develop server
+  A second MCP server with tools to inspect and reshape the memory's structure
+  (schema, saved queries, indexes). Most people do not need it; its tool
+  descriptions are paid on every agent turn.
+
+  1) Yes  register graphersal-memory-develop
+  2) No   not now (`graphersal-memory install --enable-develop` later)
+Choose 1-2: 
+Step 5 of 5 · Summary
+  This is what install will do:
+
+  1. Agents
+     - opencode (one store and one daemon serve every agent chosen)
+  2. Memory language
+     - English only (stored and searched in English) (in the MCP instructions and the rule block; config.json memory.language)
+  3. Embedding model
+     - the built-in embedder hash-ngram/1 (no download; finds shared words and spellings, not meaning)
+  4. Register the MCP servers and the rules file in opencode's /tmp/gmo/h/.config/opencode/opencode.json
+     - graphersal-memory (use profile): add (enabled)
+     - graphersal-memory-develop (develop profile): add (disabled)
+     - instructions: add /tmp/gmo/h/.config/opencode/graphersal-memory.md (loaded into every session)
+  5. Write the managed rule block into /tmp/gmo/h/.config/opencode/graphersal-memory.md
+     - create it with the block
+  6. Add the session plugin /tmp/gmo/h/.config/opencode/plugins/graphersal-memory.js
+     - create it (session start: indexing + one toast line; session end: indexing)
+  7. Index past sessions (raw turns, locally, in the background)
+     - opencode: 0 sessions in /tmp/gmo/h/.local/share/opencode/opencode.db: 0 to index, 0 still being written (indexed later)
+     - summaries: off (raw turns only; `graphersal-memory summaries enable` later)
+  8. Settings file /tmp/gmo/d/config.json
+     - write the defaults (daemon idle time 2h) and the answers
+
+Apply these changes? [Enter = apply, n = cancel]: 
+
+Report:
+  created /tmp/gmo/h/.config/opencode/opencode.json
+  created /tmp/gmo/h/.config/opencode/graphersal-memory.md
+  created /tmp/gmo/h/.config/opencode/plugins/graphersal-memory.js
+  created /tmp/gmo/d/config.json
+  summaries run through `opencode run --model opencode/big-pickle` when you switch them on (opencode only; a free model of opencode Zen; summaries.harness_command in config.json)
+  embedding model: the built-in hash-ngram/1 (the daemon re-embeds the memory with it in the background)
+  summaries: off (raw turns are indexed; `graphersal-memory summaries enable` switches them on)
+  past sessions: indexed at the next session start (or now: `graphersal-memory import --sessions`)
+
+Restart running opencode sessions to load the MCP server and the plugin. `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` removes it.
+```
+
+### `graphersal-memory status` afterwards
+
+```text
+daemon: not running (run directory /tmp/gm-wiz1; the next agent session starts it)
+data directory: /tmp/gmo/d
+settings: /tmp/gmo/d/config.json (daemon idle time 7200s)
+sessions: 0 indexed, 0 summarized; summaries off
+Memory:
+  memory language: English only (stored and searched in English)
+  embedding model: hash-ngram/1 (built-in, no download; finds shared words, not meaning)
+opencode (configuration /tmp/gmo/h/.config/opencode/opencode.json):
+  MCP server graphersal-memory (use): installed
+  MCP server graphersal-memory-develop: registered, disabled (`graphersal-memory install --harness opencode --enable-develop` enables it)
+  rules file in instructions: installed
+  rule block (/tmp/gmo/h/.config/opencode/graphersal-memory.md): installed
+  session plugin (/tmp/gmo/h/.config/opencode/plugins/graphersal-memory.js): installed
+  auto-memory: opencode has none (nothing to switch off)
+  headless command (summaries, bench): `opencode run --model opencode/big-pickle` by default
+  sessions: read from /tmp/gmo/h/.local/share/opencode/opencode.db (not there yet)
+```
+
+### `graphersal-memory uninstall`
+
+The store held no memories, so the export wrote nothing; with memories it writes readable
+Markdown under `~/graphersal-memory-export/opencode/` (per project `MEMORY.md` and one file per
+memory, `global.md` for the global ones) and says how to give opencode a file of it
+(`instructions`). Every file install created is deleted, and the `plugins/` directory it made with
+it.
+
+```text
+graphersal-memory uninstall (opencode)
+
+  - export 0 memories of 0 projects (0 global) into readable Markdown files under /tmp/gmo/h/graphersal-memory-export/opencode (opencode has no file memory; nothing is deleted)
+  - /tmp/gmo/h/.config/opencode/opencode.json: delete the file (install created it)
+  - /tmp/gmo/h/.config/opencode/graphersal-memory.md: delete the file (install created it)
+  - /tmp/gmo/h/.config/opencode/plugins/graphersal-memory.js: delete the file (install created it)
+
+Proceed? [y/N] y
+
+Report:
+  exported nothing: the graph holds no memories
+  removed /tmp/gmo/h/.config/opencode/opencode.json
+  removed /tmp/gmo/h/.config/opencode/graphersal-memory.md
+  removed /tmp/gmo/h/.config/opencode/plugins/graphersal-memory.js
+  removed the directory /tmp/gmo/h/.config/opencode/plugins
+  Your memories stay in /tmp/gmo/d (`uninstall --purge` deletes them).
+```
+
+## Claude Code and opencode together
+
+A home with both `~/.claude/` and `~/.config/opencode/` (`/tmp/gmb/h`; the binary's path is
+shortened to `/opt/gm/graphersal-memory` here). The wizard starts with "Which agents"; Enter keeps
+both. Both get the same MCP server command and data directory: one store, one daemon, the same
+memory of a project from either agent. Answers: Enter (both), Enter (English), `3` (built-in),
+Enter (switch Claude Code's auto-memory off), `2`, `2`, Enter.
+
+```text
+graphersal-memory install (Claude Code, opencode)
+A few questions; Enter takes the default. Nothing changes before the last step.
+
+Step 1 of 7 · Which agents
+  graphersal-memory found these agent harnesses on this machine. Every one you
+  choose gets the same memory: one store and one background daemon, so a project's
+  memory is the same from each agent.
+
+  1) All of them       Claude Code and opencode  (default)
+  2) Claude Code only
+  3) opencode only
+Choose [1]: 
+
+Step 2 of 7 · Memory language
+  Memories are found by meaning. Keeping them in one language lets a search find a
+  memory whatever language you wrote in; or keep each memory in your own words.
+
+  1) English only  the agent stores and searches in English  (default)
+                   (it translates a query before searching)
+  2) Any language  the agent stores in the language of the conversation
+                   (and searches in it and in English)
+Choose [1]: 
+
+Step 3 of 7 · Embedding model
+  The model turns every memory into a vector, so a search finds related wording,
+  not only the same words. Downloaded once from Hugging Face; it then runs locally.
+
+  1) potion-retrieval-32M      English, ~130 MB, MIT  (default)
+  2) potion-multilingual-128M  100+ languages, ~530 MB, MIT
+  3) Built-in (no download)    works offline, but finds only shared words and spellings,
+                               not meaning; weaker search
+Choose [1]: 3
+
+Step 4 of 7 · Claude Code's auto-memory
+  Claude Code also writes its own memory files and loads them into every session;
+  with graphersal-memory both would keep the same facts twice.
+  Nothing is lost: if you uninstall graphersal-memory later, every memory, including new
+  ones, is written back to Claude Code's memory files and its auto-memory is switched
+  back on.
+
+  1) Yes  switch it off (autoMemoryEnabled false in /tmp/gmb/h/.claude/settings.json)  (default)
+  2) No   keep it on (the files it writes are imported at each session start)
+Choose [1]: 
+
+Step 5 of 7 · Session summaries
+  Past sessions are indexed locally (their raw turns, no model call). Optionally each
+  finished session is summarized through your own `claude -p --model sonnet`
+  (decisions, corrections, outcomes, open threads). That costs model usage:
+  0 finished sessions, 0 without a summary: about $0.00 at list price (an estimate: ~4
+  characters per token, $3/$15 per million input/output tokens, plus the harness's own
+  prompt; your harness reports the real cost)
+
+  1) Yes  summarize, at most $5.00 per month
+  2) No   raw turns only (`graphersal-memory summaries enable` later)
+Choose 1-2: 2
+
+Step 6 of 7 · The develop server
+  A second MCP server with tools to inspect and reshape the memory's structure
+  (schema, saved queries, indexes). Most people do not need it; its tool
+  descriptions are paid on every agent turn.
+
+  1) Yes  register graphersal-memory-develop
+  2) No   not now (`graphersal-memory install --enable-develop` later)
+Choose 1-2: 2
+
+Step 7 of 7 · Summary
+  This is what install will do:
+
+  1. Agents
+     - Claude Code and opencode (one store and one daemon serve every agent chosen)
+  2. Memory language
+     - English only (stored and searched in English) (in the MCP instructions and the rule block; config.json memory.language)
+  3. Embedding model
+     - the built-in embedder hash-ngram/1 (no download; finds shared words and spellings, not meaning)
+  4. Register the MCP servers at user scope in /tmp/gmb/h/.claude.json (key mcpServers)
+     - graphersal-memory (use profile): add
+     - graphersal-memory-develop: not registered (off; `graphersal-memory install --enable-develop` registers it)
+  5. Add the SessionStart and SessionEnd hooks in /tmp/gmb/h/.claude/settings.json
+     - SessionStart: add `"/opt/gm/graphersal-memory" hook session-start --data-dir "/tmp/gmb/d" --run-dir "/tmp/gm-wiz2"`
+     - SessionEnd: add `"/opt/gm/graphersal-memory" hook session-end --data-dir "/tmp/gmb/d" --run-dir "/tmp/gm-wiz2"`
+     - autoMemoryEnabled: false (switch Claude Code's auto-memory off). Nothing is lost: if you uninstall graphersal-memory later, every memory, including new ones, is written back to Claude Code's memory files and its auto-memory is switched back on.
+  6. Import Claude Code's existing file memory (MEMORY.md and the memory files)
+     - 0 memory directories under /tmp/gmb/h/.claude/projects: 0 new and 0 changed memory files to import, 0 unchanged
+     - The files are read, not changed; every memory stays in its project. CLAUDE.md rules are not imported in this version.
+  7. Write the managed rule block into /tmp/gmb/h/.claude/CLAUDE.md
+     - create the file with the block (your own text stays as it is)
+  8. Register the MCP servers and the rules file in opencode's /tmp/gmb/h/.config/opencode/opencode.json
+     - graphersal-memory (use profile): add (enabled)
+     - graphersal-memory-develop (develop profile): add (disabled)
+     - instructions: add /tmp/gmb/h/.config/opencode/graphersal-memory.md (loaded into every session)
+  9. Write the managed rule block into /tmp/gmb/h/.config/opencode/graphersal-memory.md
+     - create it with the block
+  10. Add the session plugin /tmp/gmb/h/.config/opencode/plugins/graphersal-memory.js
+     - create it (session start: indexing + one toast line; session end: indexing)
+  11. Index past sessions (raw turns, locally, in the background)
+     - Claude Code: 0 sessions in /tmp/gmb/h/.claude/projects: 0 to index, 0 still being written (indexed later)
+     - opencode: 0 sessions in /tmp/gmb/h/.local/share/opencode/opencode.db: 0 to index, 0 still being written (indexed later)
+     - summaries: off (raw turns only; `graphersal-memory summaries enable` later)
+  12. Settings file /tmp/gmb/d/config.json
+     - write the defaults (daemon idle time 2h) and the answers
+
+  Nothing is lost: if you uninstall graphersal-memory later, every memory, including new ones, is written back to Claude Code's memory files and its auto-memory is switched back on.
+
+Apply these changes? [Enter = apply, n = cancel]: 
+
+Report:
+  created /tmp/gmb/h/.claude.json
+  created /tmp/gmb/h/.claude/settings.json
+  created /tmp/gmb/h/.claude/CLAUDE.md
+  created /tmp/gmb/h/.config/opencode/opencode.json
+  created /tmp/gmb/h/.config/opencode/graphersal-memory.md
+  created /tmp/gmb/h/.config/opencode/plugins/graphersal-memory.js
+  Claude Code's auto-memory: off (uninstall writes every memory back to its memory files and switches it on again)
+  created /tmp/gmb/d/config.json
+  embedding model: the built-in hash-ngram/1 (the daemon re-embeds the memory with it in the background)
+  imported nothing: no new or changed memory files
+  summaries: off (raw turns are indexed; `graphersal-memory summaries enable` switches them on)
+  past sessions: indexed at the next session start (or now: `graphersal-memory import --sessions`)
+
+Restart running Claude Code and opencode sessions to load the MCP server and the hooks and the plugin. `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` removes it.
 ```

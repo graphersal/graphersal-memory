@@ -17,13 +17,22 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/commands.rs`: running a command (`run_cli`): `mcp` runs the shim (`--no-daemon`:
     serves in this process), `daemon` runs (`--foreground`) or starts the daemon, `install`,
     `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects` and the
-    hidden `hook` work on Claude Code (`Setup` from the environment, with the model download
+    hidden `hook` work on Claude Code and opencode (`Setup` from the environment, with the model download
     `Source`; `bench_options` for `bench`; `DaemonSource` reads the memories for the export);
     `ui` and `export` without `--to-files` report their planned stage and exit with code 2; the
     wizard is interactive when stdin and stdout are terminals;
-  - `src/agents.rs`: the harness abstraction (`Agent`: MCP configuration, settings and
-    instruction files, projects and memory directories, the global memory file, the auto-memory
-    key, the headless command) and `ClaudeCode`; new harnesses implement it (opencode next);
+  - `src/agents.rs`: the harness abstraction (`Kind` = claude-code | opencode; `Agent`: MCP
+    configuration file, its servers key and entry shape, settings and instruction files, the
+    sessions location, the export directories, the auto-memory key, the headless command;
+    `is_our_entry` for both entry shapes) and `ClaudeCode`; `Setup::detected`/`installed`;
+  - `src/opencode.rs` + `src/opencode/`: opencode 1.x (paths `OpenCodePaths`: XDG config/data,
+    the JSONC config file install edits, our rules file listed in `instructions` (never
+    AGENTS.md, which would shadow opencode's `~/.claude/CLAUDE.md` fallback), the plugin
+    `plugins/graphersal-memory.js` (`plugin_text`), the sandbox of headless runs
+    (`build_sandbox`, `normalize_run_output` of `opencode run --format json`), `free_model`);
+    `opencode/install.rs` the plan/removal/inspect/status/doctor of its parts and its rule block
+    texts; `opencode/sessions.rs` the read-only SQLite reader (`units`, `read`; a unit path is
+    `<db>#<session id>`) with the fixture schema in its tests;
   - `src/prompt.rs`: the wizard's console (`Console`: "Step N of M", numbered choices, the
     default on Enter, re-ask; colour only on a terminal without `NO_COLOR`);
   - `src/language.rs`: the memory language (`english` | `any`) and its rule text, filled into
@@ -35,7 +44,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     (marker at its top: change both); `GRAPHERSAL_MEMORY_HF_ENDPOINT`, `HF_TOKEN`;
   - `src/export.rs`: memories back into the harness's file memory (per project `MEMORY.md` +
     `<slug>.md` as the import reads them, global ones into the agent's global memory file;
-    identical files skipped, differing ones kept with `<name>.graphersal.md` beside them);
+    identical files skipped, differing memory files kept with `<slug>.graphersal.md` beside
+    them, a differing `MEMORY.md` kept with the missing index lines appended; opencode: the same
+    files as Markdown under `~/graphersal-memory-export/opencode/`);
   - `src/install.rs`: the wizard (`Current` = the current answers, `default_answers` for
     `--yes`/no terminal, `ask` for the interactive steps, `plan_install`, `install`), the
     auto-memory switch (`autoMemoryEnabled`, its previous value recorded in the settings file's
@@ -58,21 +69,25 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/hook.rs`: `hook session-start|session-end`: time-boxed import of the session project's
     changed memory files, then one `index_sessions` control line to the daemon (`run_with`'s
     `Enqueue`; start: its transcript is `active`, end: `ended`), one status line at session
-    start, always exit 0; `GRAPHERSAL_MEMORY_HOOK=off` makes it do nothing;
+    start, always exit 0; `GRAPHERSAL_MEMORY_HOOK=off` makes it do nothing; `run_opencode` for
+    opencode's plugin (`--harness opencode`: no import, `<db>#<id>` active/ended);
   - `src/config.rs`: `<data dir>/config.json` (`daemon.idle`, `memory.language`,
     `embedding.model`, `summaries.enabled|harness_command|monthly_budget_usd|since`;
     `with_summaries` and `with_values` edit in place); flag > env > file > default;
   - `src/transcript.rs`: the Claude Code transcript parser (turns, title, times, branches, edited
     files, compaction summaries; sidechains and generated records left out; unknown records,
     bad lines and a partial last line skipped; fingerprint of the complete lines);
-  - `src/sessions.rs`: the session indexing: `scan` (top-level `*.jsonl` only), finished =
-    unchanged for `IDLE` (30 min) or `ended`, state `<data dir>/sessions/claude-code.json`,
+  - `src/sessions.rs`: the session indexing per harness (`Request.harness`; the daemon keeps one
+    pending request per harness): `units` (Claude Code: `scan`, top-level `*.jsonl` only;
+    opencode: its database), finished = unchanged for `IDLE` (30 min) or `ended`, state
+    `<data dir>/sessions/<harness>.json`,
     `Writer` (the daemon: the project's store; tests: `tests::Direct`), `run` (index in batches of
     40 turns, then summaries), `estimate`, `plan`, the control lines `index_sessions` /
     `sessions_status`;
   - `src/summaries.rs`: the opt-in summaries: the prompt and JSON schema (ported from the
     prototype), `harness_args` (`claude` gets `--output-format json --json-schema ... --tools ""
-    --strict-mcp-config --no-session-persistence`), `run_harness` (prompt on stdin, timeout,
+    --strict-mcp-config --no-session-persistence`), `run_harness_with` (prompt on stdin, timeout; an `opencode` command in its sandbox with
+    `--format json`,
     `GRAPHERSAL_MEMORY_HOOK=off`), `parse_answer`, `Spend` (`<data dir>/sessions/spend.json`),
     `Summarizer` (exists only when enabled; budget check before each call), `facts`, `render`;
   - `src/harness.rs`: running the user's harness: `program_path` (Windows: a bare name such as

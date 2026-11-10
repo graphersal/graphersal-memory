@@ -13,9 +13,12 @@
 //!   the agent's global memory file (Claude Code: `~/.claude/rules/graphersal-memory-global.md`,
 //!   a user rules file; not the managed block of `CLAUDE.md`, which uninstall removes). It is
 //!   not imported again by `import` (rules files are not imported in this version).
-//! - Conflicts: a file with exactly the text the export would write is left alone; a file that
-//!   exists with other text (edited by the user or the agent) is kept, and the export's text
-//!   goes beside it as `<name>.graphersal.md`, named in the report. Nothing is ever deleted.
+//! - Conflicts: a file with exactly the text the export would write is left alone; a memory
+//!   file that exists with other text (edited by the user or the agent) is kept, and the
+//!   export's text goes beside it as `<slug>.graphersal.md`, named in the report. A `MEMORY.md`
+//!   that differs is kept too, and only the index lines of the memories it does not link yet
+//!   (`(<slug>.md)`) are appended to it, in the graph's order, in the format the import reads;
+//!   its own lines stay byte for byte (user decision 2026-11-10). Nothing is ever deleted.
 //! - A project is written to the directory it was last seen at (`crate::projects`).
 
 use std::collections::BTreeMap;
@@ -214,6 +217,8 @@ pub struct Report {
     pub unchanged: usize,
     /// Files kept because they differ, with where the export's text went instead.
     pub conflicts: Vec<(PathBuf, PathBuf)>,
+    /// `MEMORY.md` files kept with index lines appended, and how many.
+    pub appended: Vec<(PathBuf, usize)>,
     /// Projects whose directory is not known (their memories were not written).
     pub problems: Vec<String>,
 }
@@ -240,6 +245,13 @@ impl Report {
                 "  kept {} (it differs from the graph's version); the graph's version is in {}",
                 kept.display(),
                 beside.display()
+            ));
+        }
+        for (index, count) in &self.appended {
+            lines.push(format!(
+                "  appended {count} index line{} to {} (its own lines are unchanged)",
+                if *count == 1 { "" } else { "s" },
+                index.display()
             ));
         }
         for problem in &self.problems {
@@ -284,6 +296,38 @@ fn put(path: &Path, text: &str, report: &mut Report) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// Writes a project's index: a missing `MEMORY.md` gets the whole index; an identical one is
+/// left alone; one that differs keeps every byte and gets the lines of the memories it does
+/// not link yet (`](<slug>.md)`) appended (after a line end when its last line has none).
+fn put_index(path: &Path, rows: &[&Row], report: &mut Report) -> Result<(), String> {
+    let text = index_text(rows);
+    let Some(bytes) = crate::fsutil::read_optional(path)? else {
+        return put(path, &text, report);
+    };
+    if bytes == text.as_bytes() {
+        report.unchanged += 1;
+        return Ok(());
+    }
+    let existing = String::from_utf8_lossy(&bytes).into_owned();
+    let missing: Vec<&Row> = rows
+        .iter()
+        .copied()
+        .filter(|row| !existing.contains(&format!("]({}.md)", row.slug)))
+        .collect();
+    if missing.is_empty() {
+        report.unchanged += 1;
+        return Ok(());
+    }
+    let mut new = existing;
+    if !new.is_empty() && !new.ends_with('\n') {
+        new.push('\n');
+    }
+    new.push_str(&index_text(&missing));
+    crate::fsutil::write_atomic(path, new.as_bytes())?;
+    report.appended.push((path.to_path_buf(), missing.len()));
+    Ok(())
 }
 
 /// The directory of the project `id`: the path it was last seen at that still exists, else
@@ -340,7 +384,7 @@ pub fn write(agent: &dyn Agent, data_dir: &Path, rows: &[Row]) -> Result<Report,
                 &mut report,
             )?;
         }
-        put(&dir.join("MEMORY.md"), &index_text(rows), &mut report)?;
+        put_index(&dir.join("MEMORY.md"), rows, &mut report)?;
     }
     Ok(report)
 }
@@ -407,5 +451,36 @@ mod tests {
             PathBuf::from("/w/app")
         );
         assert_eq!(project_root(data.path(), "/w/app"), PathBuf::from("/w/app"));
+    }
+
+    #[test]
+    fn a_differing_index_gets_only_the_missing_lines_appended() {
+        let dir = crate::mcp_tests::TempDir::new("export-index");
+        let path = dir.path().join("MEMORY.md");
+        // Theirs: one of our memories linked with their own wording, no final line end.
+        let theirs = "# My index\n- [My pnpm note](pnpm.md) — mine";
+        std::fs::write(&path, theirs).unwrap();
+        let (a, b) = (row("pnpm", "/w"), row("tabs", "/w"));
+        let mut report = Report::default();
+        put_index(&path, &[&a, &b], &mut report).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            format!("{theirs}\n- [Package manager](tabs.md) — pnpm, not npm\n")
+        );
+        assert!(text.starts_with(theirs), "their lines stay byte for byte");
+        assert_eq!(report.appended, vec![(path.clone(), 1)]);
+        assert!(!dir.path().join("MEMORY.graphersal.md").exists());
+        // A second export appends nothing.
+        let mut again = Report::default();
+        put_index(&path, &[&a, &b], &mut again).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert!(again.appended.is_empty());
+        assert_eq!(again.unchanged, 1);
+        // A missing index is written whole.
+        let fresh = dir.path().join("new").join("MEMORY.md");
+        let mut report = Report::default();
+        put_index(&fresh, &[&a], &mut report).unwrap();
+        assert_eq!(report.written, vec![fresh]);
     }
 }
