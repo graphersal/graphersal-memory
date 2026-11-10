@@ -33,9 +33,12 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::agents::{Agent, ClaudeCode};
 use crate::config::Config;
 use crate::import::{self, Connect, DirPlan, ImportState};
-use crate::{fsutil, jsonedit};
+use crate::language::Language;
+use crate::prompt::{Choice, Console};
+use crate::{download, export, fsutil, jsonedit, models};
 
 /// The name of the `use` server in Claude Code.
 pub const USE_SERVER: &str = "graphersal-memory";
@@ -67,13 +70,16 @@ const STATE_FILE: &str = "claude-code.json";
 /// The format version of the state file.
 const FORMAT: u64 = 1;
 
-/// The text of the managed rule block (between its marker lines).
+/// The text of the managed rule block (between its marker lines) with the English memory
+/// language rule (the default; [`RULE_BLOCK_ANY`] is the "any language" text).
 pub const RULE_BLOCK: &str = "\
 ## Memory: graphersal-memory
 
 Your long-term memory of this user lives in a local graph, served by the MCP server
 `graphersal-memory`, not in memory files.
 
+- Store and search memories in English. Translate a user's words into English before saving
+  them or searching; quote exact wording only when the exact words matter.
 - Search it before you answer from memory or ask the user something they may have told you
   before: `memories(text)` for rules, decisions and preferences, `recall(text)` for everything,
   `memory(slug)` to read one in full.
@@ -87,13 +93,45 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
   `recall(text, k, \"turn\")` finds what was literally said.
 ";
 
+/// The rule block with the "any language" memory language rule.
+pub const RULE_BLOCK_ANY: &str = "\
+## Memory: graphersal-memory
+
+Your long-term memory of this user lives in a local graph, served by the MCP server
+`graphersal-memory`, not in memory files.
+
+- Store memories in the language the user uses; search in that language and in English.
+- Search it before you answer from memory or ask the user something they may have told you
+  before: `memories(text)` for rules, decisions and preferences, `recall(text)` for everything,
+  `memory(slug)` to read one in full.
+- Save with `remember`: search with `memories(text)` first, so you replace a memory instead of
+  duplicating it; scope \"global\" for rules and preferences that hold in every project. Remove
+  with `forget`.
+- Do not write memory files (`MEMORY.md` and the files beside it) any more. Files written anyway
+  are imported into the graph at the next session start.
+- Past sessions of this project: `sessions(text)` finds what was decided, corrected or left
+  open in them (from their summaries, when summaries are on), `session(id)` reads one, and
+  `recall(text, k, \"turn\")` finds what was literally said.
+";
+
+/// The rule block text of a memory language.
+pub fn rule_block(language: Language) -> &'static str {
+    match language {
+        Language::English => RULE_BLOCK,
+        Language::Any => RULE_BLOCK_ANY,
+    }
+}
+
 /// The fingerprints of the rule block texts earlier versions wrote (oldest first; add the
-/// current one here whenever `RULE_BLOCK` changes). An untouched block with one of them is
-/// updated by `install` and removed by `uninstall`; one with an unknown fingerprint whose text
-/// still matches it (a newer version's block) is kept by `install` and reported.
+/// current one here whenever `RULE_BLOCK` changes). An untouched block with one of them, or
+/// with the text of the other memory language, is updated by `install` and removed by
+/// `uninstall`; one with an unknown fingerprint whose text still matches it (a newer version's
+/// block) is kept by `install` and reported.
 pub const PREVIOUS_BLOCK_FINGERPRINTS: &[&str] = &[
     // 0.0.0 (stages M3-M5): "Past sessions ... are not indexed yet in this version."
     "e255edadf6bd5788",
+    // 0.1.0 before the memory language (stages M5-M6): no language rule.
+    "80779cc2f75cc8fc",
 ];
 
 /// Where Claude Code keeps its files.
@@ -152,9 +190,17 @@ pub struct Setup {
     /// Arguments that point a started process at an explicitly chosen data or run directory
     /// (`--data-dir X`, `--run-dir Y`); empty for the defaults.
     pub dir_args: Vec<String>,
+    /// Where an embedding model download connects (Hugging Face, or
+    /// `GRAPHERSAL_MEMORY_HF_ENDPOINT`).
+    pub source: download::Source,
 }
 
 impl Setup {
+    /// The harness this setup installs into.
+    pub fn agent(&self) -> ClaudeCode {
+        ClaudeCode::new(self.paths.clone())
+    }
+
     /// The MCP entry of a profile (`use` or `develop`).
     pub fn mcp_entry(&self, profile: &str) -> Value {
         let mut args = vec![
@@ -221,13 +267,20 @@ pub fn is_our_hook_group(group: &Value) -> bool {
     })
 }
 
-/// The managed block for `RULE_BLOCK`, marker lines included, ending with a newline.
+/// The managed block for `RULE_BLOCK` (English), marker lines included, ending with a newline.
+#[cfg(test)]
 pub fn block_text() -> String {
+    block_text_for(Language::English)
+}
+
+/// The managed block of a memory language, marker lines included, ending with a newline.
+pub fn block_text_for(language: Language) -> String {
+    let text = rule_block(language);
     format!(
         "{BLOCK_BEGIN} fingerprint={} (managed by `graphersal-memory install`; \
          `graphersal-memory uninstall` removes it; an edit inside is reported as a conflict) \
-         -->\n{RULE_BLOCK}{BLOCK_END}\n",
-        fsutil::fingerprint(RULE_BLOCK.as_bytes())
+         -->\n{text}{BLOCK_END}\n",
+        fsutil::fingerprint(text.as_bytes())
     )
 }
 
@@ -246,9 +299,14 @@ pub struct FoundBlock {
     pub known: bool,
 }
 
-/// The managed block of `text`: `Ok(None)` without one, `Err` for a begin line without an end
-/// line.
+/// The managed block of `text` (current = the English block): `Ok(None)` without one, `Err` for
+/// a begin line without an end line.
 pub fn find_block(text: &str) -> Result<Option<FoundBlock>, String> {
+    find_block_for(text, Language::English)
+}
+
+/// [`find_block`] with the block of `language` as the current one.
+pub fn find_block_for(text: &str, language: Language) -> Result<Option<FoundBlock>, String> {
     let Some(start) = text
         .match_indices(BLOCK_BEGIN)
         .map(|(at, _)| at)
@@ -278,13 +336,16 @@ pub fn find_block(text: &str) -> Result<Option<FoundBlock>, String> {
         end += 1;
     }
     let intact = fsutil::fingerprint(content.as_bytes()) == recorded;
-    let current = intact && text[start..end] == block_text();
+    let current = intact && text[start..end] == block_text_for(language);
+    let ours = [Language::English, Language::Any]
+        .iter()
+        .any(|l| fsutil::fingerprint(rule_block(*l).as_bytes()) == recorded);
     Ok(Some(FoundBlock {
         start,
         end,
         intact,
         current,
-        known: current || (intact && PREVIOUS_BLOCK_FINGERPRINTS.contains(&recorded)),
+        known: current || (intact && (ours || PREVIOUS_BLOCK_FINGERPRINTS.contains(&recorded))),
     }))
 }
 
@@ -299,19 +360,30 @@ fn block_separator(text: &str) -> &'static str {
     }
 }
 
-/// Options of `install`.
-#[derive(Debug, Clone, Copy, Default)]
+/// Options of `install`: every wizard question has a flag (`None`/`false`: the question's
+/// default, or the current answer on an installed system).
+#[derive(Debug, Clone, Default)]
 pub struct InstallOptions {
     /// Show the plan only.
     pub dry_run: bool,
     /// Do not ask.
     pub yes: bool,
-    /// Ask for the model download step (planned).
-    pub with_model: bool,
-    /// Register the develop server too.
+    /// Register the develop server too (`--enable-develop`).
     pub enable_develop: bool,
-    /// Switch session summaries on without asking.
+    /// Switch session summaries on without asking (`--summaries`).
     pub summaries: bool,
+    /// The memory language (`--language`).
+    pub language: Option<Language>,
+    /// The embedding model (`--model`): a repository or `hash-ngram/1` (`builtin`).
+    pub model: Option<String>,
+    /// Do not import the existing file memory now (`--no-import`).
+    pub no_import: bool,
+    /// Keep the harness's own memory on (`--keep-auto-memory`).
+    pub keep_auto_memory: bool,
+    /// Ask the wizard's questions (stdin and stdout are terminals, no `--yes`).
+    pub interactive: bool,
+    /// Colour in the wizard.
+    pub color: bool,
 }
 
 /// Options of `uninstall`.
@@ -325,6 +397,10 @@ pub struct UninstallOptions {
     pub purge: bool,
     /// Only unregister the develop server.
     pub disable_develop_only: bool,
+    /// Do not export the memories back into the harness's file memory (`--no-export`).
+    pub no_export: bool,
+    /// Ask whether to export (stdin and stdout are terminals, no `--yes`).
+    pub interactive: bool,
 }
 
 /// One planned file change.
@@ -445,6 +521,7 @@ struct InstallPlan {
     conflicts: Vec<String>,
     imports: Vec<DirPlan>,
     write_config: bool,
+    auto_memory: AutoMemoryPlan,
 }
 
 fn read_text(path: &Path) -> Result<Option<String>, String> {
@@ -504,14 +581,19 @@ fn plan_user_config(
     }
     if !enable_develop {
         let develop = &parsed["mcpServers"][DEVELOP_SERVER];
-        lines.push(if develop.is_null() {
-            format!(
+        if develop.is_null() {
+            lines.push(format!(
                 "{DEVELOP_SERVER}: not registered (off; `graphersal-memory install \
                  --enable-develop` registers it)"
-            )
+            ));
+        } else if is_our_entry(develop)
+            && let Some(new) = jsonedit::remove_member(&text, &["mcpServers"], DEVELOP_SERVER)?
+        {
+            text = new;
+            lines.push(format!("{DEVELOP_SERVER}: unregister (you answered no)"));
         } else {
-            format!("{DEVELOP_SERVER}: registered (kept)")
-        });
+            lines.push(format!("{DEVELOP_SERVER}: registered (kept)"));
+        }
     }
     let step = Step {
         title: format!(
@@ -529,8 +611,31 @@ fn plan_user_config(
     Ok((step, change))
 }
 
-/// Plans the change of the user settings (the hooks).
-fn plan_settings(setup: &Setup) -> Result<(Step, Option<Change>), String> {
+/// What install does with the harness's own memory switch.
+#[derive(Debug, Clone, PartialEq)]
+enum AutoMemoryPlan {
+    /// Nothing.
+    Keep,
+    /// Switched off now; `previous` is what the setting was (`null`: absent).
+    SwitchOff { previous: Value },
+    /// Install's own switch-off is undone (or forgotten).
+    Restore,
+}
+
+/// The record of install's switch-off in the settings file's state entry.
+const AUTO_MEMORY_RECORD: &str = "auto_memory";
+
+/// The sentence the auto-memory step and the summary show when it is switched off.
+pub const NOTHING_IS_LOST: &str = "Nothing is lost: if you uninstall graphersal-memory later, \
+    every memory, including new ones, is written back to Claude Code's memory files and its \
+    auto-memory is switched back on.";
+
+/// Plans the change of the user settings (the hooks, and the auto-memory switch).
+fn plan_settings(
+    setup: &Setup,
+    auto_memory_off: bool,
+    state: &State,
+) -> Result<(Step, Option<Change>, AutoMemoryPlan), String> {
     let path = &setup.paths.settings;
     let before = read_text(path)?;
     let mut text = before.clone().unwrap_or_else(|| EMPTY_OBJECT.to_string());
@@ -563,6 +668,61 @@ fn plan_settings(setup: &Setup) -> Result<(Step, Option<Change>), String> {
             setup.hook_command(sub)
         ));
     }
+    let mut plan = AutoMemoryPlan::Keep;
+    if let Some(key) = setup.agent().auto_memory_key() {
+        let value = parsed.get(key).cloned();
+        let recorded = state
+            .file(path)
+            .and_then(|entry| entry.get(AUTO_MEMORY_RECORD))
+            .cloned();
+        let off = value == Some(Value::Bool(false));
+        if auto_memory_off {
+            if off {
+                lines.push(format!(
+                    "{key}: false already (auto-memory off{})",
+                    if recorded.is_some() {
+                        ", switched off by install"
+                    } else {
+                        ", your own setting"
+                    }
+                ));
+            } else if let Some((new, _)) = jsonedit::set_member(&text, &[], key, &json!(false))? {
+                text = new;
+                lines.push(format!(
+                    "{key}: false (switch Claude Code's auto-memory off). {NOTHING_IS_LOST}"
+                ));
+                plan = AutoMemoryPlan::SwitchOff {
+                    previous: recorded
+                        .as_ref()
+                        .map(|r| r["previous"].clone())
+                        .unwrap_or_else(|| value.clone().unwrap_or(Value::Null)),
+                };
+            }
+        } else if let Some(record) = recorded {
+            if off {
+                let previous = &record["previous"];
+                let restored = if previous.is_null() {
+                    jsonedit::remove_member(&text, &[], key)?
+                } else {
+                    jsonedit::set_member(&text, &[], key, previous)?.map(|(new, _)| new)
+                };
+                if let Some(new) = restored {
+                    text = new;
+                }
+                lines.push(format!(
+                    "{key}: back to how it was before install (auto-memory on)"
+                ));
+            } else {
+                lines.push(format!("{key}: auto-memory on (kept)"));
+            }
+            plan = AutoMemoryPlan::Restore;
+        } else {
+            lines.push(format!(
+                "{key}: kept as it is (auto-memory {})",
+                if off { "off" } else { "on" }
+            ));
+        }
+    }
     let step = Step {
         title: format!(
             "Add the SessionStart and SessionEnd hooks in {}",
@@ -576,20 +736,22 @@ fn plan_settings(setup: &Setup) -> Result<(Step, Option<Change>), String> {
         created,
         separator: None,
     });
-    Ok((step, change))
+    Ok((step, change, plan))
 }
 
 /// Plans the managed block in the instruction file.
 fn plan_block(
     setup: &Setup,
+    language: Language,
     conflicts: &mut Vec<String>,
 ) -> Result<(Step, Option<Change>), String> {
-    let path = &setup.paths.instructions;
+    let agent = setup.agent();
+    let path = &agent.instruction_file().to_path_buf();
     let before = read_text(path)?;
     let text = before.clone().unwrap_or_default();
     let title = format!("Write the managed rule block into {}", path.display());
     let mut separator = None;
-    let after = match find_block(&text) {
+    let after = match find_block_for(&text, language) {
         Err(err) => {
             conflicts.push(format!(
                 "{}: {err}; kept as it is. Remove the begin line or add the end line, then run \
@@ -619,16 +781,16 @@ fn plan_block(
         Ok(Some(found)) => Some(format!(
             "{}{}{}",
             &text[..found.start],
-            block_text(),
+            block_text_for(language),
             &text[found.end..]
         )),
         Ok(None) => {
             let sep = block_separator(&text);
             separator = Some(sep.to_string());
-            Some(format!("{text}{sep}{}", block_text()))
+            Some(format!("{text}{sep}{}", block_text_for(language)))
         }
     };
-    let line = match (&after, find_block(&text)) {
+    let line = match (&after, find_block_for(&text, language)) {
         (_, Err(_)) | (None, Ok(Some(FoundBlock { known: false, .. }))) => {
             "CONFLICT (see the report)".to_string()
         }
@@ -658,20 +820,391 @@ fn plan_block(
     ))
 }
 
-/// Plans the whole install.
-fn plan_install(setup: &Setup, options: &InstallOptions) -> Result<InstallPlan, String> {
+/// What is installed and configured now: the current answers of the wizard.
+struct Current {
+    /// Whether install ran before (its state file exists).
+    installed: bool,
+    /// The settings file.
+    config: Config,
+    /// install's earlier answer to the auto-memory question, when it recorded one.
+    auto_memory_answer: Option<bool>,
+    /// Whether the harness's own memory is off (by anyone).
+    auto_memory_off: bool,
+    /// Whether the user switched it off themselves (not install).
+    auto_memory_off_by_user: bool,
+    /// Whether our develop server is registered.
+    develop_registered: bool,
+    /// The file-memory import still to do: (directories, new + changed files).
+    import_pending: (usize, usize),
+}
+
+impl Current {
+    fn read(setup: &Setup) -> Result<Self, String> {
+        let state = State::load(setup)?;
+        let config = Config::load(&setup.data_dir)?;
+        let agent = setup.agent();
+        let mut errors = Vec::new();
+        let settings = read_json(agent.settings_file(), &mut errors);
+        let user_config = read_json(agent.mcp_config_file(), &mut errors);
+        let off = agent
+            .auto_memory_key()
+            .is_some_and(|key| settings[key] == Value::Bool(false));
+        let recorded = state
+            .file(agent.settings_file())
+            .is_some_and(|entry| entry.contains_key(AUTO_MEMORY_RECORD));
+        let imports = import::plan(
+            import::scan(agent.projects_dir())?,
+            &ImportState::load(&setup.data_dir)?,
+        );
+        let (with_project, _, new, changed, _) = import::totals(&imports);
+        Ok(Self {
+            installed: State::exists(setup),
+            auto_memory_answer: state.meta.get("auto_memory_off").and_then(Value::as_bool),
+            auto_memory_off: off,
+            auto_memory_off_by_user: off && !recorded,
+            develop_registered: is_our_entry(&user_config["mcpServers"][DEVELOP_SERVER]),
+            import_pending: (with_project, new + changed),
+            config,
+        })
+    }
+}
+
+/// The wizard's answers: what install makes true.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answers {
+    /// The memory language.
+    pub language: Language,
+    /// The embedding model: a repository or `hash-ngram/1`.
+    pub model: String,
+    /// Import the file memory now.
+    pub import: bool,
+    /// Switch the harness's own memory off.
+    pub auto_memory_off: bool,
+    /// Session summaries on.
+    pub summaries: bool,
+    /// The develop server registered.
+    pub develop: bool,
+}
+
+/// The model the answers default to: the flag, else the current model (unless the language
+/// changed), else the language's model.
+fn default_model(options: &InstallOptions, current: &Current, language: Language) -> String {
+    if let Some(model) = &options.model {
+        return model.clone();
+    }
+    match &current.config.model {
+        Some(model) if current.config.language() == language => model.clone(),
+        _ => models::default_for(language).to_string(),
+    }
+}
+
+/// The answers without questions: every flag, else the current answer, else the default
+/// (summaries and the develop server: off unless their flag or the current state says on).
+fn default_answers(options: &InstallOptions, current: &Current) -> Answers {
+    let language = options
+        .language
+        .or(current.config.language)
+        .unwrap_or_default();
+    Answers {
+        model: default_model(options, current, language),
+        language,
+        import: !options.no_import,
+        auto_memory_off: !options.keep_auto_memory
+            && current
+                .auto_memory_answer
+                .unwrap_or(!current.auto_memory_off_by_user),
+        summaries: options.summaries || current.config.summaries.enabled,
+        develop: options.enable_develop || current.develop_registered,
+    }
+}
+
+/// The interactive wizard: one question per step that applies, with the current answers (or
+/// the flags) as defaults. `Err` when the input ended before a question without a default was
+/// answered.
+fn ask(
+    setup: &Setup,
+    options: &InstallOptions,
+    current: &Current,
+    console: &mut Console<'_>,
+) -> Result<Answers, crate::prompt::NoAnswer> {
+    let agent = setup.agent();
+    let name = agent.display_name();
+    let defaults = default_answers(options, current);
+    let ask_import = current.import_pending.1 > 0;
+    let ask_auto_memory = agent.auto_memory_key().is_some() && !current.auto_memory_off_by_user;
+    let total = 4 + usize::from(ask_import) + usize::from(ask_auto_memory) + 1;
+    let mut n = 0;
+    let mut next = || {
+        n += 1;
+        n
+    };
+
+    console.step(
+        next(),
+        total,
+        "Memory language",
+        &[
+            "Memories are found by meaning. Keeping them in one language lets a search find a",
+            "memory whatever language you wrote in; or keep each memory in your own words.",
+        ],
+    );
+    let language = if console.choose(
+        &[
+            Choice::new(
+                "English only",
+                "the agent stores and searches in English\n(it translates a query before searching)",
+            ),
+            Choice::new(
+                "Any language",
+                "the agent stores in the language of the conversation\n(and searches in it and in English)",
+            ),
+        ],
+        Some(usize::from(defaults.language == Language::Any)),
+    )? == 0
+    {
+        Language::English
+    } else {
+        Language::Any
+    };
+
+    console.step(
+        next(),
+        total,
+        "Embedding model",
+        &[
+            "The model turns every memory into a vector, so a search finds related wording,",
+            "not only the same words. Downloaded once from Hugging Face; it then runs locally.",
+        ],
+    );
+    let default_model = if options.model.is_some() || current.config.model.is_some() {
+        default_model(options, current, language)
+    } else {
+        models::default_for(language).to_string()
+    };
+    let mut choices = Vec::new();
+    let mut repos: Vec<String> = Vec::new();
+    for offered in models::OFFERED {
+        let cached = models::cached(&setup.data_dir, offered.repo).is_some();
+        choices.push(Choice::new(
+            models::short_name(offered.repo),
+            format!(
+                "{}, {}, {}{}",
+                offered.languages,
+                offered.size,
+                offered.license,
+                if cached { " (downloaded)" } else { "" }
+            ),
+        ));
+        repos.push(offered.repo.to_string());
+    }
+    if default_model != models::BUILTIN && models::offered(&default_model).is_none() {
+        choices.push(Choice::new(
+            models::short_name(&default_model),
+            format!("{default_model} (your choice)"),
+        ));
+        repos.push(default_model.clone());
+    }
+    choices.push(Choice::new(
+        "Built-in (no download)",
+        "works offline, but finds only shared words and spellings,\nnot meaning; weaker search",
+    ));
+    repos.push(models::BUILTIN.to_string());
+    let default_index = repos.iter().position(|repo| *repo == default_model);
+    let model = repos[console.choose(&choices, default_index)?].clone();
+
+    let import = if ask_import {
+        let (dirs, files) = current.import_pending;
+        console.step(
+            next(),
+            total,
+            "Import existing file memory",
+            &[
+                &format!(
+                    "{files} memory file{} of {name}'s own memory (MEMORY.md and the files beside",
+                    if files == 1 { "" } else { "s" }
+                ),
+                &format!(
+                    "it) in {dirs} project{} are not in the graph yet. They stay per project, as",
+                    if dirs == 1 { "" } else { "s" }
+                ),
+                &format!("{name} keeps them. The files are read, never changed."),
+            ],
+        );
+        console.yes_no(
+            "import them now",
+            "not now (the session start hook still imports the files of the\nproject you work in)",
+            Some(defaults.import),
+        )?
+    } else {
+        defaults.import
+    };
+
+    let auto_memory_off = if ask_auto_memory {
+        console.step(
+            next(),
+            total,
+            &format!("{name}'s auto-memory"),
+            &[
+                &format!(
+                    "{name} also writes its own memory files and loads them into every session;"
+                ),
+                "with graphersal-memory both would keep the same facts twice.",
+                NOTHING_IS_LOST,
+            ],
+        );
+        console.yes_no(
+            &format!(
+                "switch it off ({} false in {})",
+                agent.auto_memory_key().unwrap_or_default(),
+                agent.settings_file().display()
+            ),
+            "keep it on (the files it writes are imported at each session start)",
+            Some(defaults.auto_memory_off),
+        )?
+    } else {
+        defaults.auto_memory_off
+    };
+
+    console.step(
+        next(),
+        total,
+        "Session summaries",
+        &[
+            "Past sessions are indexed locally (their raw turns, no model call). Optionally each",
+            &format!(
+                "finished session is summarized through your own `{}`",
+                current.config.summaries.harness_command.join(" ")
+            ),
+            "(decisions, corrections, outcomes, open threads). That costs model usage:",
+            &summaries_estimate(setup, &current.config),
+        ],
+    );
+    let summaries = console.yes_no(
+        &format!(
+            "summarize, at most ${:.2} per month",
+            current.config.summaries.monthly_budget_usd
+        ),
+        "raw turns only (`graphersal-memory summaries enable` later)",
+        (current.installed || options.summaries).then_some(defaults.summaries),
+    )?;
+
+    console.step(
+        next(),
+        total,
+        "The develop server",
+        &[
+            "A second MCP server with tools to inspect and reshape the memory's structure",
+            "(schema, saved queries, indexes). Most people do not need it; its tool",
+            "descriptions are paid on every agent turn.",
+        ],
+    );
+    let develop = console.yes_no(
+        &format!("register {DEVELOP_SERVER}"),
+        "not now (`graphersal-memory install --enable-develop` later)",
+        (current.installed || options.enable_develop).then_some(defaults.develop),
+    )?;
+    Ok(Answers {
+        language,
+        model,
+        import,
+        auto_memory_off,
+        summaries,
+        develop,
+    })
+}
+
+/// The summaries' cost estimate line, or why there is none.
+fn summaries_estimate(setup: &Setup, config: &Config) -> String {
+    match crate::sessions::estimate(
+        &setup.paths.projects,
+        &setup.data_dir,
+        crate::sessions::IDLE,
+        config.summaries.since.as_deref(),
+    ) {
+        Ok(estimate) => crate::commands::estimate_line(&estimate),
+        Err(err) => format!("(no estimate: {err})"),
+    }
+}
+
+/// The plan's lines about the embedding model.
+fn model_lines(setup: &Setup, current: &Current, model: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    if model == models::BUILTIN {
+        lines.push(
+            "the built-in embedder hash-ngram/1 (no download; finds shared words and spellings, \
+             not meaning)"
+                .to_string(),
+        );
+        if current
+            .config
+            .model
+            .as_deref()
+            .is_some_and(|m| m != models::BUILTIN)
+        {
+            lines.push(
+                "the memory goes back to it (re-embedded by the daemon in the background)"
+                    .to_string(),
+            );
+        }
+        return lines;
+    }
+    let size = models::offered(model)
+        .map(|o| format!("{}, {}", o.size, o.license))
+        .unwrap_or_else(|| "size and licence from Hugging Face".to_string());
+    match models::cached(&setup.data_dir, model) {
+        Some(cached) => lines.push(format!(
+            "{model} ({}, {}): downloaded already",
+            download::human_bytes(cached.bytes),
+            cached.license
+        )),
+        None => lines.push(format!(
+            "download {model} ({size}) from {} into {} (the one network access of install; if \
+             it fails, the built-in embedder stays and install goes on)",
+            setup.source.endpoint,
+            models::cache_dir(&setup.data_dir).display()
+        )),
+    }
+    if current.config.model.as_deref() != Some(model) {
+        lines.push(
+            "the daemon imports it into the store and re-embeds every memory, session, turn and \
+             fact with it in the background (calls wait while it runs)"
+                .to_string(),
+        );
+    }
+    lines
+}
+
+/// Plans the whole install for `answers`.
+fn plan_install(
+    setup: &Setup,
+    options: &InstallOptions,
+    answers: &Answers,
+    current: &Current,
+) -> Result<InstallPlan, String> {
     let mut conflicts = Vec::new();
     let mut steps = Vec::new();
     let mut changes = Vec::new();
-    let (step, change) = plan_user_config(setup, options.enable_develop, &mut conflicts)?;
+    let state = State::load(setup)?;
+    steps.push(Step {
+        title: "Memory language".to_string(),
+        lines: vec![format!(
+            "{} (in the MCP instructions and the rule block; config.json memory.language)",
+            answers.language.describe()
+        )],
+    });
+    steps.push(Step {
+        title: "Embedding model".to_string(),
+        lines: model_lines(setup, current, &answers.model),
+    });
+    let (step, change) = plan_user_config(setup, answers.develop, &mut conflicts)?;
     steps.push(step);
     changes.extend(change);
-    let (step, change) = plan_settings(setup)?;
+    let (step, change, auto_memory) = plan_settings(setup, answers.auto_memory_off, &state)?;
     steps.push(step);
     changes.extend(change);
 
-    let state = ImportState::load(&setup.data_dir)?;
-    let imports = import::plan(import::scan(&setup.paths.projects)?, &state);
+    let import_state = ImportState::load(&setup.data_dir)?;
+    let imports = import::plan(import::scan(&setup.paths.projects)?, &import_state);
     let (with_project, skipped, new, changed, unchanged) = import::totals(&imports);
     let mut lines = vec![format!(
         "{} memory director{} under {}: {new} new and {changed} changed memory files to import, \
@@ -690,43 +1223,48 @@ fn plan_install(setup: &Setup, options: &InstallOptions) -> Result<InstallPlan, 
             if skipped == 1 { "y" } else { "ies" }
         ));
     }
-    lines.push(
-        "The files are read, not changed. CLAUDE.md rules are not imported in this version."
-            .to_string(),
-    );
+    if answers.import {
+        lines.push(
+            "The files are read, not changed; every memory stays in its project. CLAUDE.md rules \
+             are not imported in this version."
+                .to_string(),
+        );
+    } else {
+        lines.push(
+            "not now (--no-import); the session start hook imports a project's files when you \
+             work in it"
+                .to_string(),
+        );
+    }
     steps.push(Step {
         title: "Import the existing file memory (MEMORY.md and the memory files)".to_string(),
         lines,
     });
 
-    let (step, change) = plan_block(setup, &mut conflicts)?;
+    let (step, change) = plan_block(setup, answers.language, &mut conflicts)?;
     steps.push(step);
     changes.extend(change);
 
     let request = crate::sessions::Request::new(&setup.paths.projects);
     let (found, active, todo, _) = crate::sessions::plan(&request, &setup.data_dir)?;
-    let settings = Config::load(&setup.data_dir)?;
-    let estimate = crate::sessions::estimate(
-        &setup.paths.projects,
-        &setup.data_dir,
-        crate::sessions::IDLE,
-        settings.summaries.since.as_deref(),
-    )?;
-    let summaries_line = if settings.summaries.enabled {
-        "summaries: on (already switched on in the settings file)".to_string()
-    } else if options.summaries {
-        format!(
-            "summaries: switched on (--summaries), through `{}`, at most ${:.2} per month; {}",
+    let settings = &current.config;
+    let estimate = summaries_estimate(setup, settings);
+    let summaries_line = match (settings.summaries.enabled, answers.summaries) {
+        (true, true) => "summaries: on (already switched on in the settings file)".to_string(),
+        (true, false) => "summaries: switched off (you answered no)".to_string(),
+        (false, true) => format!(
+            "summaries: switched on, through `{}`, at most ${:.2} per month; {estimate}",
             settings.summaries.harness_command.join(" "),
             settings.summaries.monthly_budget_usd,
-            crate::commands::estimate_line(&estimate)
-        )
-    } else {
-        format!(
+        ),
+        (false, false) if options.interactive => {
+            "summaries: off (raw turns only; `graphersal-memory summaries enable` later)"
+                .to_string()
+        }
+        (false, false) => format!(
             "summaries: off unless you agree below (`--summaries` switches them on; `--yes` \
-             alone leaves them off); {}",
-            crate::commands::estimate_line(&estimate)
-        )
+             alone leaves them off); {estimate}"
+        ),
     };
     steps.push(Step {
         title: "Index past sessions (raw turns, locally, in the background)".to_string(),
@@ -741,34 +1279,33 @@ fn plan_install(setup: &Setup, options: &InstallOptions) -> Result<InstallPlan, 
         ],
     });
 
-    steps.push(Step {
-        title: "Embedding model".to_string(),
-        lines: vec![if options.with_model {
-            "--with-model: the download of potion-multilingual-128M is planned and not available \
-             yet; the built-in embedder hash-ngram/1 is used (no download)"
-                .to_string()
-        } else {
-            "the built-in embedder hash-ngram/1 (no download); a better model is planned"
-                .to_string()
-        }],
-    });
-
     let config_path = crate::config::path(&setup.data_dir);
     let write_config = !config_path.exists();
     steps.push(Step {
         title: format!("Settings file {}", config_path.display()),
         lines: vec![if write_config {
-            "write the defaults (daemon idle time 2h)".to_string()
+            "write the defaults (daemon idle time 2h) and the answers".to_string()
         } else {
-            "exists (kept)".to_string()
+            "exists: the answers are set in it, everything else kept".to_string()
         }],
     });
+    let look_alikes = crate::projects::look_alike_lines(&setup.data_dir);
+    if !look_alikes.is_empty() {
+        steps.push(Step {
+            title: "Projects that may have moved (nothing is merged automatically)".to_string(),
+            lines: look_alikes
+                .into_iter()
+                .map(|(what, how)| format!("{what}; {how}"))
+                .collect(),
+        });
+    }
     Ok(InstallPlan {
         steps,
         changes,
         conflicts,
         imports,
         write_config,
+        auto_memory,
     })
 }
 
@@ -920,8 +1457,9 @@ fn remove_file(path: &Path) -> Result<(), String> {
     }
 }
 
-/// `install`: shows the plan, asks (unless `--yes`), applies it and prints the report. Returns
-/// the exit code (1 when a conflict or an import failure left something undone).
+/// `install`: the wizard (interactive), or the plan with the flags' answers; asks (unless
+/// `--yes`), applies it and prints the report. Returns the exit code (1 when a conflict or an
+/// import failure left something undone; a failed model download is reported, not a failure).
 pub fn install(
     setup: &Setup,
     options: &InstallOptions,
@@ -929,30 +1467,81 @@ pub fn install(
     input: &mut dyn BufRead,
     out: &mut dyn Write,
 ) -> Result<u8, String> {
-    let plan = plan_install(setup, options)?;
-    let _ = writeln!(out, "graphersal-memory install (Claude Code)\n");
-    let _ = writeln!(
-        out,
-        "{}",
-        if options.dry_run {
-            "Dry run: this is what install would do (nothing is changed):"
-        } else {
-            "This will:"
+    let current = Current::read(setup)?;
+    let interactive = options.interactive && !options.yes && !options.dry_run;
+    let agent = setup.agent();
+    let answers = if interactive {
+        let mut console = Console::new(input, out, options.color);
+        let title = console.bold(&format!(
+            "graphersal-memory install ({})",
+            agent.display_name()
+        ));
+        let _ = writeln!(console.out(), "{title}");
+        let hint = console
+            .dim("A few questions; Enter takes the default. Nothing changes before the last step.");
+        let _ = writeln!(console.out(), "{hint}");
+        match ask(setup, options, &current, &mut console) {
+            Ok(answers) => answers,
+            Err(_) => {
+                let _ = writeln!(console.out(), "\nAborted: no answer, nothing was changed.");
+                return Ok(1);
+            }
         }
-    );
-    print_steps(out, &plan.steps);
-    for conflict in &plan.conflicts {
-        let _ = writeln!(out, "  conflict: {conflict}");
-    }
-    if options.dry_run {
-        return Ok(0);
-    }
-    if !options.yes && !confirm("\nProceed?", input, out) {
+    } else {
+        default_answers(options, &current)
+    };
+    let plan = plan_install(setup, options, &answers, &current)?;
+    if interactive {
+        let mut console = Console::new(input, out, options.color);
+        let total = {
+            let import = usize::from(current.import_pending.1 > 0);
+            let auto =
+                usize::from(agent.auto_memory_key().is_some() && !current.auto_memory_off_by_user);
+            4 + import + auto + 1
+        };
+        console.step(total, total, "Summary", &["This is what install will do:"]);
+        print_steps(console.out(), &plan.steps);
+        for conflict in &plan.conflicts {
+            let line = console.yellow(&format!("  conflict: {conflict}"));
+            let _ = writeln!(console.out(), "{line}");
+        }
+        if answers.auto_memory_off && !current.auto_memory_off {
+            let _ = writeln!(console.out(), "\n  {NOTHING_IS_LOST}");
+        }
+        let _ = writeln!(console.out());
+        if !console.confirm_apply() {
+            let _ = writeln!(console.out(), "Cancelled: nothing was changed.");
+            return Ok(1);
+        }
+    } else {
         let _ = writeln!(
             out,
-            "Aborted: nothing was changed (pass --yes to run without asking)."
+            "graphersal-memory install ({})\n",
+            agent.display_name()
         );
-        return Ok(1);
+        let _ = writeln!(
+            out,
+            "{}",
+            if options.dry_run {
+                "Dry run: this is what install would do (nothing is changed):"
+            } else {
+                "This will:"
+            }
+        );
+        print_steps(out, &plan.steps);
+        for conflict in &plan.conflicts {
+            let _ = writeln!(out, "  conflict: {conflict}");
+        }
+        if options.dry_run {
+            return Ok(0);
+        }
+        if !options.yes && !confirm("\nProceed?", input, out) {
+            let _ = writeln!(
+                out,
+                "Aborted: nothing was changed (pass --yes to run without asking)."
+            );
+            return Ok(1);
+        }
     }
     let mut state = State::load(setup)?;
     if !state.meta.contains_key("installed_at") {
@@ -966,14 +1555,117 @@ pub fn install(
     state
         .meta
         .insert("exe".into(), json!(setup.exe.display().to_string()));
+    state
+        .meta
+        .insert("auto_memory_off".into(), json!(answers.auto_memory_off));
     state.save(setup)?;
     let mut report = Vec::new();
     apply_changes(setup, &plan.changes, &mut state, &mut report)?;
+    match &plan.auto_memory {
+        AutoMemoryPlan::Keep => {}
+        AutoMemoryPlan::SwitchOff { previous } => {
+            state
+                .file_mut(&setup.paths.settings)
+                .insert(AUTO_MEMORY_RECORD.into(), json!({"previous": previous}));
+            state.save(setup)?;
+            report.push(format!(
+                "{}'s auto-memory: off (uninstall writes every memory back to its memory files \
+                 and switches it on again)",
+                agent.display_name()
+            ));
+        }
+        AutoMemoryPlan::Restore => {
+            state
+                .file_mut(&setup.paths.settings)
+                .remove(AUTO_MEMORY_RECORD);
+            state.save(setup)?;
+        }
+    }
+
+    // The settings file: the defaults when there is none, then the answers.
+    if plan.write_config {
+        let path = crate::config::path(&setup.data_dir);
+        std::fs::create_dir_all(&setup.data_dir)
+            .map_err(|err| format!("cannot create {}: {err}", setup.data_dir.display()))?;
+        fsutil::write_atomic(&path, Config::default_text().as_bytes())?;
+        report.push(format!("created {}", path.display()));
+    }
+    let mut values = vec![("memory", "language", json!(answers.language.name()))];
+
+    // The embedding model: downloaded into the cache (the one network access), then named in
+    // the settings, which the daemon follows.
+    let model_ready = if answers.model == models::BUILTIN
+        || models::cached(&setup.data_dir, &answers.model).is_some()
+    {
+        true
+    } else {
+        let _ = writeln!(out, "\nEmbedding model:");
+        let live = options.interactive;
+        match download::download(
+            &answers.model,
+            &models::cache_dir(&setup.data_dir),
+            &setup.source,
+            out,
+            live,
+        ) {
+            Ok(done) => {
+                report.push(format!(
+                    "embedding model: downloaded {} ({}, licence {}, {}) into {}",
+                    answers.model,
+                    download::human_bytes(done.bytes),
+                    done.license,
+                    done.identity,
+                    done.dir.display()
+                ));
+                for warning in &done.warnings {
+                    report.push(format!("embedding model warning: {warning}"));
+                }
+                true
+            }
+            Err(err) => {
+                report.push(format!(
+                    "embedding model: the download of {} failed ({err}); the {} stays. Run \
+                     `graphersal-memory install --model {}` to try again.",
+                    answers.model,
+                    match &current.config.model {
+                        Some(model) if model != models::BUILTIN => format!("model {model}"),
+                        _ => "built-in embedder hash-ngram/1".to_string(),
+                    },
+                    answers.model
+                ));
+                false
+            }
+        }
+    };
+    if model_ready {
+        values.push(("embedding", "model", json!(answers.model)));
+    }
+    let config_path = crate::config::path(&setup.data_dir);
+    let before = crate::fsutil::read_optional(&config_path)?
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    let text = crate::config::with_values(before.as_deref(), &values)?;
+    if before.as_deref() != Some(text.as_str()) {
+        std::fs::create_dir_all(&setup.data_dir)
+            .map_err(|err| format!("cannot create {}: {err}", setup.data_dir.display()))?;
+        fsutil::write_atomic(&config_path, text.as_bytes())?;
+    }
+    if model_ready && current.config.model.as_deref() != Some(answers.model.as_str()) {
+        report.push(format!(
+            "embedding model: {} (the daemon re-embeds the memory with it in the background)",
+            if answers.model == models::BUILTIN {
+                "the built-in hash-ngram/1".to_string()
+            } else {
+                answers.model.clone()
+            }
+        ));
+    }
 
     // The import goes through the memory functions (the daemon serves the store).
     let mut failures = 0;
     let (_, _, new, changed, _) = import::totals(&plan.imports);
-    if new + changed > 0 {
+    if !answers.import {
+        report.push("import: not now (--no-import)".to_string());
+    } else if new + changed > 0 {
         let done = import::with_lock(&setup.data_dir, Duration::from_secs(60), || {
             let mut import_state = ImportState::load(&setup.data_dir)?;
             Ok::<_, String>(import::apply(
@@ -1009,19 +1701,13 @@ pub fn install(
         report.push("imported nothing: no new or changed memory files".to_string());
     }
 
-    if plan.write_config {
-        let path = crate::config::path(&setup.data_dir);
-        std::fs::create_dir_all(&setup.data_dir)
-            .map_err(|err| format!("cannot create {}: {err}", setup.data_dir.display()))?;
-        fsutil::write_atomic(&path, Config::default_text().as_bytes())?;
-        report.push(format!("created {}", path.display()));
-    }
-
-    // Summaries: only with consent (--summaries, or yes to the question; --yes alone: off).
+    // Summaries: only with consent (--summaries, a yes in the wizard, or yes to the question;
+    // --yes alone: off).
     let settings = Config::load(&setup.data_dir)?;
     if !settings.summaries.enabled {
-        let agreed = options.summaries
-            || (!options.yes
+        let agreed = answers.summaries
+            || (!interactive
+                && !options.yes
                 && confirm(
                     "\nSummarize finished sessions through your own harness (decisions, \
                      corrections, outcomes, open threads; costs model usage, see the estimate \
@@ -1044,8 +1730,16 @@ pub fn install(
                     .to_string(),
             );
         }
+    } else if !answers.summaries {
+        crate::commands::write_summaries(setup, false, None)?;
+        report.push("summaries: off (raw turns are still indexed)".to_string());
     }
 
+    // A running daemon follows the new settings now (the embedding model); else at its start.
+    let _ = crate::shim::request_running(
+        &setup.run_dir,
+        &json!({"protocol": crate::protocol::PROTOCOL, "control": "apply_settings"}),
+    );
     // Past sessions: indexed by the daemon in the background, when it runs (the import
     // started it); else at the next session start.
     let request = crate::sessions::Request::new(&setup.paths.projects);
@@ -1061,13 +1755,6 @@ pub fn install(
                 .to_string(),
         ),
     }
-    if options.with_model {
-        report.push(
-            "embedding model: the download is planned, not available yet (the built-in \
-             hash-ngram/1 embedder is used)"
-                .to_string(),
-        );
-    }
     let _ = writeln!(out, "\nReport:");
     for line in &report {
         let _ = writeln!(out, "  {line}");
@@ -1076,13 +1763,18 @@ pub fn install(
         let _ = writeln!(out, "  conflict: {conflict}");
     }
     if plan.changes.is_empty() && plan.conflicts.is_empty() {
-        let _ = writeln!(out, "  Claude Code configuration: already up to date");
+        let _ = writeln!(
+            out,
+            "  {} configuration: already up to date",
+            agent.display_name()
+        );
     }
     let _ = writeln!(
         out,
-        "\nRestart running Claude Code sessions to load the MCP server and the hooks. \
+        "\nRestart running {} sessions to load the MCP server and the hooks. \
          `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` \
-         removes it."
+         removes it.",
+        agent.display_name()
     );
     Ok(if plan.conflicts.is_empty() && failures == 0 {
         0
@@ -1199,6 +1891,25 @@ fn remove_ours(
         {
             current = new;
         }
+        // The auto-memory switch install turned off goes back to what it was.
+        if let Some(record) = entry.and_then(|e| e.get(AUTO_MEMORY_RECORD))
+            && let Some(key) = setup.agent().auto_memory_key()
+        {
+            let parsed: Value = serde_json::from_str(&current)
+                .map_err(|err| format!("{} is not valid JSON: {err}", path.display()))?;
+            if parsed[key] == Value::Bool(false) {
+                let previous = &record["previous"];
+                let restored = if previous.is_null() {
+                    jsonedit::remove_member(&current, &[], key)?
+                } else {
+                    jsonedit::set_member(&current, &[], key, previous)?.map(|(new, _)| new)
+                };
+                if let Some(new) = restored {
+                    current = new;
+                    changed = true;
+                }
+            }
+        }
     } else if path == setup.paths.instructions {
         match find_block(text) {
             Ok(Some(found)) if found.intact => {
@@ -1236,14 +1947,45 @@ fn is_empty_remainder(path: &Path, text: &str) -> bool {
     }
 }
 
-/// `uninstall`: removes exactly what install added (or only the develop server). Returns the
-/// exit code.
+#[cfg(test)]
+/// `uninstall` without a memory source: valid only with `no_export` (or
+/// `disable_develop_only`), else it fails before changing anything.
 pub fn uninstall(
     setup: &Setup,
     options: &UninstallOptions,
     input: &mut dyn BufRead,
     out: &mut dyn Write,
 ) -> Result<u8, String> {
+    uninstall_with(setup, options, None, input, out)
+}
+
+/// `uninstall`: first exports every memory back into the harness's file memory (from `source`;
+/// unless `no_export`), then removes exactly what install added (or only the develop server),
+/// which also switches the harness's own memory back to how it was. Returns the exit code.
+pub fn uninstall_with(
+    setup: &Setup,
+    options: &UninstallOptions,
+    source: Option<&mut dyn export::Source>,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+) -> Result<u8, String> {
+    let agent = setup.agent();
+    let exporting = !options.disable_develop_only && !options.no_export;
+    // The memories first: if they cannot be read, nothing is removed.
+    let rows = if exporting && !options.dry_run {
+        let source = source.ok_or(
+            "the memories cannot be exported here; nothing was removed (`--no-export` \
+             uninstalls without exporting)",
+        )?;
+        Some(source.memories("").map_err(|err| {
+            format!(
+                "cannot read the memories to export them ({err}); nothing was removed. \
+                 `--no-export` uninstalls without exporting."
+            )
+        })?)
+    } else {
+        None
+    };
     let state = State::load(setup)?;
     let mut conflicts = Vec::new();
     let mut changes: Vec<(Change, &'static str)> = Vec::new();
@@ -1333,10 +2075,41 @@ pub fn uninstall(
         "graphersal-memory uninstall (Claude Code)"
     };
     let _ = writeln!(out, "{title}\n");
-    if changes.is_empty() && conflicts.is_empty() {
+    let export_line = |rows: Option<&Vec<export::Row>>| -> String {
+        match rows {
+            Some(rows) => {
+                let projects: std::collections::BTreeSet<&str> = rows
+                    .iter()
+                    .filter(|r| !r.project.is_empty())
+                    .map(|r| r.project.as_str())
+                    .collect();
+                let global = rows.iter().filter(|r| r.project.is_empty()).count();
+                format!(
+                    "export {} memor{} of {} project{} ({global} global) back to {}'s file memory \
+                     (MEMORY.md and one file per memory; the global ones into {}); a file that \
+                     differs is kept",
+                    rows.len(),
+                    if rows.len() == 1 { "y" } else { "ies" },
+                    projects.len(),
+                    if projects.len() == 1 { "" } else { "s" },
+                    agent.display_name(),
+                    agent.global_memory_file().display()
+                )
+            }
+            None => format!(
+                "export every memory back to {}'s file memory first (`--no-export` skips it)",
+                agent.display_name()
+            ),
+        }
+    };
+    if exporting {
+        let _ = writeln!(out, "  - {}", export_line(rows.as_ref()));
+    }
+    if changes.is_empty() && conflicts.is_empty() && !exporting {
         let _ = writeln!(
             out,
-            "Nothing of graphersal-memory is installed in Claude Code."
+            "Nothing of graphersal-memory is installed in {}.",
+            agent.display_name()
         );
     }
     for (change, what) in &changes {
@@ -1357,6 +2130,33 @@ pub fn uninstall(
         let _ = writeln!(out, "\nDry run: nothing was changed.");
         return Ok(0);
     }
+    let mut export_rows = rows;
+    if options.interactive
+        && !options.yes
+        && let Some(rows) = &export_rows
+        && !rows.is_empty()
+    {
+        let projects: std::collections::BTreeSet<&str> = rows
+            .iter()
+            .map(|r| r.project.as_str())
+            .filter(|p| !p.is_empty())
+            .collect();
+        let _ = write!(
+            out,
+            "\nExport {} memor{} of {} project{} back to {}'s file memory? [Y/n] ",
+            rows.len(),
+            if rows.len() == 1 { "y" } else { "ies" },
+            projects.len(),
+            if projects.len() == 1 { "" } else { "s" },
+            agent.display_name()
+        );
+        let _ = out.flush();
+        let mut answer = String::new();
+        let _ = input.read_line(&mut answer);
+        if matches!(answer.trim().to_ascii_lowercase().as_str(), "n" | "no") {
+            export_rows = None;
+        }
+    }
     let needs_ok = !changes.is_empty() || options.purge;
     if needs_ok && !options.yes {
         let question = if options.purge {
@@ -1370,6 +2170,28 @@ pub fn uninstall(
         }
     }
     let mut report = Vec::new();
+    if let Some(rows) = &export_rows {
+        if rows.is_empty() {
+            report.push("exported nothing: the graph holds no memories".to_string());
+        } else {
+            report.extend(export::write(&agent, &setup.data_dir, rows)?.lines());
+        }
+    } else if exporting {
+        report.push("not exported (you answered no)".to_string());
+    }
+    if !options.disable_develop_only
+        && state
+            .file(&setup.paths.settings)
+            .is_some_and(|entry| entry.contains_key(AUTO_MEMORY_RECORD))
+        && changes
+            .iter()
+            .any(|(change, _)| change.path == setup.paths.settings)
+    {
+        report.push(format!(
+            "{}'s auto-memory: back to how it was before install",
+            agent.display_name()
+        ));
+    }
     let mut state = state;
     for (change, _) in &changes {
         match &change.after {
@@ -1613,8 +2435,11 @@ pub fn inspect(setup: &Setup) -> Inspection {
             (event.to_string(), state)
         })
         .collect();
+    let language = Config::load(&setup.data_dir)
+        .map(|config| config.language())
+        .unwrap_or_default();
     let block = match read_text(&setup.paths.instructions) {
-        Ok(Some(text)) => match find_block(&text) {
+        Ok(Some(text)) => match find_block_for(&text, language) {
             Ok(None) => PartState::Missing,
             Ok(Some(found)) if found.current => PartState::Installed,
             Ok(Some(found)) if found.known => {
@@ -1681,6 +2506,30 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
     lines.push(format!(
         "  file memory: {imported} memory files imported so far"
     ));
+    lines.push(format!(
+        "  auto-memory ({}): {}",
+        setup.paths.settings.display(),
+        auto_memory_state(setup)
+    ));
+    match Config::load(&setup.data_dir) {
+        Ok(config) => {
+            lines.push(format!(
+                "  memory language: {}",
+                config.language().describe()
+            ));
+            lines.push(format!(
+                "  embedding model: {}",
+                match &config.model {
+                    Some(model) => models::describe(&setup.data_dir, model),
+                    None => format!(
+                        "{} (the store's own; `graphersal-memory install` offers a better one)",
+                        models::BUILTIN
+                    ),
+                }
+            ));
+        }
+        Err(err) => lines.push(format!("  settings: {err}")),
+    }
     for error in &inspection.errors {
         lines.push(format!("  problem: {error}"));
     }
@@ -1688,6 +2537,30 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
         lines.push("  Not installed: run `graphersal-memory install`.".to_string());
     }
     lines
+}
+
+/// The state of the harness's own memory switch, for `status`.
+fn auto_memory_state(setup: &Setup) -> String {
+    let agent = setup.agent();
+    let Some(key) = agent.auto_memory_key() else {
+        return "the harness has none".to_string();
+    };
+    let mut errors = Vec::new();
+    let settings = read_json(agent.settings_file(), &mut errors);
+    let ours = State::load(setup).ok().is_some_and(|state| {
+        state
+            .file(agent.settings_file())
+            .is_some_and(|entry| entry.contains_key(AUTO_MEMORY_RECORD))
+    });
+    match (&settings[key], ours) {
+        (Value::Bool(false), true) => format!(
+            "off ({key}: false, set by install; uninstall exports every memory back and switches \
+             it on again)"
+        ),
+        (Value::Bool(false), false) => format!("off ({key}: false, your own setting)"),
+        _ => "on (Claude Code also writes memory files; they are imported at session start)"
+            .to_string(),
+    }
 }
 
 /// One finding of `doctor`.
@@ -1706,6 +2579,14 @@ fn ok(text: impl Into<String>) -> Finding {
         problem: false,
         text: text.into(),
         fix: None,
+    }
+}
+
+fn note(text: impl Into<String>, hint: impl Into<String>) -> Finding {
+    Finding {
+        problem: false,
+        text: text.into(),
+        fix: Some(hint.into()),
     }
 }
 
@@ -1821,8 +2702,9 @@ pub fn doctor(setup: &Setup) -> Vec<Finding> {
                         "config.json has keys this version does not know: {}",
                         config.unknown.join(", ")
                     ),
-                    "check their spelling (known: daemon.idle, summaries.enabled, \
-                     summaries.harness_command, summaries.monthly_budget_usd, summaries.since)",
+                    "check their spelling (known: daemon.idle, memory.language, embedding.model, \
+                     summaries.enabled, summaries.harness_command, summaries.monthly_budget_usd, \
+                     summaries.since)",
                 ));
             }
         }
@@ -1846,6 +2728,28 @@ pub fn doctor(setup: &Setup) -> Vec<Finding> {
                  `graphersal-memory summaries disable`",
             ));
         }
+    }
+    if let Ok(config) = Config::load(&setup.data_dir) {
+        match config.model.as_deref() {
+            None | Some(models::BUILTIN) => findings.push(ok(format!(
+                "embedding model: the built-in {} (no download)",
+                models::BUILTIN
+            ))),
+            Some(model) => match models::check(&setup.data_dir, model) {
+                Ok(identity) => findings.push(ok(format!(
+                    "embedding model: {model} is present and loads ({identity})"
+                ))),
+                Err(err) => findings.push(problem(
+                    format!("embedding model: {err}"),
+                    format!(
+                        "run `graphersal-memory install --model {model}` (or `--model builtin`)"
+                    ),
+                )),
+            },
+        }
+    }
+    for (what, how) in crate::projects::look_alike_lines(&setup.data_dir) {
+        findings.push(note(what, how));
     }
     if let Err(err) = crate::registry::Registry::parse(
         &std::fs::read(setup.data_dir.join(crate::registry::REGISTRY_FILE)).unwrap_or_else(|_| {

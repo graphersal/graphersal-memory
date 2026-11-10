@@ -6,6 +6,12 @@
 //!                "monthly_budget_usd": 5}}
 //! ```
 //!
+//! `memory.language` (`english`, the default, or `any`) is the memory language rule of the MCP
+//! instructions and the managed rule block (`crate::language`). `embedding.model` is the
+//! embedding model the daemon makes every store's vector rules use: a Hugging Face repository
+//! downloaded into `<data dir>/models/` (`crate::models`), or `hash-ngram/1` (the built-in
+//! embedder); without the key the stores keep the embedder they have. `install` writes both.
+//!
 //! `summaries` is the opt-in of session summaries (`crate::summaries`): off unless `enabled` is
 //! `true`; `harness_command` is the user's own harness run once per session; the budget caps the
 //! spend per calendar month (UTC); `since` (optional, a date such as `2026-11-01`) leaves older
@@ -28,8 +34,12 @@ pub const CONFIG_FILE: &str = "config.json";
 const FORMAT: u64 = 1;
 
 /// The keys this version knows, as dotted paths.
-const KNOWN: [&str; 8] = [
+const KNOWN: [&str; 12] = [
     "version",
+    "memory",
+    "memory.language",
+    "embedding",
+    "embedding.model",
     "daemon",
     "daemon.idle",
     "summaries",
@@ -121,6 +131,10 @@ pub fn split_command(text: &str) -> Result<Vec<String>, String> {
 pub struct Config {
     /// The daemon's idle time, when the file sets it.
     pub idle: Option<Duration>,
+    /// The memory language, when the file sets it (`None`: the default, English).
+    pub language: Option<crate::language::Language>,
+    /// The embedding model, when the file sets it: a repository or `hash-ngram/1`.
+    pub model: Option<String>,
     /// The session summaries settings.
     pub summaries: Summaries,
     /// Keys this version does not know (dotted paths).
@@ -177,10 +191,44 @@ impl Config {
         if let Some(summaries) = object.get("summaries") {
             config.summaries = parse_summaries(summaries)?;
         }
+        if let Some(memory) = object.get("memory") {
+            let memory = memory.as_object().ok_or("'memory' must be an object")?;
+            if let Some(language) = memory.get("language") {
+                let text = language
+                    .as_str()
+                    .ok_or("'memory.language' must be \"english\" or \"any\"")?;
+                config.language = Some(
+                    crate::language::Language::parse(text)
+                        .ok_or("'memory.language' must be \"english\" or \"any\"")?,
+                );
+            }
+        }
+        if let Some(embedding) = object.get("embedding") {
+            let embedding = embedding
+                .as_object()
+                .ok_or("'embedding' must be an object")?;
+            if let Some(model) = embedding.get("model") {
+                let text = model.as_str().filter(|text| {
+                    *text == crate::models::BUILTIN || crate::download::is_repo_name(text)
+                });
+                config.model = Some(
+                    text.ok_or(
+                        "'embedding.model' must be a Hugging Face repository (owner/name) or \
+                         \"hash-ngram/1\"",
+                    )?
+                    .to_string(),
+                );
+            }
+        }
         let mut unknown = Vec::new();
         collect_unknown(&value, "", &mut unknown);
         config.unknown = unknown;
         Ok(config)
+    }
+
+    /// The memory language (the file's, else English).
+    pub fn language(&self) -> crate::language::Language {
+        self.language.unwrap_or_default()
     }
 
     /// The default settings file's text.
@@ -260,6 +308,26 @@ pub fn with_summaries(
     if let Some(budget) = budget_usd {
         set("monthly_budget_usd", &json!(budget))?;
     }
+    Ok(text)
+}
+
+/// The text of the settings file `current` (`None`: none yet) with each `(section, key,
+/// value)` set, every other byte kept.
+pub fn with_values(
+    current: Option<&str>,
+    values: &[(&str, &str, Value)],
+) -> Result<String, String> {
+    let mut text = match current {
+        Some(text) => text.to_string(),
+        None => Config::default_text(),
+    };
+    Config::parse(text.as_bytes())?;
+    for (section, key, value) in values {
+        if let Some((new, _)) = crate::jsonedit::set_member(&text, &[section], key, value)? {
+            text = new;
+        }
+    }
+    Config::parse(text.as_bytes())?;
     Ok(text)
 }
 
@@ -390,6 +458,44 @@ mod tests {
         let fresh = with_summaries(None, true, None).unwrap();
         assert!(Config::parse(fresh.as_bytes()).unwrap().summaries.enabled);
         assert!(with_summaries(Some("{"), true, None).is_err());
+    }
+
+    #[test]
+    fn language_and_model_parse_and_are_set_in_place() {
+        let config = Config::parse(Config::default_text().as_bytes()).unwrap();
+        assert_eq!(config.language, None);
+        assert_eq!(config.language(), crate::language::Language::English);
+        assert_eq!(config.model, None);
+        let text = with_values(
+            Some("{\"version\": 1, \"x\": 1}\n"),
+            &[
+                ("memory", "language", json!("any")),
+                (
+                    "embedding",
+                    "model",
+                    json!("minishlab/potion-multilingual-128M"),
+                ),
+            ],
+        )
+        .unwrap();
+        assert!(text.contains("\"x\": 1"), "{text}");
+        let config = Config::parse(text.as_bytes()).unwrap();
+        assert_eq!(config.language, Some(crate::language::Language::Any));
+        assert_eq!(
+            config.model.as_deref(),
+            Some("minishlab/potion-multilingual-128M")
+        );
+        assert_eq!(config.unknown, vec!["x".to_string()]);
+        for bad in [
+            r#"{"version": 1, "memory": {"language": "klingon"}}"#,
+            r#"{"version": 1, "embedding": {"model": "not a repo"}}"#,
+            r#"{"version": 1, "embedding": []}"#,
+        ] {
+            assert!(Config::parse(bad.as_bytes()).is_err(), "{bad}");
+        }
+        assert!(
+            Config::parse(br#"{"version": 1, "embedding": {"model": "hash-ngram/1"}}"#).is_ok()
+        );
     }
 
     #[test]

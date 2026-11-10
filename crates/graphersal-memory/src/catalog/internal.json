@@ -8,26 +8,103 @@
     "name": "index_session",
     "description": "Internal (session indexing): writes a session's properties and drops its turns before they are written again; the fingerprint is set by the last index_turns.",
     "params": [
-      {"name": "id", "schema": {"type": "string", "pattern": "^session:"}},
-      {"name": "p", "schema": {"type": "object"}}
+      {
+        "name": "id",
+        "schema": {
+          "type": "string",
+          "pattern": "^session:"
+        }
+      },
+      {
+        "name": "p",
+        "schema": {
+          "type": "object"
+        }
+      }
     ]
   },
   {
     "name": "index_turns",
     "description": "Internal (session indexing): writes a batch of a session's turns; a non-empty fingerprint marks the session as completely indexed.",
     "params": [
-      {"name": "id", "schema": {"type": "string", "pattern": "^session:"}},
-      {"name": "rows", "schema": {"type": "array"}},
-      {"name": "fingerprint", "schema": {"type": "string"}, "default": ""}
+      {
+        "name": "id",
+        "schema": {
+          "type": "string",
+          "pattern": "^session:"
+        }
+      },
+      {
+        "name": "rows",
+        "schema": {
+          "type": "array"
+        }
+      },
+      {
+        "name": "fingerprint",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
     ]
   },
   {
     "name": "set_summary",
     "description": "Internal (session summaries): stores a session's summary and replaces its facts.",
     "params": [
-      {"name": "id", "schema": {"type": "string", "pattern": "^session:"}},
-      {"name": "p", "schema": {"type": "object"}},
-      {"name": "facts", "schema": {"type": "array"}}
+      {
+        "name": "id",
+        "schema": {
+          "type": "string",
+          "pattern": "^session:"
+        }
+      },
+      {
+        "name": "p",
+        "schema": {
+          "type": "object"
+        }
+      },
+      {
+        "name": "facts",
+        "schema": {
+          "type": "array"
+        }
+      }
+    ]
+  },
+  {
+    "name": "merge_project",
+    "description": "Internal (graphersal-memory projects merge): moves every vertex of project `from` into project `into`.",
+    "params": [
+      {
+        "name": "from",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      {
+        "name": "into",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    ]
+  },
+  {
+    "name": "export_memories",
+    "description": "Internal (uninstall, export --to-files): every memory with what the file memory format keeps.",
+    "params": [
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
     ]
   }
 ]

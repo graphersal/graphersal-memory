@@ -21,12 +21,14 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
-graphersal = { workspace = true, features = ["persist", "script", "gql"] }
+graphersal = { workspace = true, features = ["persist", "script", "gql", "model2vec"] }
 graphersal-mcp = { workspace = true }
 graphersal-serve = { workspace = true }
 graphersal-session = { workspace = true }
 serde_json = { workspace = true }
 fd-lock = { workspace = true }
+ureq = { workspace = true }
+ring = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 uds_windows = { workspace = true }

@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 
 use crate::catalog;
 use crate::cli::Profile as ProfileKind;
+use crate::language::Language;
 use crate::{registry, store};
 
 /// The instructions of the `use` server.
@@ -52,13 +53,21 @@ pub const DEVELOP_TOOLS: [&str; 14] = [
 /// closes the store anyway (a run finishing later drops its result).
 const BACKGROUND_PATIENCE: Duration = Duration::from_secs(30);
 
-/// The MCP configuration of a profile (what the agent sees).
+/// The MCP configuration of a profile (what the agent sees), with the default memory language.
+#[cfg(test)]
 pub fn config(kind: ProfileKind) -> Result<McpConfig, String> {
+    config_for(kind, Language::default())
+}
+
+/// The MCP configuration of a profile with the memory language rule `language` in the `use`
+/// instructions.
+pub fn config_for(kind: ProfileKind, language: Language) -> Result<McpConfig, String> {
     let value = match kind {
         ProfileKind::Use => json!({
             "server_name": "graphersal-memory",
             "server_title": "graphersal-memory",
-            "instructions": {"mode": "replace", "text": USE_INSTRUCTIONS},
+            "instructions": {"mode": "replace",
+                             "text": crate::language::instructions(USE_INSTRUCTIONS, language)},
             "tools": {"include": []},
             // `remember` and `forget` are meant to be called by the agent: their own
             // descriptions say what they write, without the engine's "only when the user asked".
@@ -87,7 +96,16 @@ pub fn profile(
     kind: ProfileKind,
     use_policy: graphersal::auth::AccessPolicy,
 ) -> Result<Profile, String> {
-    let profile = Profile::new(false).with_config(config(kind)?);
+    profile_for(kind, use_policy, Language::default())
+}
+
+/// [`profile`] with the memory language `language`.
+pub fn profile_for(
+    kind: ProfileKind,
+    use_policy: graphersal::auth::AccessPolicy,
+    language: Language,
+) -> Result<Profile, String> {
+    let profile = Profile::new(false).with_config(config_for(kind, language)?);
     Ok(match kind {
         ProfileKind::Use => profile.with_access_policy(use_policy),
         ProfileKind::Develop => profile,
@@ -148,9 +166,15 @@ pub fn serve(
         &store::default_store_dir(&options.data_dir),
         Arc::new(endpoint()),
     )?;
-    // Not fatal: the project record only helps a later re-mapping of a moved repository.
-    let _ = crate::projects::record(&options.data_dir, &options.project);
-    let served = runtime.serve(options.profile, &options.project, None, read, write);
+    // The project's stable id (a moved repository keeps its memories); without a projects file
+    // that can be read, the path itself.
+    let project = crate::projects::resolve(&options.data_dir, &options.project)
+        .map(|resolved| resolved.id)
+        .unwrap_or_else(|_| options.project.clone());
+    let language = crate::config::Config::load(&options.data_dir)
+        .map(|config| config.language())
+        .unwrap_or_default();
+    let served = runtime.serve_with(options.profile, &project, None, language, read, write);
     let closed = runtime.close();
     served.and(closed)
 }
@@ -169,8 +193,14 @@ pub struct StoreRuntime {
     store: Arc<Store>,
     using: Arc<Context>,
     developing: Arc<Context>,
+    /// The `use` profile's access policy (a connection with another language rebuilds the
+    /// profile with it).
+    use_policy: graphersal::auth::AccessPolicy,
     /// The scheduled jobs' ticker ([`StoreRuntime::start_jobs`]), stopped by `close`.
     ticker: Mutex<Option<JobTicker>>,
+    /// Held while the embedder switches (one switch at a time; the second sees the first's
+    /// result).
+    switching: Mutex<()>,
 }
 
 impl StoreRuntime {
@@ -205,8 +235,10 @@ impl StoreRuntime {
             name: name.to_string(),
             using: context(ProfileKind::Use)?,
             developing: context(ProfileKind::Develop)?,
+            use_policy,
             store,
             ticker: Mutex::new(None),
+            switching: Mutex::new(()),
         })
     }
 
@@ -247,11 +279,25 @@ impl StoreRuntime {
 
     /// Serves one MCP connection of profile `kind` bound to `project` over newline-delimited
     /// JSON-RPC on `read`/`write`, until `read` ends.
+    #[cfg(test)]
     pub fn serve(
         &self,
         kind: ProfileKind,
         project: &str,
         identity: Option<&str>,
+        read: impl BufRead,
+        write: impl Write + Send,
+    ) -> Result<(), String> {
+        self.serve_with(kind, project, identity, Language::default(), read, write)
+    }
+
+    /// [`Self::serve`] with the memory language rule `language` in the instructions.
+    pub fn serve_with(
+        &self,
+        kind: ProfileKind,
+        project: &str,
+        identity: Option<&str>,
+        language: Language,
         read: impl BufRead,
         write: impl Write + Send,
     ) -> Result<(), String> {
@@ -263,9 +309,14 @@ impl StoreRuntime {
             Some(identity) => connection.with_identity(identity),
             None => connection,
         };
+        let base = if language == Language::default() {
+            connection.profile().clone()
+        } else {
+            profile_for(kind, self.use_policy.clone(), language)?
+        };
         // The connection's project: hidden from the tool list, set on every call of a saved
         // query that declares it (the memory functions), whatever the client sent.
-        let profile = connection.profile().with_bound_params([(
+        let profile = base.with_bound_params([(
             catalog::PROJECT_PARAM.to_string(),
             Value::String(project.to_string()),
         )]);
@@ -281,6 +332,108 @@ impl StoreRuntime {
         self.using
             .call(move |session| catalog::call(session, &name, &args))
             .map_err(|err| format!("the memory store {}: {err}", self.name))?
+    }
+
+    /// The embedder the store's memory schema names (a model identity or `hash-ngram/1`).
+    pub fn embedder(&self) -> Result<String, String> {
+        self.using
+            .call(|session| catalog::current_embedder(session))
+            .map_err(|err| format!("the memory store {}: {err}", self.name))?
+    }
+
+    /// Makes the store's vector rules use `wanted` (a repository cached in `data_dir`'s model
+    /// cache, or `hash-ngram/1`): the model is imported into the store from the cache (once;
+    /// it becomes the store's default model) and the schema set again with it, which embeds
+    /// every memory, session, turn and fact again in that unit (the store is locked while it
+    /// runs: MCP calls wait). Nothing happens when the store uses `wanted` already. Returns
+    /// whether it changed the embedder.
+    pub fn switch_embedder(&self, data_dir: &Path, wanted: &str) -> Result<bool, String> {
+        let _one_at_a_time = self
+            .switching
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = self.embedder()?;
+        let builtin = wanted == crate::models::BUILTIN;
+        let same = if builtin {
+            current == crate::models::BUILTIN
+        } else {
+            current.starts_with(&format!("model2vec/{wanted}@"))
+        };
+        if same {
+            return Ok(false);
+        }
+        let held = self
+            .store
+            .models()
+            .map_err(|err| format!("cannot list the models of {}: {err}", self.name))?;
+        if builtin {
+            if held.iter().any(|model| model.default) {
+                self.store
+                    .set_default_model(None)
+                    .map_err(|err| format!("cannot clear the default model: {err}"))?;
+            }
+        } else if !held.iter().any(|model| model.repo == wanted) {
+            let dir = crate::models::model_dir(data_dir, wanted);
+            if crate::models::cached(data_dir, wanted).is_none() {
+                return Err(format!(
+                    "the embedding model {wanted} is not downloaded ({} is missing): run                      `graphersal-memory install --model {wanted}`",
+                    dir.display()
+                ));
+            }
+            self.store
+                .import_model(
+                    graphersal::persist::ModelSource::Dir(dir),
+                    graphersal::persist::ImportModelOptions::new()
+                        .with_default(true)
+                        .with_principal("graphersal-memory"),
+                )
+                .map_err(|err| format!("cannot import the model {wanted}: {err}"))?;
+        } else if !held
+            .iter()
+            .any(|model| model.repo == wanted && model.default)
+        {
+            self.store
+                .set_default_model(Some(wanted))
+                .map_err(|err| format!("cannot make {wanted} the default model: {err}"))?;
+        }
+        let schema = catalog::schema_with(wanted);
+        let previous = catalog::schema_with(&current);
+        let bare = catalog::schema_without_vectors()?;
+        // Three steps on the session thread (no call runs in between): the rules go, the old
+        // vectors go (another model may have another dimension, and the engine checks the
+        // existing vectors against a new declaration before its fill), the new rules fill every
+        // memory, session, turn and fact. A failure puts the old rules back (refilled). A crash
+        // in between leaves no rules: the next start applies the catalog with the built-in
+        // embedder and the daemon switches again.
+        self.using
+            .call(move |session| {
+                let step = |session: &mut Session, text: &str| {
+                    session
+                        .set_schema(text, None)
+                        .map(|_| ())
+                        .map_err(|err| format!("the memory schema cannot be applied: {err}"))
+                };
+                step(session, &bare)?;
+                let dropped: Value = serde_json::from_str(&session.execute(
+                    "g.v().has(\"emb\").properties(\"emb\").drop().iterate()",
+                    &graphersal_session::RunOptions {
+                        no_limit: true,
+                        ..Default::default()
+                    },
+                ))
+                .unwrap_or(Value::Null);
+                if dropped["ok"] != true {
+                    let _ = step(session, &previous);
+                    return Err(format!("cannot remove the old vectors: {dropped}"));
+                }
+                if let Err(err) = step(session, &schema) {
+                    let _ = step(session, &previous);
+                    return Err(err);
+                }
+                Ok(())
+            })
+            .map_err(|err| format!("the memory store {}: {err}", self.name))??;
+        Ok(true)
     }
 
     /// Closes the store: the job ticker stops, the scheduled-job runs in progress finish (for

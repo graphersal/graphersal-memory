@@ -492,3 +492,214 @@ fn closing_a_runtime_stops_its_job_ticker_and_releases_the_store() {
         // The next round opens the same store: it was released.
     }
 }
+
+// ------------------------------------------------------------------------------------------
+// M6b: the memory language in the instructions, project identity across moves and clones.
+// ------------------------------------------------------------------------------------------
+
+/// The `instructions` the use server of `data_dir` answers `initialize` with.
+fn instructions_of(data_dir: &Path) -> String {
+    let (server_in, mut to) = std::io::pipe().unwrap();
+    let (from, server_out) = std::io::pipe().unwrap();
+    let options = ServeOptions {
+        data_dir: data_dir.to_path_buf(),
+        profile: ProfileKind::Use,
+        project: "/work/a".into(),
+    };
+    let server =
+        std::thread::spawn(move || mcp::serve(&options, BufReader::new(server_in), server_out));
+    writeln!(
+        to,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "t", "version": "1"}}})
+    )
+    .unwrap();
+    let mut line = String::new();
+    BufReader::new(from).read_line(&mut line).unwrap();
+    drop(to);
+    assert_eq!(server.join().unwrap(), Ok(()));
+    let answer: Value = serde_json::from_str(&line).unwrap();
+    answer["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn the_instructions_carry_the_memory_language_of_the_settings() {
+    let data = TempDir::new("lang");
+    let english = instructions_of(data.path());
+    assert!(
+        english.contains(crate::language::Language::English.rule()),
+        "{english}"
+    );
+    assert!(!english.contains(crate::language::PLACEHOLDER));
+    std::fs::write(
+        data.path().join("config.json"),
+        "{\"version\": 1, \"memory\": {\"language\": \"any\"}}\n",
+    )
+    .unwrap();
+    let any = instructions_of(data.path());
+    assert!(any.contains(crate::language::Language::Any.rule()), "{any}");
+    assert!(
+        !any.contains("Translate a user's words into English"),
+        "{any}"
+    );
+    assert!(any.len() < 2000, "keep the use instructions short");
+}
+
+/// A repository at `dir` with the remote `remote` (none when empty).
+fn repo_at(dir: &Path, remote: &str) -> String {
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    let config = if remote.is_empty() {
+        "[core]\n\tbare = false\n".to_string()
+    } else {
+        format!("[remote \"origin\"]\n\turl = {remote}\n")
+    };
+    std::fs::write(dir.join(".git").join("config"), config).unwrap();
+    mcp::canonical(dir).display().to_string()
+}
+
+fn slugs(client: &mut Client) -> String {
+    client.ok("memories", json!({}))
+}
+
+#[test]
+fn a_moved_repository_with_the_same_remote_keeps_its_memories() {
+    let data = TempDir::new("move-data");
+    let work = TempDir::new("move-work");
+    let old = repo_at(&work.path().join("old"), "git@example.org:me/app.git");
+    let mut client = Client::start(data.path(), ProfileKind::Use, &old);
+    remember(
+        &mut client,
+        "deploy-on-friday",
+        "We deploy on Fridays",
+        "project",
+    );
+    client.close();
+    std::fs::rename(work.path().join("old"), work.path().join("new")).unwrap();
+    let new = mcp::canonical(&work.path().join("new"))
+        .display()
+        .to_string();
+    let mut client = Client::start(data.path(), ProfileKind::Use, &new);
+    assert!(slugs(&mut client).contains("deploy-on-friday"));
+    // Remembering from the new place replaces the same memory (same project id).
+    let again = remember(
+        &mut client,
+        "deploy-on-friday",
+        "We deploy on Mondays",
+        "project",
+    );
+    assert!(again.contains("\"created\":false"), "{again}");
+    client.close();
+}
+
+#[test]
+fn a_local_repository_that_gets_a_remote_keeps_its_memories_and_the_remote_is_recorded() {
+    let data = TempDir::new("local-data");
+    let work = TempDir::new("local-work");
+    let path = repo_at(&work.path().join("app"), "");
+    let mut client = Client::start(data.path(), ProfileKind::Use, &path);
+    remember(
+        &mut client,
+        "local-rule",
+        "A rule of the local repository",
+        "project",
+    );
+    client.close();
+    repo_at(
+        &work.path().join("app"),
+        "https://me@example.org/me/app.git",
+    );
+    let mut client = Client::start(data.path(), ProfileKind::Use, &path);
+    assert!(slugs(&mut client).contains("local-rule"));
+    client.close();
+    let projects = crate::projects::Projects::load(data.path()).unwrap();
+    assert_eq!(
+        projects.get(&path).unwrap().remotes,
+        vec!["example.org/me/app".to_string()]
+    );
+    // And now the remote finds it anywhere.
+    let clone = repo_at(&work.path().join("clone"), "git@example.org:me/app");
+    let mut client = Client::start(data.path(), ProfileKind::Use, &clone);
+    assert!(slugs(&mut client).contains("local-rule"));
+    client.close();
+}
+
+#[test]
+fn two_clones_of_one_remote_share_their_memories() {
+    let data = TempDir::new("clones-data");
+    let work = TempDir::new("clones-work");
+    let a = repo_at(&work.path().join("a"), "https://example.org/team/app.git");
+    let b = repo_at(&work.path().join("b"), "https://example.org/team/app");
+    let mut client = Client::start(data.path(), ProfileKind::Use, &a);
+    remember(
+        &mut client,
+        "shared-rule",
+        "Both clones see this",
+        "project",
+    );
+    client.close();
+    let mut client = Client::start(data.path(), ProfileKind::Use, &b);
+    assert!(slugs(&mut client).contains("shared-rule"));
+    client.close();
+    // A different repository does not.
+    let other = repo_at(&work.path().join("c"), "https://example.org/team/other.git");
+    let mut client = Client::start(data.path(), ProfileKind::Use, &other);
+    assert!(!slugs(&mut client).contains("shared-rule"));
+    client.close();
+}
+
+#[test]
+fn moved_with_a_new_remote_is_suggested_as_a_merge_and_the_merge_keeps_the_memories() {
+    let data = TempDir::new("alike-data");
+    let work = TempDir::new("alike-work");
+    let old = repo_at(&work.path().join("old"), "https://a.example/app.git");
+    let mut client = Client::start(data.path(), ProfileKind::Use, &old);
+    remember(&mut client, "old-rule", "From before the move", "project");
+    client.close();
+    // The same first commit, recorded as git would give it.
+    let set_root = |id: &str| {
+        let file = data.path().join(crate::projects::PROJECTS_FILE);
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        value["projects"][id]["root_commit"] = json!("ab".repeat(20));
+        std::fs::write(&file, value.to_string()).unwrap();
+    };
+    set_root(&old);
+    std::fs::rename(work.path().join("old"), work.path().join("new")).unwrap();
+    let new = repo_at(&work.path().join("new"), "https://b.example/app.git");
+    let mut client = Client::start(data.path(), ProfileKind::Use, &new);
+    assert!(
+        !slugs(&mut client).contains("old-rule"),
+        "never merged automatically"
+    );
+    client.close();
+    set_root(&new);
+    let hints = crate::projects::look_alike_lines(data.path());
+    assert_eq!(hints.len(), 1, "{hints:?}");
+    assert!(hints[0].0.contains("looks like project"), "{hints:?}");
+    assert!(
+        hints[0].1.contains("graphersal-memory projects merge"),
+        "{hints:?}"
+    );
+
+    // The merge (as the daemon runs it): the memories move, the old keys follow.
+    let runtime = mcp::StoreRuntime::open(
+        crate::registry::DEFAULT_STORE,
+        &crate::store::default_store_dir(data.path()),
+        std::sync::Arc::new(mcp::endpoint()),
+    )
+    .unwrap();
+    let moved = runtime
+        .call("merge_project", json!({"from": old, "into": new}))
+        .unwrap();
+    assert_eq!(moved["memories_moved"], 1, "{moved}");
+    runtime.close().unwrap();
+    crate::projects::merge_records(data.path(), &old, &new).unwrap();
+    let mut client = Client::start(data.path(), ProfileKind::Use, &new);
+    assert!(slugs(&mut client).contains("old-rule"));
+    client.close();
+    assert!(crate::projects::look_alike_lines(data.path()).is_empty());
+}

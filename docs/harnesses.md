@@ -40,7 +40,8 @@ configuration is then `$CLAUDE_CONFIG_DIR/.claude.json` instead of `~/.claude.js
 | `~/.claude.json` | `mcpServers.graphersal-memory`: `{"type": "stdio", "command": "<this binary>", "args": ["mcp", "--profile", "use"], "env": {}}` | its name, and a command named `graphersal-memory` with `mcp` as first argument |
 | `~/.claude.json` | only with `install --enable-develop`: `mcpServers.graphersal-memory-develop` (`--profile develop`) | the same |
 | `~/.claude/settings.json` | one group in `hooks.SessionStart` and one in `hooks.SessionEnd`, each with the single command `"<this binary>" hook session-start` (or `session-end`), timeout 30 seconds | a command that runs `graphersal-memory ... hook session-...` |
-| `~/.claude/CLAUDE.md` | the managed rule block, appended after your own text | the lines `<!-- graphersal-memory:begin fingerprint=... -->` and `<!-- graphersal-memory:end -->` |
+| `~/.claude/settings.json` | unless you keep it on (`--keep-auto-memory`): `"autoMemoryEnabled": false`, which switches Claude Code's own auto-memory off | its value; what it was before is recorded in `<data dir>/install/claude-code.json` |
+| `~/.claude/CLAUDE.md` | the managed rule block with the memory language rule, appended after your own text | the lines `<!-- graphersal-memory:begin fingerprint=... -->` and `<!-- graphersal-memory:end -->` |
 
 When the data or run directory was chosen explicitly (`--data-dir`, `GRAPHERSAL_MEMORY_DIR`,
 `--run-dir`, `GRAPHERSAL_MEMORY_RUN_DIR`), the entries and hook commands carry it as
@@ -57,6 +58,15 @@ When the data or run directory was chosen explicitly (`--data-dir`, `GRAPHERSAL_
   `uninstall --disable-develop` unregisters it; both leave everything else as it is.
 - **An entry of another program under our name** (`mcpServers.graphersal-memory` that does not
   start this binary) is a conflict: it is kept, and the report says how to remove it.
+- **Claude Code's auto-memory.** Claude Code 2.1 writes memory files of its own and loads them
+  into every session; the `/memory` toggle stores the switch as `autoMemoryEnabled` in
+  `~/.claude/settings.json` (Claude Code docs, "How Claude remembers your project", section
+  "Enable or disable auto memory"; `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` is the environment
+  variant, which install does not use). Install sets it to `false` by default, edited in place
+  like the hooks. Nothing is lost: `uninstall` writes every memory back to the memory files and
+  puts the setting back to what it was (removes it when it was not set), and an untouched
+  settings file gets its original bytes back. `install --keep-auto-memory` (or "No" in the
+  wizard) leaves it on, and on an installed system undoes install's own switch-off.
 - **Restart running sessions** after install: Claude Code reads its configuration when a session
   starts. If Claude Code rewrote `~/.claude.json` while install ran and dropped the entry,
   `doctor` says so; run install again.
@@ -98,6 +108,17 @@ unchanged. The files are only read. Rules in `CLAUDE.md` files are not imported 
 
 ### `uninstall`
 
+- First the export: every memory goes back into the file memory, per project
+  `~/.claude/projects/<project>/memory/MEMORY.md` and `<slug>.md` (the format of the import
+  above, so a later import gives the same memories back), the global memories into
+  `~/.claude/rules/graphersal-memory-global.md`. Claude Code loads every file of the user rules
+  directory `~/.claude/rules/` in every project, and nobody else writes this file; the managed
+  block in `CLAUDE.md` is not used, because uninstall removes it. A file that already holds the
+  same text is left alone, a file that differs is kept and the graph's version goes beside it as
+  `<name>.graphersal.md`; nothing is deleted. In a terminal uninstall asks first ("Export N
+  memories of M projects back to Claude Code's file memory? [Y/n]"); `--yes` exports,
+  `--no-export` skips it. If the memories cannot be read, nothing is removed.
+  `graphersal-memory export --to-files [--project ROOT]` runs the same export alone.
 - A file nobody changed since install wrote it gets the bytes of its backup back, or is deleted
   when install created it. Directories install created are removed when they are empty again.
 - A file changed since (Claude Code rewrites `~/.claude.json` all the time) keeps every change:
@@ -110,7 +131,10 @@ unchanged. The files are only read. Rules in `CLAUDE.md` files are not imported 
 ### `status` and `doctor`
 
 `status` shows the daemon, the data directory, the settings, and for Claude Code each part
-(installed, outdated, missing, conflict) and how many memory files were imported. `doctor` checks
+(installed, outdated, missing, conflict), how many memory files were imported, the auto-memory
+state, the memory language and the embedding model (name, size, licence; whether it is
+downloaded). `doctor` also checks that the configured model is downloaded and loads, and notes
+projects that look like a moved one (`projects merge`). `doctor` checks
 the same parts plus a missing binary behind a registration, a second registration of the server at
 local scope, the settings file, the registry, the socket path length, the daemon and memory files
 not imported yet, and names a fix for each problem (exit code 1 when it found one).

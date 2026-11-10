@@ -28,11 +28,13 @@ const QUERIES: &str = include_str!("catalog/queries.json");
 const INTERNAL: &str = include_str!("catalog/internal.json");
 
 /// The internal functions, in the order of `catalog/internal.json`.
-pub const INTERNAL_FUNCTIONS: [&str; 4] = [
+pub const INTERNAL_FUNCTIONS: [&str; 6] = [
     "indexed_sessions",
     "index_session",
     "index_turns",
     "set_summary",
+    "merge_project",
+    "export_memories",
 ];
 
 /// The folder of the product's saved queries.
@@ -68,6 +70,8 @@ fn body(name: &str) -> Option<&'static str> {
         "index_session" => include_str!("catalog/index_session.rhai"),
         "index_turns" => include_str!("catalog/index_turns.rhai"),
         "set_summary" => include_str!("catalog/set_summary.rhai"),
+        "merge_project" => include_str!("catalog/merge_project.rhai"),
+        "export_memories" => include_str!("catalog/export_memories.rhai"),
         _ => return None,
     })
 }
@@ -186,8 +190,10 @@ pub fn apply(session: &mut Session) -> Result<Applied, String> {
     if up_to_date {
         return Ok(Applied::Current);
     }
+    // The store keeps the embedder it has (`StoreRuntime::switch_embedder` changes it).
+    let embedder = current_embedder(session)?;
     session
-        .set_schema(SCHEMA, None)
+        .set_schema(&schema_with(&embedder), None)
         .map_err(|err| format!("the memory schema cannot be applied: {err}"))?;
     let meta = meta();
     for function in &wanted {
@@ -210,6 +216,43 @@ pub fn apply(session: &mut Session) -> Result<Applied, String> {
         }
     }
     Ok(Applied::Written)
+}
+
+/// The embedder the memory schema of `session` names (the model identity the store recorded,
+/// or `hash-ngram/1`); `hash-ngram/1` for a store without a schema.
+pub fn current_embedder(session: &Session) -> Result<String, String> {
+    let schema = session.get_schema().map_err(|err| err.to_string())?;
+    Ok(
+        schema["vertices"]["memory"]["schema"]["properties"]["emb"]["embedder"]
+            .as_str()
+            .unwrap_or(crate::models::BUILTIN)
+            .to_string(),
+    )
+}
+
+/// The memory schema with every vector rule's embedder set to `embedder` (a model repository
+/// or identity the store holds, or `hash-ngram/1`).
+pub fn schema_with(embedder: &str) -> String {
+    SCHEMA.replace(
+        "\"embedder\": \"hash-ngram/1\"",
+        &format!("\"embedder\": {}", json!(embedder)),
+    )
+}
+
+/// The memory schema without its vector rules (`emb` undeclared): the first step of an embedder
+/// change whose vectors have another dimension (the engine checks the existing vectors against
+/// the new declaration before the rule's fill replaces them, so the old vectors go first).
+pub fn schema_without_vectors() -> Result<String, String> {
+    let mut schema: Value = serde_json::from_str(SCHEMA)
+        .map_err(|err| format!("the built-in schema is not valid JSON: {err}"))?;
+    if let Some(labels) = schema["vertices"].as_object_mut() {
+        for label in labels.values_mut() {
+            if let Some(properties) = label["schema"]["properties"].as_object_mut() {
+                properties.remove("emb");
+            }
+        }
+    }
+    Ok(schema.to_string())
 }
 
 /// Runs the saved query `name` with the named arguments `args` on the session (the product's
@@ -389,6 +432,91 @@ mod tests {
         let restored = session.get_query("session").unwrap();
         assert!(restored["body"].as_str().unwrap().contains("turn_list"));
         assert_eq!(apply(&mut session).unwrap(), Applied::Current);
+    }
+
+    #[test]
+    fn the_schema_names_another_embedder_everywhere() {
+        let schema: Value = serde_json::from_str(&schema_with("acme/model")).unwrap();
+        for label in ["memory", "session", "turn", "fact"] {
+            assert_eq!(
+                schema["vertices"][label]["schema"]["properties"]["emb"]["embedder"],
+                "acme/model"
+            );
+        }
+        let mut session = Session::new();
+        assert_eq!(current_embedder(&session).unwrap(), "hash-ngram/1");
+        apply(&mut session).unwrap();
+        assert_eq!(current_embedder(&session).unwrap(), "hash-ngram/1");
+    }
+
+    #[test]
+    fn merge_project_moves_memories_edges_and_sessions() {
+        let mut session = Session::new();
+        apply(&mut session).unwrap();
+        let run = |session: &mut Session, script: &str| {
+            let answer: Value = serde_json::from_str(
+                &session.execute(script, &graphersal_session::RunOptions::default()),
+            )
+            .unwrap();
+            assert_eq!(answer["ok"], true, "{answer}");
+            answer["execution"]["results"].clone()
+        };
+        for (slug, project, summary) in [
+            ("a", "/old", "only in old"),
+            ("b", "/old", "old b"),
+            ("b", "/new", "new b, newer"),
+            ("g", "", "global"),
+        ] {
+            run(
+                &mut session,
+                &format!(
+                    "g.query(\"remember\", #{{slug: \"{slug}\", kind: \"project\", summary: \"{summary}\", body: \"x\", why: \"\", how_to_apply: \"\", title: \"\", hook: \"\", links: [], about: [], scope: \"{}\", project: \"{project}\"}})",
+                    if project.is_empty() {
+                        "global"
+                    } else {
+                        "project"
+                    }
+                ),
+            );
+        }
+        run(
+            &mut session,
+            "g.query(\"remember\", #{slug: \"a\", kind: \"project\", summary: \"only in old\", body: \"x\", why: \"w\", how_to_apply: \"\", title: \"\", hook: \"\", links: [\"g\"], about: [], scope: \"project\", project: \"/old\"})",
+        );
+        run(
+            &mut session,
+            "g.add_v(\"session\").property(T.id, \"session:s\").property(\"name\", \"s\").property(\"started_at\", \"2026-11-10T00:00:00Z\").property(\"project\", \"/old\").iterate()",
+        );
+        let merged = call(
+            &mut session,
+            "merge_project",
+            &json!({"from": "/old", "into": "/new"}),
+        )
+        .unwrap();
+        assert_eq!(merged["memories_moved"], 1, "{merged}");
+        assert_eq!(merged["memories_kept"], 1, "{merged}");
+        assert_eq!(merged["others"], 1, "{merged}");
+        let left = run(
+            &mut session,
+            "g.v().has(\"project\", \"/old\").count().next()",
+        );
+        assert_eq!(left, json!([0]));
+        let moved = run(
+            &mut session,
+            "g.v(\"memory:a@/new\").project(\"why\", \"links\").by(\"why\").by(__.out(\"relates_to\").id().fold()).next()",
+        );
+        assert_eq!(moved[0]["why"], "w", "{moved}");
+        assert_eq!(moved[0]["links"], json!(["memory:g"]), "{moved}");
+        let kept = run(
+            &mut session,
+            "g.v(\"memory:b@/new\").values(\"summary\").next()",
+        );
+        assert_eq!(kept, json!(["new b, newer"]));
+        let session_project = run(
+            &mut session,
+            "g.v(\"session:s\").values(\"project\").next()",
+        );
+        assert_eq!(session_project, json!(["/new"]));
     }
 
     #[test]

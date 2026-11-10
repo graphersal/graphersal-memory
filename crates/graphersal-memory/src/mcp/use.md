@@ -1,8 +1,9 @@
 graphersal-memory: your long-term memory of this user, kept in a local graph on their machine.
 A memory belongs to the current project (the repository you work in) or is global (it holds in
 every project); searches cover both. Every function below is a tool of its own: call it
-directly. Write search text in English.
+directly.
 
+- {language_rule}
 - memories(text?, k, kind?) lists the memories (no text) or searches them; memory(slug) reads
   one in full.
 - remember(slug, kind, summary, body, ...) stores or replaces a memory; scope "global" for

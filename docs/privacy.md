@@ -23,7 +23,7 @@ graphersal-memory is designed so that nothing leaves your machine unless you ask
 | Nothing | by default | - |
 | Session summaries | only if you opt in, once per finished session (see below) | through **your own harness** (for example `claude -p` on your own subscription), to the model provider you already use |
 | The A/B (`bench`) | only when you run `graphersal-memory bench` and accept its estimate (see below) | through **your own harness**, like the summaries |
-| Embedding model download (planned) | only if you accept it during install | a one-time download of potion-multilingual-128M; the built-in embedder needs none |
+| Embedding model download | once, during `install`, for the model you choose (the default is a download; choose "Built-in" or `--model builtin` for none) | a download from Hugging Face (`https://huggingface.co`, or the mirror in `GRAPHERSAL_MEMORY_HF_ENDPOINT`) of the model's files, card and licence; nothing is uploaded, and `HF_TOKEN`, when set, is sent to that host only. This is the one network access of install. |
 | Binary install or update | when you run the installer | GitHub Releases or crates.io |
 
 - **No telemetry**, no usage statistics and no crash reports are sent anywhere.
@@ -95,6 +95,10 @@ for any `claude -p` you run; graphersal-memory changes none of your configuratio
 
 ## Removing it
 
-`graphersal-memory uninstall` removes what `install` added to your harness configuration.
+`graphersal-memory uninstall` first writes every memory back into your harness's file memory
+(for Claude Code: `MEMORY.md` and one file per memory in each project's memory directory, the
+global ones in `~/.claude/rules/graphersal-memory-global.md`; files you changed are kept, the
+graph's version goes beside them), switches the harness's own auto-memory back to how it was, and
+removes what `install` added to your harness configuration (`--no-export` skips the export).
 `graphersal-memory uninstall --purge` also deletes the data directory, which holds your graph
 memory (it asks first). `install` reads your memory files but never changes or deletes them.
