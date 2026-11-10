@@ -207,6 +207,8 @@ fn setup_with(home: &Path, data: &Path, endpoint: &str) -> Setup {
         ClaudePaths::resolve(&|name| (name == "HOME").then(|| home.display().to_string())).unwrap();
     Setup {
         paths,
+        opencode: crate::opencode::OpenCodePaths::of_home(home),
+        search_path: Some(std::ffi::OsString::new()),
         data_dir: data.to_path_buf(),
         run_dir: std::env::temp_dir().join(format!("gmm{}", std::process::id())),
         exe: std::path::PathBuf::from("/opt/gm/bin/graphersal-memory"),

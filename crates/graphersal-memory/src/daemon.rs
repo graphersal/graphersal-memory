@@ -149,8 +149,8 @@ struct State {
 struct Indexer {
     /// Whether the indexer thread runs.
     running: bool,
-    /// The request waiting for the next run (merged requests).
-    pending: Option<sessions::Request>,
+    /// The requests waiting for the next run, one per harness (merged requests).
+    pending: BTreeMap<crate::agents::Kind, sessions::Request>,
     /// Requests received (each answer names its number).
     requested: u64,
     /// The last request a finished run covered.
@@ -322,9 +322,11 @@ impl Daemon {
         let mut indexer = self.lock_indexer();
         indexer.requested += 1;
         let number = indexer.requested;
-        match &mut indexer.pending {
+        match indexer.pending.get_mut(&request.harness) {
             Some(pending) => pending.merge(request),
-            None => indexer.pending = Some(request),
+            None => {
+                indexer.pending.insert(request.harness, request);
+            }
         }
         if !indexer.running {
             indexer.running = true;
@@ -345,8 +347,16 @@ impl Daemon {
         loop {
             let (request, covers) = {
                 let mut indexer = self.lock_indexer();
-                match indexer.pending.take() {
-                    Some(request) => (request, indexer.requested),
+                match indexer.pending.pop_first() {
+                    // A run covers the requests so far only when it is the last pending one.
+                    Some((_, request)) => {
+                        let covers = if indexer.pending.is_empty() {
+                            indexer.requested
+                        } else {
+                            indexer.completed
+                        };
+                        (request, covers)
+                    }
                     None => {
                         indexer.running = false;
                         drop(indexer);
@@ -356,8 +366,14 @@ impl Daemon {
                     }
                 }
             };
-            let (mut summarizer, problem) =
-                crate::summaries::Summarizer::new(&self.options.data_dir);
+            let (summarizer, problem) = crate::summaries::Summarizer::new(&self.options.data_dir);
+            // A sandboxed opencode run may use the user's opencode logins (a copy).
+            let mut summarizer = summarizer.map(|summarizer| {
+                match crate::opencode::OpenCodePaths::resolve(&|name| std::env::var(name).ok()) {
+                    Ok(paths) => summarizer.with_opencode_db(paths.db),
+                    Err(_) => summarizer,
+                }
+            });
             if let Some(problem) = problem {
                 log(&format!(
                     "session summaries are off for this run: {problem}"

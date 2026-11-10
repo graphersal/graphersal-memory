@@ -1,4 +1,7 @@
-//! `graphersal-memory bench`: the built-in A/B on the user's own memory (Claude Code).
+//! `graphersal-memory bench`: the built-in A/B on the user's own memory, through Claude Code's
+//! `claude -p` or opencode's `opencode run` (whichever `summaries.harness_command` names; the
+//! opencode arms run in sandboxes of their own configuration and data directories,
+//! `bench::arms::build_opencode`).
 //!
 //! 1. **Questions** (`bench::questions`): generated once per project by the harness from the
 //!    user's raw transcripts, with reference answers and source turn ids; the user reviews the
@@ -66,6 +69,9 @@ pub struct Options {
     pub project: String,
     /// Where the memory files, instruction files and transcripts are read from.
     pub claude: crate::install::ClaudePaths,
+    /// Where opencode's instruction files and sessions are read from (when the harness command
+    /// is opencode's).
+    pub opencode: crate::opencode::OpenCodePaths,
     /// The data directory (the live store is forked from it; reports go into it).
     pub data_dir: PathBuf,
     /// This binary (the graph arm's MCP server).
@@ -98,6 +104,8 @@ pub struct Call {
     pub input: String,
     /// The working directory.
     pub cwd: PathBuf,
+    /// Extra environment (an opencode sandbox's directories).
+    pub env: Vec<(String, String)>,
 }
 
 /// What a harness answers: `claude -p --output-format json`'s object (or an error object).
@@ -111,8 +119,11 @@ pub struct Process;
 
 impl Harness for Process {
     fn call(&mut self, call: &Call) -> Value {
-        let env = [(crate::summaries::HOOK_ENV, "off")];
+        let mut env = vec![(crate::summaries::HOOK_ENV, "off")];
+        env.extend(call.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        let opencode = crate::opencode::is_opencode(&call.args);
         match crate::harness::run(&call.args, &call.input, &call.cwd, &env, CALL_TIMEOUT) {
+            Ok(output) if opencode => crate::opencode::normalize_run_output(&output.stdout),
             Ok(output) => json_in(&output.stdout).unwrap_or_else(|| {
                 json!({"is_error": true, "result": format!(
                     "the harness answered no JSON (exit {}): {}",
@@ -388,22 +399,77 @@ impl Estimate {
     }
 }
 
-/// Refuses a harness that is not Claude Code's `claude` (the arms are built with its flags).
+/// Refuses a harness that is neither Claude Code's `claude` nor opencode's `opencode` (the
+/// arms are built with their flags and configuration).
 pub fn check_harness(command: &[String]) -> Result<(), String> {
     let is_claude = command.first().is_some_and(|program| {
         Path::new(program)
             .file_stem()
             .is_some_and(|stem| stem == "claude")
     });
-    if is_claude {
+    if is_claude || crate::opencode::is_opencode(command) {
         Ok(())
     } else {
         Err(format!(
-            "bench drives Claude Code's `claude -p` for now; the harness command is `{}` \
-             (summaries.harness_command in config.json)",
+            "bench drives Claude Code's `claude -p` or opencode's `opencode run`; the harness \
+             command is `{}` (summaries.harness_command in config.json)",
             command.join(" ")
         ))
     }
+}
+
+/// Whether the run goes through opencode.
+fn opencode(options: &Options) -> bool {
+    crate::opencode::is_opencode(&options.harness_command)
+}
+
+/// The excerpt of the project's finished sessions, from the harness's own store.
+fn excerpt_for(options: &Options) -> Excerpt {
+    if opencode(options) {
+        Excerpt::of_transcripts(
+            &questions::opencode_transcripts(
+                &options.opencode.db,
+                &options.project,
+                SystemTime::now(),
+            ),
+            questions::EXCERPT_BUDGET,
+        )
+    } else {
+        let transcripts = questions::transcripts(
+            &options.claude.projects,
+            &options.project,
+            SystemTime::now(),
+        );
+        Excerpt::of(&transcripts, questions::EXCERPT_BUDGET)
+    }
+}
+
+/// The working directory, the command line and the environment of a tool-free call.
+type ToolFreeCall = (PathBuf, Vec<String>, Vec<(String, String)>);
+
+/// A call of the generator or the judge: the harness command, the tool-free sandbox's
+/// arguments, and for `claude` the schema and the cost cap of the call.
+fn tool_free_call(
+    options: &Options,
+    dir: &Path,
+    schema: Value,
+    cap: f64,
+) -> Result<ToolFreeCall, String> {
+    let mut command = options.harness_command.clone();
+    if opencode(options) {
+        let (cwd, env) = arms::tool_free_opencode(dir, &options.opencode.db)?;
+        command.extend(["--format".to_string(), "json".to_string()]);
+        return Ok((cwd, command, env));
+    }
+    let (cwd, args) = arms::tool_free(dir)?;
+    command.extend(args);
+    command.extend([
+        "--json-schema".to_string(),
+        schema.to_string(),
+        "--max-budget-usd".to_string(),
+        format!("{cap:.2}"),
+    ]);
+    Ok((cwd, command, Vec::new()))
 }
 
 /// A short run id: 12 hex digits of the time and the process.
@@ -444,24 +510,17 @@ fn generate(
     work: &Path,
     harness: &mut dyn Harness,
 ) -> Result<QuestionSet, String> {
-    let (cwd, args) = arms::tool_free(work)?;
     let prompt = questions::prompt(&options.project, count, excerpt);
     let cap = (generation_usd(prompt.len(), count) * 3.0)
         .max(0.5)
         .min(budget_left.max(0.05));
-    let mut command = options.harness_command.clone();
-    command.extend(args);
-    command.extend([
-        "--json-schema".to_string(),
-        questions::schema().to_string(),
-        "--max-budget-usd".to_string(),
-        format!("{cap:.2}"),
-    ]);
+    let (cwd, command, env) = tool_free_call(options, work, questions::schema(), cap)?;
     let value = harness.call(&Call {
         kind: Kind::Generate,
         args: command,
         input: prompt,
         cwd,
+        env,
     });
     // The raw answer stays beside the run, to see what a failed generation answered.
     let raw = work.join("answer.json");
@@ -562,19 +621,16 @@ pub fn questions_command(
         return Ok(0);
     }
     check_harness(&options.harness_command)?;
-    let transcripts = questions::transcripts(
-        &options.claude.projects,
-        &options.project,
-        SystemTime::now(),
-    );
-    let excerpt = Excerpt::of(&transcripts, questions::EXCERPT_BUDGET);
+    let excerpt = excerpt_for(options);
     if excerpt.sessions == 0 {
         return Err(no_transcripts(options));
     }
-    let estimate = generation_usd(
-        questions::prompt(&options.project, options.questions, &excerpt).len(),
-        options.questions,
-    );
+    let free = crate::opencode::free_model(&options.harness_command);
+    let estimate = if free { 0.0 } else { 1.0 }
+        * generation_usd(
+            questions::prompt(&options.project, options.questions, &excerpt).len(),
+            options.questions,
+        );
     let _ = writeln!(
         out,
         "Generating {} questions about {} from {} finished session(s) (raw transcripts): about \
@@ -619,6 +675,14 @@ pub fn questions_command(
 }
 
 fn no_transcripts(options: &Options) -> String {
+    if opencode(options) {
+        return format!(
+            "no finished opencode session of {} in {} (sessions still being written are left \
+             out for 30 minutes)",
+            options.project,
+            options.opencode.db.display()
+        );
+    }
     format!(
         "no finished session transcript of {} under {} (sessions still being written are left \
          out for 30 minutes)",
@@ -667,12 +731,7 @@ pub fn run(
     let existing = QuestionSet::load(&options.data_dir, &options.project)?
         .filter(|set| !set.kept().is_empty());
     let excerpt = if existing.is_none() {
-        let transcripts = questions::transcripts(
-            &options.claude.projects,
-            &options.project,
-            SystemTime::now(),
-        );
-        let excerpt = Excerpt::of(&transcripts, questions::EXCERPT_BUDGET);
+        let excerpt = excerpt_for(options);
         if excerpt.sessions == 0 {
             return Err(no_transcripts(options));
         }
@@ -690,7 +749,14 @@ pub fn run(
             ),
         ),
     };
-    let estimate = Estimate::of(count, arms_list.len(), options.repeats, generation);
+    let mut estimate = Estimate::of(count, arms_list.len(), options.repeats, generation);
+    let free = crate::opencode::free_model(&options.harness_command);
+    if free {
+        estimate = Estimate {
+            calls: estimate.calls,
+            ..Estimate::default()
+        };
+    }
     let names: Vec<&str> = arms_list.iter().map(|a| a.name()).collect();
     let _ = writeln!(
         out,
@@ -712,6 +778,14 @@ pub fn run(
         },
         options.repeats
     );
+    if free {
+        let _ = writeln!(
+            out,
+            "`{}` uses a free model of opencode Zen (free for a limited time): this run costs \
+             $0.00; the budget still stops it if opencode reports a cost.",
+            options.harness_command.join(" ")
+        );
+    }
     let _ = writeln!(
         out,
         "Estimate (list price): about ${:.2}: questions ${:.2}, warm-up ${:.2}, {} answers \
@@ -802,10 +876,11 @@ pub fn run(
 
     let sources = arms::Sources {
         project: options.project.clone(),
-        instructions: arms::Sources::instructions_of(
-            &options.claude.instructions,
-            &options.project,
-        ),
+        instructions: if opencode(options) {
+            arms::Sources::opencode_instructions_of(&options.opencode, &options.project)
+        } else {
+            arms::Sources::instructions_of(&options.claude.instructions, &options.project)
+        },
         memory_dir: Some(
             options
                 .claude
@@ -813,16 +888,20 @@ pub fn run(
                 .join(crate::import::claude_slug(&options.project))
                 .join("memory"),
         )
-        .filter(|dir| dir.is_dir()),
+        .filter(|dir| dir.is_dir() && !opencode(options)),
         store_dir,
         exe: options.exe.clone(),
     };
     let arms_dir = run_dir.join("arms");
     let mut sandboxes = Vec::new();
     for arm in &arms_list {
-        sandboxes.push(arms::build(*arm, &arms_dir, &sources)?);
+        sandboxes.push(if opencode(options) {
+            arms::build_opencode(*arm, &arms_dir, &sources, &options.opencode.db)?
+        } else {
+            arms::build(*arm, &arms_dir, &sources)?
+        });
     }
-    let (judge_cwd, judge_args) = arms::tool_free(&run_dir.join("judge"))?;
+    let judge_dir = run_dir.join("judge");
     let id = run_id();
     let mut meta = Meta {
         started_at,
@@ -841,7 +920,13 @@ pub fn run(
         stopped: None,
         notes: Vec::new(),
     };
-    if sources.memory_dir.is_none() && arms_list.contains(&BenchArm::Files) {
+    if opencode(options) && arms_list.contains(&BenchArm::Files) {
+        meta.notes.push(
+            "opencode has no file memory: the files arm holds its instruction files (AGENTS.md) \
+             only."
+                .to_string(),
+        );
+    } else if sources.memory_dir.is_none() && arms_list.contains(&BenchArm::Files) {
         meta.notes.push(
             "The project has no memory directory: the files arm holds the instruction files only."
                 .to_string(),
@@ -850,12 +935,15 @@ pub fn run(
     let answer_call = |sandbox: &arms::Sandbox, kind: Kind, prompt: String, cap: f64| {
         let mut args = options.harness_command.clone();
         args.extend(sandbox.args.iter().cloned());
-        args.extend(["--max-budget-usd".to_string(), format!("{cap:.2}")]);
+        if !opencode(options) {
+            args.extend(["--max-budget-usd".to_string(), format!("{cap:.2}")]);
+        }
         Call {
             kind,
             args,
             input: prompt,
             cwd: sandbox.cwd.clone(),
+            env: sandbox.env.clone(),
         }
     };
     let left = |spent: &Spent| options.budget_usd - spent.total();
@@ -909,19 +997,18 @@ pub fn run(
                 let value = harness.call(&call);
                 let usage = Usage::of(&value, started.elapsed());
                 spent.answers += usage.cost_usd;
-                let mut judge = options.harness_command.clone();
-                judge.extend(judge_args.iter().cloned());
-                judge.extend([
-                    "--json-schema".to_string(),
-                    judge_schema().to_string(),
-                    "--max-budget-usd".to_string(),
-                    format!("{:.2}", JUDGE_CAP_USD.min(left(&spent).max(0.01))),
-                ]);
+                let (judge_cwd, judge, judge_env) = tool_free_call(
+                    options,
+                    &judge_dir,
+                    judge_schema(),
+                    JUDGE_CAP_USD.min(left(&spent).max(0.01)),
+                )?;
                 let verdict_value = harness.call(&Call {
                     kind: Kind::Judge,
                     args: judge,
                     input: judge_prompt(question, &usage.text),
-                    cwd: judge_cwd.clone(),
+                    cwd: judge_cwd,
+                    env: judge_env,
                 });
                 let judge_cost = verdict_value["total_cost_usd"].as_f64().unwrap_or(0.0);
                 spent.judge += judge_cost;

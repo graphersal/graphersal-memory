@@ -29,6 +29,7 @@ serde_json = { workspace = true }
 fd-lock = { workspace = true }
 ureq = { workspace = true }
 ring = { workspace = true }
+rusqlite = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 uds_windows = { workspace = true }

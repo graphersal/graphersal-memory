@@ -160,6 +160,7 @@ impl Machine {
             yes: true,
             project: PROJECT.to_string(),
             claude: self.claude(),
+            opencode: crate::opencode::OpenCodePaths::of_home(self.home.path()),
             data_dir: self.data.path().to_path_buf(),
             exe: PathBuf::from("/opt/gm/bin/graphersal-memory"),
             harness_command: vec![
@@ -611,7 +612,8 @@ fn failed_answers_and_judgings_count_as_zero_and_are_reported() {
 fn bench_refuses_what_it_cannot_run() {
     let machine = Machine::new();
     let mut options = machine.options();
-    options.harness_command = vec!["opencode".into(), "run".into()];
+    // opencode is supported since M7a; another harness is refused.
+    options.harness_command = vec!["codex".into(), "exec".into()];
     let mut out = Vec::new();
     let err = bench::run(
         &options,
@@ -620,7 +622,10 @@ fn bench_refuses_what_it_cannot_run() {
         &mut out,
     )
     .unwrap_err();
-    assert!(err.contains("claude -p"), "{err}");
+    assert!(
+        err.contains("claude -p") && err.contains("opencode run"),
+        "{err}"
+    );
     let mut options = machine.options();
     options.arms = vec![BenchArm::Current];
     let err = bench::run(
@@ -690,4 +695,120 @@ fn verdicts_and_usage_parse() {
     assert_eq!(estimate.calls, 36);
     assert!((estimate.total() - (0.1 + 3.0 * 0.05 + 36.0 * 0.07)).abs() < 1e-9);
     assert!(bench::generation_usd(120_000, 12) > bench::generation_usd(1_000, 12));
+}
+
+#[test]
+fn an_opencode_bench_runs_every_arm_in_its_own_sandbox_for_free() {
+    let machine = Machine::new();
+    let paths = crate::opencode::OpenCodePaths::of_home(machine.home.path());
+    crate::opencode::sessions::tests::fixture(&paths.db, PROJECT);
+    std::fs::write(paths.db.with_file_name("auth.json"), "{\"opencode\": {}}").unwrap();
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::write(paths.config_dir.join("AGENTS.md"), "# My opencode rules\n").unwrap();
+    std::fs::write(&paths.config_file, "{\"model\": \"opencode/big-pickle\"}\n").unwrap();
+    let before = machine.live_files();
+    let mut options = machine.options();
+    options.harness_command =
+        crate::config::split_command(crate::opencode::DEFAULT_HEADLESS_COMMAND).unwrap();
+    let mut harness = DryRun::default();
+    let (code, out) = machine.run(&options, &mut harness, "");
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("this run costs $0.00"), "{out}");
+    assert!(out.contains("about $0.00"), "{out}");
+    // SQLite's own WAL index files of the session database (a reader of a WAL database
+    // creates them, as opencode itself does) are not the user's data.
+    let data_only = |files: Vec<(PathBuf, Vec<u8>)>| -> Vec<(PathBuf, Vec<u8>)> {
+        files
+            .into_iter()
+            .filter(|(p, _)| {
+                let name = p.display().to_string();
+                !name.ends_with("opencode.db-shm") && !name.ends_with("opencode.db-wal")
+            })
+            .collect()
+    };
+    assert_eq!(
+        data_only(machine.live_files()),
+        data_only(before),
+        "the live files are never changed"
+    );
+    let run = machine.run_dirs().pop().unwrap();
+    for call in &harness.calls {
+        assert_eq!(
+            &call.args[..4],
+            ["opencode", "run", "--model", "opencode/big-pickle"]
+        );
+        assert!(
+            call.args
+                .ends_with(&["--format".to_string(), "json".to_string()]),
+            "{:?}",
+            call.args
+        );
+        assert!(
+            !call
+                .args
+                .iter()
+                .any(|a| a == "--max-budget-usd" || a == "--json-schema")
+        );
+        let config_home = &call
+            .env
+            .iter()
+            .find(|(k, _)| k == "XDG_CONFIG_HOME")
+            .unwrap()
+            .1;
+        let data_home = &call
+            .env
+            .iter()
+            .find(|(k, _)| k == "XDG_DATA_HOME")
+            .unwrap()
+            .1;
+        assert!(Path::new(config_home).starts_with(&run), "{config_home}");
+        assert!(Path::new(data_home).starts_with(&run), "{data_home}");
+        assert!(
+            call.env
+                .iter()
+                .any(|(k, v)| k == "OPENCODE_DISABLE_PROJECT_CONFIG" && v == "1")
+        );
+        assert!(
+            call.env
+                .iter()
+                .any(|(k, v)| k == "GRAPHERSAL_MEMORY_HOOK" && v == "off")
+        );
+        // The user's login is copied into the sandbox, never named.
+        assert!(Path::new(data_home).join("opencode/auth.json").is_file());
+        for value in call.args.iter().chain(call.env.iter().map(|(_, v)| v)) {
+            assert!(
+                !value.contains(&paths.config_dir.display().to_string()),
+                "{value}"
+            );
+        }
+    }
+    // The graph arm: our server on a fork, only the read functions allowed.
+    let config: Value = serde_json::from_str(
+        &std::fs::read_to_string(run.join("arms/graph/opencode/config/opencode/opencode.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let server = &config["mcp"]["graphersal-memory"];
+    assert_eq!(server["type"], "local");
+    assert!(
+        server["command"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "--no-daemon")
+    );
+    assert_eq!(config["permission"]["*"], "deny");
+    assert_eq!(config["permission"]["graphersal-memory_memories"], "allow");
+    assert!(config["permission"]["graphersal-memory_remember"].is_null());
+    let system = std::fs::read_to_string(run.join("arms/files/system.md")).unwrap();
+    assert!(system.contains("# My opencode rules"), "{system}");
+    let none: Value = serde_json::from_str(
+        &std::fs::read_to_string(run.join("arms/none/opencode/config/opencode/opencode.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(none["mcp"], json!({}));
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(run.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["rows"].as_array().unwrap().len(), 9);
 }

@@ -16,6 +16,13 @@
 //!
 //! Every call adds `--no-session-persistence` (no transcript of its own) and runs with
 //! `GRAPHERSAL_MEMORY_HOOK=off`.
+//!
+//! opencode ([`build_opencode`]): the sandbox is a configuration and a data directory of the
+//! arm's own (`XDG_CONFIG_HOME`/`XDG_DATA_HOME`, `crate::opencode::build_sandbox`), so none of
+//! the user's configuration, plugins, rules, MCP servers or sessions are loaded and its runs are
+//! not stored in the user's session database; `config/opencode/opencode.json` holds the arm's
+//! MCP servers, its permissions (everything denied but the arm's tools) and `instructions`
+//! naming `system.md`; the user's logins (`auth.json`) are copied, never changed.
 
 use std::path::{Path, PathBuf};
 
@@ -72,6 +79,44 @@ impl Sources {
     }
 }
 
+impl Sources {
+    /// opencode's instruction files of `project`: the global `AGENTS.md` (else Claude Code's
+    /// `~/.claude/CLAUDE.md`, as opencode falls back to it) and the project's `AGENTS.md` (else
+    /// its `CLAUDE.md`), those that exist, each without graphersal-memory's managed block.
+    pub fn opencode_instructions_of(
+        paths: &crate::opencode::OpenCodePaths,
+        project: &str,
+    ) -> Vec<(String, String)> {
+        let root = Path::new(project);
+        let mut out = Vec::new();
+        for (label, candidates) in [
+            (
+                "global AGENTS.md",
+                vec![
+                    paths.config_dir.join("AGENTS.md"),
+                    paths.home.join(".claude").join("CLAUDE.md"),
+                ],
+            ),
+            (
+                "project AGENTS.md",
+                vec![root.join("AGENTS.md"), root.join("CLAUDE.md")],
+            ),
+        ] {
+            let Some(text) = candidates
+                .iter()
+                .find_map(|path| std::fs::read_to_string(path).ok())
+            else {
+                continue;
+            };
+            let text = without_block(&text);
+            if !text.trim().is_empty() {
+                out.push((label.to_string(), text));
+            }
+        }
+        out
+    }
+}
+
 /// `text` without graphersal-memory's managed rule block (a broken block stays).
 pub fn without_block(text: &str) -> String {
     match crate::install::find_block(text) {
@@ -93,6 +138,8 @@ pub struct Sandbox {
     pub description: String,
     /// A directory removed after the run (the store fork).
     pub scratch: Option<PathBuf>,
+    /// The environment of its calls (an opencode sandbox's directories).
+    pub env: Vec<(String, String)>,
 }
 
 /// The settings every call gets (with `--setting-sources ""`, the only settings).
@@ -275,7 +322,128 @@ pub fn build(arm: BenchArm, arms_dir: &Path, sources: &Sources) -> Result<Sandbo
         args,
         description,
         scratch,
+        env: Vec::new(),
     })
+}
+
+/// The sandbox of `arm` for opencode in `<arms_dir>/<arm>/`: `opencode run --format json` in
+/// its own configuration and data directories (`user_db`: whose `auth.json` is copied).
+pub fn build_opencode(
+    arm: BenchArm,
+    arms_dir: &Path,
+    sources: &Sources,
+    user_db: &Path,
+) -> Result<Sandbox, String> {
+    let dir = arms_dir.join(arm.name());
+    let cwd = dir.join("cwd");
+    std::fs::create_dir_all(&cwd)
+        .map_err(|err| format!("cannot create {}: {err}", cwd.display()))?;
+    let system_file = dir.join("system.md");
+    let mut scratch = None;
+    let (mcp, allow, system, description): (Value, Vec<String>, String, String) = match arm {
+        BenchArm::None => (
+            json!({}),
+            Vec::new(),
+            "# Memory\n\nYou have no memory of earlier sessions with this developer.\n".to_string(),
+            "no memory: no instruction files, no tools".to_string(),
+        ),
+        BenchArm::Files => (
+            json!({}),
+            Vec::new(),
+            format!(
+                "{}# Memory\n\nYour memory of this developer is the instructions above (opencode \
+                 keeps no other memory).\n",
+                instruction_section(sources)
+            ),
+            format!(
+                "file memory: {} instruction file(s) (opencode has no memory files), no tools",
+                sources.instructions.len()
+            ),
+        ),
+        BenchArm::Graph => {
+            let data = dir.join("data-store");
+            let fork = crate::store::default_store_dir(&data);
+            graphersal::persist::Store::fork_dir(
+                sources.store_dir.as_path(),
+                graphersal::persist::RecoveryTarget::Latest,
+                fork.as_path(),
+            )
+            .map_err(|err| {
+                format!(
+                    "cannot copy the memory store {} for the graph arm: {err}",
+                    sources.store_dir.display()
+                )
+            })?;
+            scratch = Some(data.clone());
+            (
+                json!({SERVER: {
+                    "type": "local",
+                    "command": [sources.exe.display().to_string(), "mcp", "--no-daemon",
+                                "--data-dir", data.display().to_string(),
+                                "--project", sources.project],
+                    "environment": {crate::summaries::HOOK_ENV: "off"},
+                    "enabled": true,
+                }}),
+                READ_FUNCTIONS
+                    .iter()
+                    .map(|f| format!("{SERVER}_{f}"))
+                    .collect(),
+                format!(
+                    "{}# Memory\n\nYour memory of this developer and every past session of this \
+                     project is kept in a graph behind your MCP tools (server {SERVER}): \
+                     memories, memory, sessions, session, recall. Look up what you need. The \
+                     memory is read-only in this task.\n",
+                    instruction_section(sources)
+                ),
+                format!(
+                    "graph memory: {} instruction file(s), the use tools {} on a fork of the \
+                     store",
+                    sources.instructions.len(),
+                    READ_FUNCTIONS.join("/")
+                ),
+            )
+        }
+        BenchArm::Current => {
+            return Err(
+                "the arm `current` (a copy of your own MCP setup) is not built yet. Use none, \
+                 files and graph."
+                    .to_string(),
+            );
+        }
+    };
+    write(&system_file, &system)?;
+    let allow: Vec<&str> = allow.iter().map(String::as_str).collect();
+    let env = crate::opencode::build_sandbox(
+        &dir.join("opencode"),
+        &json!({"mcp": mcp, "permission": crate::opencode::permissions(&allow),
+                "instructions": [system_file.display().to_string()]}),
+        Some(user_db),
+    )?;
+    Ok(Sandbox {
+        arm,
+        cwd,
+        args: vec!["--format".to_string(), "json".to_string()],
+        description,
+        scratch,
+        env,
+    })
+}
+
+/// The opencode sandbox of the generator and the judge: no tools, no MCP servers, no context,
+/// in `<dir>/`. Returns the working directory and the environment.
+pub fn tool_free_opencode(
+    dir: &Path,
+    user_db: &Path,
+) -> Result<(PathBuf, Vec<(String, String)>), String> {
+    let cwd = dir.join("cwd");
+    std::fs::create_dir_all(&cwd)
+        .map_err(|err| format!("cannot create {}: {err}", cwd.display()))?;
+    let env = crate::opencode::build_sandbox(
+        &dir.join("opencode"),
+        &json!({"mcp": {}, "permission": crate::opencode::permissions(&[])}),
+        Some(user_db),
+    )?;
+    Ok((cwd, env))
 }
 
 /// The sandbox of the generator and the judge: no tools, no MCP servers, no context, in

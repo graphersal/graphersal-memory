@@ -208,6 +208,28 @@ pub fn transcripts(projects_dir: &Path, project: &str, now: SystemTime) -> Vec<P
     files.into_iter().map(|(_, p)| p).collect()
 }
 
+/// The finished opencode sessions of `project` in `db` (unchanged for 30 minutes), newest
+/// first, parsed.
+pub fn opencode_transcripts(
+    db: &Path,
+    project: &str,
+    now: SystemTime,
+) -> Vec<(String, transcript::Transcript)> {
+    let now = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    crate::opencode::sessions::of_project(db, Path::new(project))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, updated)| now.saturating_sub(*updated) >= RECENT.as_secs())
+        .filter_map(|(id, _)| {
+            crate::opencode::sessions::read(db, &id)
+                .ok()
+                .map(|t| (id, t))
+        })
+        .collect()
+}
+
 /// The raw-transcript excerpt the questions are generated from: newest sessions first, each
 /// turn marked with its id, until `budget` characters; also the start of each turn's prompt by
 /// id (the source excerpts of the question file).
@@ -222,18 +244,27 @@ pub struct Excerpt {
 }
 
 impl Excerpt {
-    /// The excerpt of `files` (newest first).
+    /// The excerpt of `files` (Claude Code transcripts, newest first).
     pub fn of(files: &[PathBuf], budget: usize) -> Self {
+        let parsed: Vec<(String, transcript::Transcript)> = files
+            .iter()
+            .filter_map(|file| {
+                let bytes = std::fs::read(file).ok()?;
+                let uuid = file
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let parsed = transcript::parse(&bytes, &uuid);
+                Some((uuid, parsed))
+            })
+            .collect();
+        Self::of_transcripts(&parsed, budget)
+    }
+
+    /// The excerpt of parsed sessions `(id, transcript)` (newest first).
+    pub fn of_transcripts(sessions: &[(String, transcript::Transcript)], budget: usize) -> Self {
         let mut out = Self::default();
-        for file in files {
-            let Ok(bytes) = std::fs::read(file) else {
-                continue;
-            };
-            let uuid = file
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let parsed = transcript::parse(&bytes, &uuid);
+        for (uuid, parsed) in sessions {
             if parsed.turns.len() < 2 {
                 continue;
             }

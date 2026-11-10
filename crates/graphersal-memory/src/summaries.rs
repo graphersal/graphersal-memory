@@ -265,6 +265,9 @@ pub enum Refused {
 pub struct Summarizer {
     settings: crate::config::Summaries,
     data_dir: PathBuf,
+    /// opencode's session database, whose `auth.json` beside it a sandboxed opencode run gets
+    /// a copy of (the daemon sets it; `None`: no login is copied, free models still work).
+    opencode_db: Option<PathBuf>,
     spend: Spend,
     /// The calls this run made.
     pub calls: usize,
@@ -280,6 +283,7 @@ impl Summarizer {
                     Some(Self {
                         settings: config.summaries,
                         data_dir: data_dir.to_path_buf(),
+                        opencode_db: None,
                         spend,
                         calls: 0,
                     }),
@@ -292,6 +296,12 @@ impl Summarizer {
         }
     }
 
+    /// Lets sandboxed opencode runs use the logins kept beside `db` (a copy of `auth.json`).
+    pub fn with_opencode_db(mut self, db: PathBuf) -> Self {
+        self.opencode_db = Some(db);
+        self
+    }
+
     /// The date before which sessions get no summary.
     pub fn since(&self) -> Option<&str> {
         self.settings.since.as_deref()
@@ -300,7 +310,12 @@ impl Summarizer {
     /// Summarizes one session with `prompt`, within the budget.
     pub fn summarize(&mut self, prompt: &str) -> Result<Summary, Refused> {
         let month = this_month();
-        let estimate = estimate_usd(prompt.chars().count());
+        // A free model of opencode Zen costs nothing; the cap still applies to what it reports.
+        let estimate = if crate::opencode::free_model(&self.settings.harness_command) {
+            0.0
+        } else {
+            estimate_usd(prompt.chars().count())
+        };
         let spent = self.spend.usd(&month);
         let cap = self.settings.monthly_budget_usd;
         if spent + estimate > cap {
@@ -310,11 +325,12 @@ impl Summarizer {
         std::fs::create_dir_all(&work)
             .map_err(|err| Refused::Failed(format!("cannot create {}: {err}", work.display())))?;
         self.calls += 1;
-        let result = run_harness(
+        let result = run_harness_with(
             &self.settings.harness_command,
             prompt,
             &work,
             HARNESS_TIMEOUT,
+            self.opencode_db.as_deref(),
         );
         // A call that ran costs money even when its answer is unusable.
         let cost = match &result {
@@ -360,19 +376,36 @@ pub fn harness_args(command: &[String]) -> Vec<String> {
 }
 
 /// Runs the harness once: the prompt on stdin, the answer on stdout (`crate::harness::run`:
-/// `claude.cmd` on Windows is found through `PATHEXT`).
-pub fn run_harness(
+/// `claude.cmd` on Windows is found through `PATHEXT`). An opencode command (`opencode run
+/// ...`) runs with `--format json` in a sandbox in `work_dir` (its own configuration and data directories: no tools, no MCP
+/// servers, none of the user's plugins or rules, its session not stored in the user's
+/// database; a copy of the logins beside `opencode_db`), and its events are read as the answer.
+pub fn run_harness_with(
     command: &[String],
     prompt: &str,
     work_dir: &Path,
     timeout: Duration,
+    opencode_db: Option<&Path>,
 ) -> Result<Summary, String> {
-    let args = harness_args(command);
+    let mut args = harness_args(command);
     if args.is_empty() {
         return Err("summaries.harness_command is empty".to_string());
     }
-    let output = crate::harness::run(&args, prompt, work_dir, &[(HOOK_ENV, "off")], timeout)
-        .map_err(|err| {
+    let opencode = crate::opencode::is_opencode(command);
+    let mut env: Vec<(String, String)> = vec![(HOOK_ENV.to_string(), "off".to_string())];
+    if opencode {
+        args.extend(["--format".to_string(), "json".to_string()]);
+        let sandbox = work_dir.join("opencode");
+        let _ = std::fs::remove_dir_all(&sandbox);
+        env = crate::opencode::build_sandbox(
+            &sandbox,
+            &json!({"permission": crate::opencode::permissions(&[]), "mcp": {}}),
+            opencode_db,
+        )?;
+    }
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let output =
+        crate::harness::run(&args, prompt, work_dir, &env_refs, timeout).map_err(|err| {
             if err.contains("did not finish") {
                 format!(
                     "the harness did not finish within {} minutes",
@@ -382,7 +415,12 @@ pub fn run_harness(
                 err
             }
         })?;
-    match parse_answer(&output.stdout) {
+    let stdout = if opencode {
+        crate::opencode::normalize_run_output(&output.stdout).to_string()
+    } else {
+        output.stdout.clone()
+    };
+    match parse_answer(&stdout) {
         Ok(summary) => Ok(summary),
         Err(why) => Err(format!(
             "{why} (exit {}; stdout: {}; stderr: {})",

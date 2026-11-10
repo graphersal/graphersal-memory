@@ -29,7 +29,7 @@ const LONG_VERSION: &str = concat!(
         graph database and lets the agent search them through MCP, instead of loading a growing \
         memory file on every turn. Everything stays on your machine.\n\n\
         PRE-RELEASE: `install`, `uninstall`, `status`, `doctor`, `import`, `summaries` and \
-        `bench` (for Claude Code), `mcp` (the stdio server a harness starts; it shares one background daemon \
+        `bench` (for Claude Code and opencode), `mcp` (the stdio server a harness starts; it shares one background daemon \
         with every other session) and `daemon` work. Every other command says which stage delivers it; \
         the plan is in docs/roadmap.md.",
     after_help = "Start with `graphersal-memory install`. \
@@ -68,9 +68,11 @@ pub enum Command {
             The embedding model download (Hugging Face, once, into the data directory) is the \
             one network access of install; if it fails, the built-in embedder stays.")]
     Install {
-        /// The harness to set up.
-        #[arg(long, value_enum, default_value_t = Harness::ClaudeCode)]
-        harness: Harness,
+        /// The harness(es) to set up: claude-code, opencode or all (default: the wizard asks,
+        /// offering every harness found on this machine; without questions: every harness
+        /// found).
+        #[arg(long, value_enum)]
+        harness: Option<Harness>,
         /// Show what would change without changing anything (no questions).
         #[arg(long)]
         dry_run: bool,
@@ -103,9 +105,10 @@ pub enum Command {
     },
     /// Remove exactly what `install` added; your own settings stay untouched.
     Uninstall {
-        /// The harness to remove graph memory from.
-        #[arg(long, value_enum, default_value_t = Harness::ClaudeCode)]
-        harness: Harness,
+        /// The harness(es) to remove graph memory from: claude-code, opencode or all (default:
+        /// every harness it is installed in).
+        #[arg(long, value_enum)]
+        harness: Option<Harness>,
         /// Show what would change without changing anything.
         #[arg(long)]
         dry_run: bool,
@@ -155,7 +158,8 @@ pub enum Command {
     },
     /// Open the memory in the browser (develop mode); runs while this terminal runs.
     Ui,
-    /// Measure whether the memory helps: the built-in A/B on your own data (Claude Code).
+    /// Measure whether the memory helps: the built-in A/B on your own data (through
+    /// `summaries.harness_command`: Claude Code's `claude -p` or opencode's `opencode run`).
     #[command(args_conflicts_with_subcommands = true)]
     Bench {
         /// `questions`: generate or review the question set only.
@@ -208,7 +212,9 @@ pub enum Command {
         action: SummariesAction,
     },
     /// Export the memories back into the harness's file memory (--to-files; what uninstall
-    /// does first). The export of rules into instruction files is planned.
+    /// does first; opencode, which has none: readable Markdown files under
+    /// ~/graphersal-memory-export/opencode). The export of rules into instruction files is
+    /// planned.
     Export {
         /// The harness to export for.
         #[arg(long, value_enum, default_value_t = Harness::ClaudeCode)]
@@ -237,6 +243,9 @@ pub enum Command {
         /// The hook event.
         #[arg(value_enum)]
         event: crate::hook::HookEvent,
+        /// The harness that runs the hook (Claude Code's hooks or opencode's plugin).
+        #[arg(long, value_enum, default_value_t = Harness::ClaudeCode)]
+        harness: Harness,
     },
 }
 
@@ -386,14 +395,29 @@ fn parse_idle(text: &str) -> Result<std::time::Duration, String> {
 /// An AI agent harness graphersal-memory can be installed into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Harness {
-    /// Claude Code (first supported harness).
+    /// Claude Code.
     ClaudeCode,
-    /// opencode (planned).
+    /// opencode.
     Opencode,
+    /// Every supported harness (install: those found on this machine).
+    All,
     /// OpenAI Codex CLI (planned).
     Codex,
     /// Cursor (planned).
     Cursor,
+}
+
+impl Harness {
+    /// The supported harnesses this choice names (`None` for a planned one).
+    pub fn kinds(self) -> Option<Vec<crate::agents::Kind>> {
+        use crate::agents::Kind;
+        match self {
+            Harness::ClaudeCode => Some(vec![Kind::ClaudeCode]),
+            Harness::Opencode => Some(vec![Kind::OpenCode]),
+            Harness::All => Some(Kind::ALL.to_vec()),
+            Harness::Codex | Harness::Cursor => None,
+        }
+    }
 }
 
 /// The MCP server a connection belongs to.
@@ -443,7 +467,7 @@ mod tests {
         assert_eq!(
             parse(&["install"]).unwrap().command,
             Command::Install {
-                harness: Harness::ClaudeCode,
+                harness: None,
                 dry_run: false,
                 yes: false,
                 language: None,
@@ -481,7 +505,7 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Uninstall {
-                harness: Harness::Cursor,
+                harness: Some(Harness::Cursor),
                 dry_run: true,
                 yes: false,
                 purge: false,
@@ -587,7 +611,7 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Install {
-                harness: Harness::ClaudeCode,
+                harness: None,
                 dry_run: false,
                 yes: true,
                 language: None,
@@ -601,7 +625,7 @@ mod tests {
         assert_eq!(
             parse(&["uninstall", "-y", "--purge"]).unwrap().command,
             Command::Uninstall {
-                harness: Harness::ClaudeCode,
+                harness: None,
                 dry_run: false,
                 yes: true,
                 purge: true,
@@ -618,7 +642,8 @@ mod tests {
         assert_eq!(
             parse(&["hook", "session-start"]).unwrap().command,
             Command::Hook {
-                event: crate::hook::HookEvent::SessionStart
+                event: crate::hook::HookEvent::SessionStart,
+                harness: Harness::ClaudeCode
             }
         );
         let help = Cli::command().render_long_help().to_string();
@@ -788,5 +813,38 @@ mod tests {
         );
         let cli = parse(&["status", "--run-dir", "/r"]).unwrap();
         assert_eq!(cli.run_dir, Some(PathBuf::from("/r")));
+    }
+
+    #[test]
+    fn harness_choices_parse() {
+        use crate::agents::Kind;
+        for (arg, kinds) in [
+            ("claude-code", vec![Kind::ClaudeCode]),
+            ("opencode", vec![Kind::OpenCode]),
+            ("all", vec![Kind::ClaudeCode, Kind::OpenCode]),
+        ] {
+            match parse(&["install", "--harness", arg]).unwrap().command {
+                Command::Install {
+                    harness: Some(h), ..
+                } => assert_eq!(h.kinds(), Some(kinds)),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(Harness::Cursor.kinds(), None);
+        assert_eq!(
+            parse(&["hook", "session-end", "--harness", "opencode"])
+                .unwrap()
+                .command,
+            Command::Hook {
+                event: crate::hook::HookEvent::SessionEnd,
+                harness: Harness::Opencode
+            }
+        );
+        let help = Cli::command()
+            .find_subcommand_mut("install")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("claude-code, opencode or all"), "{help}");
     }
 }

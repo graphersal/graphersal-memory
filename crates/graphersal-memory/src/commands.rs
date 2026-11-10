@@ -86,12 +86,13 @@ fn harness_not_implemented(command: &str, harness: Harness) -> String {
     let name = match harness {
         Harness::ClaudeCode => "claude-code",
         Harness::Opencode => "opencode",
+        Harness::All => "all",
         Harness::Codex => "codex",
         Harness::Cursor => "cursor",
     };
     format!(
         "graphersal-memory {command} --harness {name}: not implemented yet (planned in stage \
-         M7: other harnesses); Claude Code is supported."
+         M7: other harnesses); Claude Code and opencode are supported."
     )
 }
 
@@ -119,12 +120,19 @@ pub fn run_cli(
             enable_develop,
             summaries,
         } => {
-            if *harness != Harness::ClaudeCode {
-                let _ = writeln!(stderr, "{}", harness_not_implemented(name, *harness));
-                return EXIT_NOT_IMPLEMENTED;
-            }
+            let harnesses = match harness {
+                None => None,
+                Some(h) => match h.kinds() {
+                    Some(kinds) => Some(kinds),
+                    None => {
+                        let _ = writeln!(stderr, "{}", harness_not_implemented(name, *h));
+                        return EXIT_NOT_IMPLEMENTED;
+                    }
+                },
+            };
             let terminal = terminal();
             let options = InstallOptions {
+                harnesses,
                 dry_run: *dry_run,
                 yes: *yes,
                 language: language.map(crate::cli::LanguageArg::language),
@@ -155,11 +163,18 @@ pub fn run_cli(
             disable_develop,
             no_export,
         } => {
-            if *harness != Harness::ClaudeCode {
-                let _ = writeln!(stderr, "{}", harness_not_implemented(name, *harness));
-                return EXIT_NOT_IMPLEMENTED;
-            }
+            let harnesses = match harness {
+                None => None,
+                Some(h) => match h.kinds() {
+                    Some(kinds) => Some(kinds),
+                    None => {
+                        let _ = writeln!(stderr, "{}", harness_not_implemented(name, *h));
+                        return EXIT_NOT_IMPLEMENTED;
+                    }
+                },
+            };
             let options = UninstallOptions {
+                harnesses,
                 dry_run: *dry_run,
                 yes: *yes,
                 purge: *purge,
@@ -184,14 +199,19 @@ pub fn run_cli(
             to_files: true,
             project,
         } => {
-            if *harness != Harness::ClaudeCode {
-                let _ = writeln!(stderr, "{}", harness_not_implemented(name, *harness));
-                return EXIT_NOT_IMPLEMENTED;
-            }
+            let kind = match harness {
+                Harness::ClaudeCode => crate::agents::Kind::ClaudeCode,
+                Harness::Opencode => crate::agents::Kind::OpenCode,
+                other => {
+                    let _ = writeln!(stderr, "{}", harness_not_implemented(name, *other));
+                    return EXIT_NOT_IMPLEMENTED;
+                }
+            };
             setup(cli).and_then(|setup| {
                 let mut source = DaemonSource(setup_location(&setup));
                 export_files(
                     &setup,
+                    kind,
                     project.as_deref(),
                     *dry_run,
                     &mut source,
@@ -217,7 +237,9 @@ pub fn run_cli(
         Command::Summaries { action } => setup(cli).and_then(|setup| {
             run_summaries(&setup, action, &mut BufReader::new(stdin), &mut stdout)
         }),
-        Command::Hook { event } => return run_hook(cli, *event, stdin, &mut stdout, stderr),
+        Command::Hook { event, harness } => {
+            return run_hook(cli, *event, *harness, stdin, &mut stdout, stderr);
+        }
         Command::Mcp {
             profile,
             no_daemon: true,
@@ -318,6 +340,7 @@ fn setup(cli: &Cli) -> Result<Setup, String> {
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let (data_dir, run_dir) = dirs(cli)?;
     let paths = ClaudePaths::resolve(&env)?;
+    let opencode = crate::opencode::OpenCodePaths::resolve(&env)?;
     let exe =
         std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
     let mut dir_args = Vec::new();
@@ -331,6 +354,8 @@ fn setup(cli: &Cli) -> Result<Setup, String> {
     }
     Ok(Setup {
         paths,
+        opencode,
+        search_path: None,
         data_dir,
         run_dir,
         exe: mcp::canonical(&exe),
@@ -368,6 +393,7 @@ impl crate::export::Source for DaemonSource {
 /// `export --to-files [--project ROOT]`.
 pub fn export_files(
     setup: &Setup,
+    kind: crate::agents::Kind,
     project: Option<&Path>,
     dry_run: bool,
     source: &mut dyn crate::export::Source,
@@ -390,7 +416,8 @@ pub fn export_files(
         None => String::new(),
     };
     let rows = source.memories(&id)?;
-    let agent = crate::agents::ClaudeCode::new(setup.paths.clone());
+    let agent = setup.agent_of(kind);
+    let agent = agent.as_ref();
     if dry_run {
         let projects: std::collections::BTreeSet<&str> = rows
             .iter()
@@ -400,11 +427,11 @@ pub fn export_files(
         let _ = writeln!(
             out,
             "Dry run: {} memories of {} project(s) and {} global one(s) would be written into \
-             {}'s file memory; nothing was written.",
+             {}; nothing was written.",
             rows.iter().filter(|r| !r.project.is_empty()).count(),
             projects.len(),
             rows.iter().filter(|r| r.project.is_empty()).count(),
-            crate::agents::Agent::display_name(&agent)
+            export_target(agent)
         );
         return Ok(0);
     }
@@ -412,15 +439,47 @@ pub fn export_files(
         let _ = writeln!(out, "Nothing to export: the graph holds no memories.");
         return Ok(0);
     }
-    let report = crate::export::write(&agent, &setup.data_dir, &rows)?;
+    let report = crate::export::write(agent, &setup.data_dir, &rows)?;
     for line in report.lines() {
         let _ = writeln!(out, "{line}");
+    }
+    if !agent.has_file_memory() {
+        let _ = writeln!(out, "{}", export_note(agent));
     }
     Ok(if report.problems.is_empty() {
         0
     } else {
         EXIT_FAILED
     })
+}
+
+/// Where the export of `agent` goes, for messages.
+pub fn export_target(agent: &dyn crate::agents::Agent) -> String {
+    if agent.has_file_memory() {
+        format!("{}'s file memory", agent.display_name())
+    } else {
+        format!(
+            "readable Markdown files under {}",
+            agent
+                .global_memory_file()
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        )
+    }
+}
+
+/// What to do with an export for a harness without file memory.
+pub fn export_note(agent: &dyn crate::agents::Agent) -> String {
+    format!(
+        "{} has no file memory: the export is plain Markdown (per project MEMORY.md and one file \
+         per memory, the global ones in {}). It is not loaded automatically; to give the agent a \
+         file, add its path to `instructions` in the agent's configuration. `graphersal-memory \
+         export --to-files --harness {}` writes it again.",
+        agent.display_name(),
+        agent.global_memory_file().display(),
+        agent.id()
+    )
 }
 
 /// `projects list` and `projects merge`.
@@ -611,16 +670,22 @@ fn setup_location(setup: &Setup) -> DaemonLocation {
 /// `import --sessions`: queues the indexing of every finished session in the daemon (starting
 /// it) and shows the progress until the run is done.
 pub fn import_sessions(setup: &Setup, dry_run: bool, out: &mut dyn Write) -> Result<u8, String> {
-    let request = sessions::Request::new(&setup.paths.projects);
-    let (found, active, todo, unchanged) = sessions::plan(&request, &setup.data_dir)?;
-    let _ = writeln!(
-        out,
-        "{found} session transcript{} under {}: {todo} new or changed, {unchanged} unchanged, \
-         {active} still being written (indexed once unchanged for {} minutes)",
-        if found == 1 { "" } else { "s" },
-        setup.paths.projects.display(),
-        sessions::IDLE.as_secs() / 60
-    );
+    let mut requests = Vec::new();
+    for kind in session_harnesses(setup) {
+        let dir = setup.agent_of(kind).projects_dir().to_path_buf();
+        let request = sessions::Request::for_harness(kind, &dir);
+        let (found, active, todo, unchanged) = sessions::plan(&request, &setup.data_dir)?;
+        let _ = writeln!(
+            out,
+            "{}: {found} session{} in {}: {todo} new or changed, {unchanged} unchanged, \
+             {active} still being written (indexed once unchanged for {} minutes)",
+            kind.display_name(),
+            if found == 1 { "" } else { "s" },
+            dir.display(),
+            sessions::IDLE.as_secs() / 60
+        );
+        requests.push(request);
+    }
     let settings = Config::load(&setup.data_dir)?;
     let _ = writeln!(
         out,
@@ -636,56 +701,136 @@ pub fn import_sessions(setup: &Setup, dry_run: bool, out: &mut dyn Write) -> Res
         let _ = writeln!(out, "Dry run: nothing was indexed.");
         return Ok(0);
     }
-    let answer = shim::request(&setup_location(setup), &request.to_control())?;
-    let Some(run) = answer["run"].as_u64() else {
-        return Err(format!(
-            "the daemon did not take the request: {}",
-            answer["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown answer")
-        ));
-    };
-    let mut shown = String::new();
-    loop {
-        let status = shim::request_running(
-            &setup.run_dir,
-            &serde_json::json!({"protocol": protocol::PROTOCOL, "control": sessions::CONTROL_STATUS}),
-        )?
-        .ok_or("the daemon stopped while indexing; see its log")?;
-        let report = &status["report"];
-        let line = format!(
-            "  {}: {}/{} ({} indexed, {} unchanged, {} summarized)",
-            report["phase"].as_str().unwrap_or("queued"),
-            report["done"],
-            report["total"],
-            report["indexed"],
-            report["unchanged"],
-            report["summarized"]
-        );
-        if line != shown {
-            let _ = writeln!(out, "{line}");
-            let _ = out.flush();
-            shown = line;
-        }
-        if status["completed"].as_u64().unwrap_or(0) >= run {
-            for problem in report["problems"].as_array().into_iter().flatten() {
-                let _ = writeln!(out, "  problem: {}", problem.as_str().unwrap_or_default());
-            }
-            let _ = writeln!(
-                out,
-                "Done: {} sessions indexed ({} turns), {} unchanged, {} summarized.",
-                report["indexed"], report["turns"], report["unchanged"], report["summarized"]
+    let mut totals = [0u64; 4];
+    let mut failed = false;
+    for request in &requests {
+        let answer = shim::request(&setup_location(setup), &request.to_control())?;
+        let Some(run) = answer["run"].as_u64() else {
+            return Err(format!(
+                "the daemon did not take the request: {}",
+                answer["error"]["message"]
+                    .as_str()
+                    .unwrap_or("unknown answer")
+            ));
+        };
+        let _ = writeln!(out, "{}:", request.harness.display_name());
+        let mut shown = String::new();
+        loop {
+            let status = shim::request_running(
+                &setup.run_dir,
+                &serde_json::json!({"protocol": protocol::PROTOCOL, "control": sessions::CONTROL_STATUS}),
+            )?
+            .ok_or("the daemon stopped while indexing; see its log")?;
+            let report = &status["report"];
+            let done = status["completed"].as_u64().unwrap_or(0) >= run;
+            let line = format!(
+                "  {}: {}/{} ({} indexed, {} unchanged, {} summarized)",
+                report["phase"].as_str().unwrap_or("queued"),
+                report["done"],
+                report["total"],
+                report["indexed"],
+                report["unchanged"],
+                report["summarized"]
             );
-            let failed = report["problems"].as_array().is_some_and(|p| {
-                p.iter().any(|p| {
-                    !p.as_str()
-                        .unwrap_or_default()
-                        .contains("monthly budget is reached")
-                })
-            });
-            return Ok(if failed { EXIT_FAILED } else { 0 });
+            if line != shown && (done || report["phase"].is_string()) {
+                let _ = writeln!(out, "{line}");
+                let _ = out.flush();
+                shown = line;
+            }
+            if done {
+                for problem in report["problems"].as_array().into_iter().flatten() {
+                    let _ = writeln!(out, "  problem: {}", problem.as_str().unwrap_or_default());
+                }
+                for (total, key) in
+                    totals
+                        .iter_mut()
+                        .zip(["indexed", "turns", "unchanged", "summarized"])
+                {
+                    *total += report[key].as_u64().unwrap_or(0);
+                }
+                failed |= report["problems"].as_array().is_some_and(|p| {
+                    p.iter().any(|p| {
+                        !p.as_str()
+                            .unwrap_or_default()
+                            .contains("monthly budget is reached")
+                    })
+                });
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
         }
-        std::thread::sleep(Duration::from_millis(250));
+    }
+    let _ = writeln!(
+        out,
+        "Done: {} sessions indexed ({} turns), {} unchanged, {} summarized.",
+        totals[0], totals[1], totals[2], totals[3]
+    );
+    Ok(if failed { EXIT_FAILED } else { 0 })
+}
+
+/// The harnesses whose sessions are indexed: those graphersal-memory is installed in, else
+/// those found on this machine, else Claude Code.
+pub fn session_harnesses(setup: &Setup) -> Vec<crate::agents::Kind> {
+    let installed = setup.installed();
+    if !installed.is_empty() {
+        return installed;
+    }
+    // Found but not set up: only a harness that has sessions to read.
+    let detected: Vec<_> = setup
+        .detected()
+        .into_iter()
+        .filter(|kind| *kind != crate::agents::Kind::OpenCode || setup.opencode.db.is_file())
+        .collect();
+    if detected.is_empty() {
+        vec![crate::agents::Kind::ClaudeCode]
+    } else {
+        detected
+    }
+}
+
+/// The estimate of summarizing the sessions of `kinds`.
+pub fn estimate_all(
+    setup: &Setup,
+    kinds: &[crate::agents::Kind],
+    since: Option<&str>,
+) -> Result<sessions::Estimate, String> {
+    let mut total = sessions::Estimate::default();
+    for kind in kinds {
+        let dir = setup.agent_of(*kind).projects_dir().to_path_buf();
+        let e = sessions::estimate_for(*kind, &dir, &setup.data_dir, sessions::IDLE, since)?;
+        total.sessions += e.sessions;
+        total.pending += e.pending;
+        total.too_short += e.too_short;
+        total.usd += e.usd;
+    }
+    Ok(total)
+}
+
+/// Indexed and summarized sessions over every harness's state.
+fn session_counts(data_dir: &Path) -> Result<(usize, usize), String> {
+    let mut counts = (0, 0);
+    for kind in crate::agents::Kind::ALL {
+        let state = sessions::State::load_for(data_dir, kind)?;
+        counts.0 += state.indexed();
+        counts.1 += state.summarized();
+    }
+    Ok(counts)
+}
+
+/// One estimate line for summaries through `command`: $0 for a free model of opencode Zen,
+/// else [`estimate_line`].
+pub fn estimate_line_for(estimate: &sessions::Estimate, command: &[String]) -> String {
+    if crate::opencode::free_model(command) {
+        format!(
+            "{} finished session{}, {} without a summary: $0.00 (`{}` uses a free model of \
+             opencode Zen, free for a limited time; the monthly budget still applies)",
+            estimate.sessions,
+            if estimate.sessions == 1 { "" } else { "s" },
+            estimate.pending,
+            command.join(" ")
+        )
+    } else {
+        estimate_line(estimate)
     }
 }
 
@@ -715,18 +860,15 @@ fn run_summaries(
     out: &mut dyn Write,
 ) -> Result<u8, String> {
     let settings = Config::load(&setup.data_dir)?;
-    let estimate = || {
-        sessions::estimate(
-            &setup.paths.projects,
-            &setup.data_dir,
-            sessions::IDLE,
-            settings.summaries.since.as_deref(),
-        )
-    };
+    let kinds = session_harnesses(setup);
+    let estimate = || estimate_all(setup, &kinds, settings.summaries.since.as_deref());
     let command = settings.summaries.harness_command.join(" ");
+    let line = |estimate: &sessions::Estimate| {
+        estimate_line_for(estimate, &settings.summaries.harness_command)
+    };
     match action {
         SummariesAction::Estimate => {
-            let _ = writeln!(out, "{}", estimate_line(&estimate()?));
+            let _ = writeln!(out, "{}", line(&estimate()?));
             let _ = writeln!(
                 out,
                 "Summaries run through `{command}` with a monthly budget of ${:.2}; nothing was \
@@ -737,7 +879,7 @@ fn run_summaries(
         SummariesAction::Status => {
             let spend = summaries::Spend::load(&setup.data_dir)?;
             let month = summaries::this_month();
-            let state = sessions::State::load(&setup.data_dir)?;
+            let (indexed, summarized) = session_counts(&setup.data_dir)?;
             let _ = writeln!(
                 out,
                 "summaries: {}\nthis month ({month}): ${:.2} spent of ${:.2}, {} summaries\n\
@@ -750,12 +892,12 @@ fn run_summaries(
                 spend.usd(&month),
                 settings.summaries.monthly_budget_usd,
                 spend.calls(&month),
-                state.indexed(),
-                state.summarized()
+                indexed,
+                summarized
             );
         }
         SummariesAction::Enable { budget, yes } => {
-            let _ = writeln!(out, "{}", estimate_line(&estimate()?));
+            let _ = writeln!(out, "{}", line(&estimate()?));
             let cap = budget.unwrap_or(settings.summaries.monthly_budget_usd);
             let _ = writeln!(
                 out,
@@ -796,8 +938,26 @@ pub fn write_summaries(setup: &Setup, enabled: bool, budget: Option<f64>) -> Res
 
 /// `doctor`: every check with its fix; exit code 1 when a problem was found.
 fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
-    let findings = install::doctor(setup);
-    let _ = writeln!(out, "graphersal-memory doctor (Claude Code)\n");
+    let kinds = session_harnesses(setup);
+    let mut findings = Vec::new();
+    if kinds.contains(&crate::agents::Kind::OpenCode) {
+        findings.extend(crate::opencode::install::doctor(setup));
+    }
+    // Claude Code's checks end with the shared ones (settings, model, daemon, registry).
+    if kinds.contains(&crate::agents::Kind::ClaudeCode) {
+        findings.extend(install::doctor(setup));
+    } else {
+        findings.extend(install::shared_doctor(setup));
+    }
+    let _ = writeln!(
+        out,
+        "graphersal-memory doctor ({})\n",
+        kinds
+            .iter()
+            .map(|k| k.display_name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     let mut problems = 0;
     for finding in &findings {
         if finding.problem {
@@ -834,6 +994,7 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
 fn run_hook(
     cli: &Cli,
     event: hook::HookEvent,
+    harness: Harness,
     stdin: impl Read + Send + 'static,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -857,6 +1018,16 @@ fn run_hook(
                         .to_string())
                 }
             });
+            if harness == Harness::Opencode {
+                return hook::run_opencode(
+                    event,
+                    setup.opencode.db.clone(),
+                    Some(enqueue),
+                    stdin,
+                    stdout,
+                    stderr,
+                );
+            }
             hook::run_with(
                 event,
                 Ok(setup.paths.clone()),
@@ -905,6 +1076,7 @@ pub struct BenchRequest {
 pub fn bench_options(
     data_dir: &Path,
     claude: ClaudePaths,
+    opencode: crate::opencode::OpenCodePaths,
     exe: PathBuf,
     project: String,
     request: &BenchRequest,
@@ -919,6 +1091,7 @@ pub fn bench_options(
         yes: request.yes,
         project,
         claude,
+        opencode,
         data_dir: data_dir.to_path_buf(),
         exe,
         harness_command: settings.summaries.harness_command,
@@ -948,6 +1121,7 @@ fn run_bench(
     let options = bench_options(
         &data_dir,
         claude,
+        crate::opencode::OpenCodePaths::resolve(&env)?,
         mcp::canonical(&exe),
         project(request.project.as_deref())?,
         request,
@@ -1127,15 +1301,13 @@ pub fn status_text(
         }
         Err(err) => format!("settings: {err}"),
     };
-    let sessions = match (sessions::State::load(data_dir), Config::load(data_dir)) {
-        (Ok(state), Ok(config)) => {
+    let sessions = match (session_counts(data_dir), Config::load(data_dir)) {
+        (Ok((indexed, summarized)), Ok(config)) => {
             let spend = summaries::Spend::load(data_dir)
                 .map(|spend| spend.usd(&summaries::this_month()))
                 .unwrap_or(0.0);
             format!(
-                "sessions: {} indexed, {} summarized; summaries {}",
-                state.indexed(),
-                state.summarized(),
+                "sessions: {indexed} indexed, {summarized} summarized; summaries {}",
                 if config.summaries.enabled {
                     format!(
                         "on (${spend:.2} of ${:.2} spent this month)",
@@ -1154,7 +1326,23 @@ pub fn status_text(
     );
     match setup {
         Ok(setup) => {
-            for line in install::status_lines(setup) {
+            let kinds = setup.installed();
+            let mut lines = Vec::new();
+            if kinds.is_empty() || kinds.contains(&crate::agents::Kind::ClaudeCode) {
+                lines.extend(install::status_lines(setup));
+            } else {
+                lines.extend(install::shared_status_lines(setup));
+            }
+            if kinds.contains(&crate::agents::Kind::OpenCode) {
+                lines.extend(crate::opencode::install::status_lines(setup));
+            } else if setup.detected().contains(&crate::agents::Kind::OpenCode) {
+                lines.push(
+                    "opencode: found, not set up (`graphersal-memory install --harness \
+                     opencode`)"
+                        .to_string(),
+                );
+            }
+            for line in lines {
                 text.push_str(&line);
                 text.push('\n');
             }

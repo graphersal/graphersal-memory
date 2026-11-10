@@ -7,6 +7,12 @@
 //! and elements in the text and edits only there. An insertion followed by the removal of the
 //! same member gives the original bytes back. The result of every edit is parsed again before
 //! it is returned, so an edit never produces invalid JSON.
+//!
+//! JSONC (opencode's `opencode.jsonc`, and comments people put into `opencode.json`): `//` and
+//! `/* */` comments and trailing commas are accepted. They are blanked out of a copy of the
+//! text with the same byte offsets ([`clean`]); the spans are located in that copy and the
+//! edits applied to the original, so every comment stays where it was. Strict JSON in gives
+//! strict JSON out: an edit never adds a comment or a trailing comma.
 
 use serde_json::Value;
 
@@ -69,9 +75,87 @@ impl Node {
     }
 }
 
-/// Parses `text` into located nodes. The whole text must be one JSON value (surrounding
-/// whitespace allowed).
+/// `text` with its comments and trailing commas replaced by spaces (line ends kept), so every
+/// byte offset stays the same; strict JSON comes back unchanged.
+pub fn clean(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0;
+    // The position of the last comma outside strings, while only blanks followed it.
+    let mut pending_comma: Option<usize> = None;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                pending_comma = None;
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' => i += 2,
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    if bytes[i] != b'\r' {
+                        out[i] = b' ';
+                    }
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let start = i;
+                i += 2;
+                while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                let end = (i + 2).min(bytes.len());
+                for byte in &mut out[start..end] {
+                    if *byte != b'\n' && *byte != b'\r' {
+                        *byte = b' ';
+                    }
+                }
+                i = end;
+            }
+            b',' => {
+                pending_comma = Some(i);
+                i += 1;
+            }
+            b'}' | b']' => {
+                if let Some(comma) = pending_comma.take() {
+                    out[comma] = b' ';
+                }
+                i += 1;
+            }
+            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            _ => {
+                pending_comma = None;
+                i += 1;
+            }
+        }
+    }
+    // Only ASCII bytes outside strings were replaced by ASCII spaces: still UTF-8.
+    String::from_utf8(out).unwrap_or_else(|_| text.to_string())
+}
+
+/// The value of JSON or JSONC `text` (comments and trailing commas allowed).
+pub fn value_of(text: &str) -> Result<Value, serde_json::Error> {
+    serde_json::from_str(&clean(text))
+}
+
+/// Parses `text` (JSON or JSONC) into located nodes. The whole text must be one JSON value
+/// (surrounding whitespace and comments allowed).
 pub fn parse(text: &str) -> Result<Node, String> {
+    let cleaned = clean(text);
+    parse_clean(&cleaned)
+}
+
+/// [`parse`] of a text [`clean`] already went over.
+fn parse_clean(text: &str) -> Result<Node, String> {
     let mut parser = Parser {
         bytes: text.as_bytes(),
         text,
@@ -341,10 +425,15 @@ pub fn locate<'a>(root: &'a Node, path: &[&str]) -> Option<&'a Node> {
     Some(node)
 }
 
-/// Checks that `text` is valid JSON (the guard after every edit).
+/// Whether `text` is only JSON whitespace.
+fn blank(text: &str) -> bool {
+    text.bytes()
+        .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+}
+
+/// Checks that `text` is valid JSON or JSONC (the guard after every edit).
 fn checked(text: String) -> Result<String, String> {
-    serde_json::from_str::<Value>(&text)
-        .map_err(|err| format!("the edit would produce invalid JSON: {err}"))?;
+    value_of(&text).map_err(|err| format!("the edit would produce invalid JSON: {err}"))?;
     Ok(text)
 }
 
@@ -369,7 +458,8 @@ pub fn set_member(
     key: &str,
     value: &Value,
 ) -> Result<Option<(String, Vec<String>)>, String> {
-    let root = parse(text)?;
+    let cleaned = clean(text);
+    let root = parse_clean(&cleaned)?;
     let unit = indent_unit(text);
     // The deepest existing object along the path.
     let mut existing = 0;
@@ -408,7 +498,8 @@ pub fn set_member(
         member_key = path[existing].to_string();
     } else if let Some(member) = members.iter().find(|m| m.key == key) {
         let old: Value = serde_json::from_str(
-            text.get(member.value.start..member.value.end)
+            cleaned
+                .get(member.value.start..member.value.end)
                 .ok_or("bad value span")?,
         )
         .map_err(|err| err.to_string())?;
@@ -452,6 +543,22 @@ fn insert_into(
             splice(text, end, end, &format!(",\n{indent}{item}"))
         }
         (Some(end), None) => splice(text, end, end, &format!(", {item}")),
+        // An empty container holding a comment: the item goes right after the bracket, the
+        // comment stays.
+        (None, unit) if !blank(text.get(node.start + 1..node.end - 1).unwrap_or_default()) => {
+            match unit {
+                Some(unit) => {
+                    let inner = unit.repeat(depth + 1);
+                    splice(
+                        text,
+                        node.start + 1,
+                        node.start + 1,
+                        &format!("\n{inner}{item}"),
+                    )
+                }
+                None => splice(text, node.start + 1, node.start + 1, item),
+            }
+        }
         (None, Some(unit)) => {
             let inner = unit.repeat(depth + 1);
             let outer = unit.repeat(depth);
@@ -519,7 +626,21 @@ fn remove_item(
         return Err("no such item".to_string());
     };
     if items.len() == 1 {
-        return splice(text, node.start + 1, node.end - 1, "");
+        let before = text.get(node.start + 1..start).unwrap_or_default();
+        let after = text.get(end..node.end - 1).unwrap_or_default();
+        if blank(before) && blank(after) {
+            return splice(text, node.start + 1, node.end - 1, "");
+        }
+        // A comment beside the only item stays: the item goes with the blanks before it (and
+        // its trailing comma).
+        let from = node.start + 1 + before.trim_end_matches([' ', '\t', '\n', '\r']).len();
+        let mut to = end;
+        let rest = text.get(end..).unwrap_or_default();
+        let gap = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+        if rest[gap..].starts_with(',') {
+            to = end + gap + 1;
+        }
+        return splice(text, from, to, "");
     }
     if index + 1 == items.len() {
         // The last item: from the end of the previous one (its comma goes too).
@@ -556,7 +677,8 @@ pub fn remove_elements(
     let mut text = text.to_string();
     let mut changed = false;
     loop {
-        let root = parse(&text)?;
+        let cleaned = clean(&text);
+        let root = parse_clean(&cleaned)?;
         let Some(array) = locate(&root, path) else {
             break;
         };
@@ -564,7 +686,8 @@ pub fn remove_elements(
             break;
         };
         let found = elements.iter().position(|element| {
-            text.get(element.start..element.end)
+            cleaned
+                .get(element.start..element.end)
                 .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
                 .is_some_and(|value| ours(&value))
         });
@@ -720,5 +843,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(new, "{\"a\\\"b\": \"}{,\", \"m\": {\"k\": true}}");
+    }
+    #[test]
+    fn jsonc_comments_and_trailing_commas_stay_and_round_trip() {
+        let original = "{\n  // my servers\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"mcp\": {\n    /* keep */ \"other\": {\"type\": \"local\", \"command\": [\"x\"],},\n  },\n}\n";
+        assert!(value_of(original).is_ok());
+        assert_eq!(clean(original).len(), original.len());
+        let entry = json!({"type": "local", "command": ["/bin/gm", "mcp"], "enabled": true});
+        let (inserted, created) = set_member(original, &["mcp"], "graphersal-memory", &entry)
+            .unwrap()
+            .unwrap();
+        assert!(created.is_empty());
+        assert!(inserted.contains("// my servers") && inserted.contains("/* keep */"));
+        assert_eq!(
+            value_of(&inserted).unwrap()["mcp"]["graphersal-memory"],
+            entry
+        );
+        let removed = remove_member(&inserted, &["mcp"], "graphersal-memory")
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed, original);
+        // A missing object is created and removed again.
+        let (with_mcp, created) =
+            set_member("{\n  // only a comment\n}\n", &["mcp"], "k", &json!(1))
+                .unwrap()
+                .unwrap();
+        assert_eq!(created, vec!["mcp".to_string()]);
+        assert!(with_mcp.contains("// only a comment"));
+        let back = remove_member(&with_mcp, &[], "mcp").unwrap().unwrap();
+        assert!(back.contains("// only a comment"));
+        assert!(value_of(&back).unwrap().as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn strings_that_look_like_comments_are_kept() {
+        let text = "{\"url\": \"http://x/*y*/\", \"a\": [1,]}";
+        let cleaned = clean(text);
+        assert!(cleaned.contains("http://x/*y*/"));
+        assert_eq!(value_of(text).unwrap()["a"], json!([1]));
+        assert_eq!(clean("{\"a\": 1}"), "{\"a\": 1}");
     }
 }
