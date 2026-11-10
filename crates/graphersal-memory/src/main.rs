@@ -45,12 +45,14 @@ mod projects;
 mod prompt;
 mod protocol;
 mod registry;
+mod session_sync;
 mod sessions;
 mod shim;
 mod store;
 mod summaries;
 mod tomledit;
 mod transcript;
+mod winshell;
 
 use std::process::ExitCode;
 

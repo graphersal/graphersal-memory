@@ -466,3 +466,167 @@ fn the_hooks_do_nothing_inside_a_summary_run() {
     assert!(!env.data_dir().exists());
     assert!(!env.run_dir().join("daemon.sock").exists());
 }
+
+/// An MCP server whose stdin the test closes (the session's end) to see what it does then.
+struct Closable {
+    mcp: Option<Mcp>,
+}
+
+impl Closable {
+    fn spawn(mut command: Command) -> Self {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut mcp = Mcp {
+            input: child.stdin.take().unwrap(),
+            output: BufReader::new(child.stdout.take().unwrap()),
+            child,
+            next: 1,
+        };
+        let init = mcp.request(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "test", "version": "0"}}),
+        );
+        assert!(init["result"].is_object(), "{init}");
+        Self { mcp: Some(mcp) }
+    }
+
+    fn call(&mut self, name: &str, arguments: Value) -> Value {
+        self.mcp.as_mut().unwrap().call(name, arguments)
+    }
+
+    /// Closes stdin and waits for the exit: its status and stderr.
+    fn close(mut self) -> (std::process::ExitStatus, String) {
+        let mcp = self.mcp.take().unwrap();
+        // The input is swapped for a pipe of a process that ends at once, so the server's own
+        // stdin is closed while `Mcp` (which kills its child when dropped) stays whole.
+        let mut mcp = mcp;
+        let mut stand_in = Command::new("true").stdin(Stdio::piped()).spawn().unwrap();
+        let input = std::mem::replace(&mut mcp.input, stand_in.stdin.take().unwrap());
+        drop(input);
+        let mut stderr = String::new();
+        if let Some(mut err) = mcp.child.stderr.take() {
+            use std::io::Read;
+            err.read_to_string(&mut stderr).unwrap();
+        }
+        let status = mcp.child.wait().unwrap();
+        let _ = stand_in.wait();
+        (status, stderr)
+    }
+}
+
+/// The project's memory files of Claude Code (one memory).
+fn write_memory_files(env: &Env, work: &Path) {
+    let slug: String = work
+        .display()
+        .to_string()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let memory = env
+        .home()
+        .join(".claude/projects")
+        .join(slug)
+        .join("memory");
+    std::fs::create_dir_all(&memory).unwrap();
+    std::fs::write(
+        memory.join("MEMORY.md"),
+        "- [Release day](release-day.md) — when we release\n",
+    )
+    .unwrap();
+    std::fs::write(
+        memory.join("release-day.md"),
+        "---\nname: release-day\ndescription: We release on Mondays\nmetadata:\n  type: project\n\
+         ---\n\nMondays.\n",
+    )
+    .unwrap();
+}
+
+/// The daemon's indexing status.
+fn sessions_status(env: &Env) -> Value {
+    env.control(&json!({"protocol": 1, "control": "sessions_status"}))
+        .unwrap_or(Value::Null)
+}
+
+/// Without any hook, Claude Code's MCP server alone: its start imports the project's memory
+/// files and queues the indexing, its end (stdin closed) queues the indexing again; a hook run
+/// afterwards changes nothing.
+#[test]
+fn the_mcp_server_does_the_hooks_work_at_session_start_and_end() {
+    let env = Env::new();
+    let (work, _) = env.project();
+    write_memory_files(&env, &work);
+    let mut command = env.command(&["mcp"]);
+    command.env("CLAUDECODE", "1").current_dir(&work);
+    let mut mcp = Closable::spawn(command);
+    // The start: the transcript (finished a day ago) is indexed, the memory file imported.
+    let report = env.wait_for_indexing();
+    assert_eq!(report["indexed"], 1, "{report}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let memories = loop {
+        let found = mcp.call("memories", json!({"text": "release day", "k": 5}));
+        if found.as_array().is_some_and(|rows| !rows.is_empty()) {
+            break found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the memory file was not imported"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(memories[0]["slug"], "release-day", "{memories}");
+    let requested = sessions_status(&env)["requested"].as_u64().unwrap();
+    // The end: stdin closes, the shim queues the indexing before it exits.
+    let (status, stderr) = mcp.close();
+    assert!(status.success(), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+    let report = env.wait_for_indexing();
+    let status = sessions_status(&env);
+    assert_eq!(
+        status["requested"].as_u64().unwrap(),
+        requested + 1,
+        "{status}"
+    );
+    assert_eq!(report["unchanged"], 1, "{report}");
+    assert_eq!(report["indexed"], 0, "{report}");
+    // The hook too (both paths run when the hooks work): nothing imported twice.
+    let (hook, _) = env.hook(
+        "session-start",
+        &json!({"cwd": work.display().to_string(), "session_id": "y"}),
+    );
+    assert!(hook.status.success(), "{}", text(&hook));
+    let line = String::from_utf8_lossy(&hook.stdout);
+    assert!(line.starts_with("graphersal-memory:"), "{line}");
+    assert!(!line.contains("Imported"), "{line}");
+    let report = env.wait_for_indexing();
+    assert_eq!(report["indexed"], 0, "{report}");
+    let mut mcp = env.mcp(&work);
+    let all = mcp.call("memories", json!({"k": 50}));
+    assert_eq!(all.as_array().map(Vec::len), Some(1), "{all}");
+}
+
+/// Inside a summary run (`GRAPHERSAL_MEMORY_HOOK=off`) and for a harness that is neither known
+/// nor set up, the MCP server does nothing beside serving.
+#[test]
+fn the_mcp_server_does_nothing_else_inside_a_summary_run() {
+    let env = Env::new();
+    let (work, _) = env.project();
+    write_memory_files(&env, &work);
+    for extra in [Some(("GRAPHERSAL_MEMORY_HOOK", "off")), None] {
+        let mut command = env.command(&["mcp"]);
+        if let Some((name, value)) = extra {
+            command.env("CLAUDECODE", "1").env(name, value);
+        }
+        command.current_dir(&work);
+        let mut mcp = Closable::spawn(command);
+        let all = mcp.call("memories", json!({"k": 50}));
+        assert_eq!(all, json!([]), "{all}");
+        let (status, stderr) = mcp.close();
+        assert!(status.success(), "{stderr}");
+        assert_eq!(sessions_status(&env)["requested"], 0);
+    }
+}

@@ -331,14 +331,63 @@ pub fn open(options: &ShimOptions) -> Result<(Stream, BufReader<Stream>), String
     }
 }
 
+/// What a shim does beside the MCP stream at a session's start and end (`crate::session_sync`):
+/// each returns notes for stderr.
+pub struct Events {
+    /// Runs on a thread of its own once the handshake succeeded.
+    pub start: Box<dyn FnOnce() -> Vec<String> + Send>,
+    /// Runs after the input ended (the session ended), once `start` finished or
+    /// [`END_WAIT`] passed.
+    pub end: Box<dyn FnOnce() -> Vec<String> + Send>,
+}
+
+/// How long the end waits for the start's work still running (an import of many files).
+pub const END_WAIT: Duration = Duration::from_secs(5);
+
 /// Connects (starting the daemon if needed), hands over, then relays `input` to the daemon and
-/// the daemon's answers to `output` until the input ends and the daemon has answered.
-pub fn run(
+/// the daemon's answers to `output` until the input ends and the daemon has answered; with
+/// `events` at the start and end of the session (their notes go to `notes`).
+pub fn run_with(
     options: &ShimOptions,
+    input: impl Read + Send + 'static,
+    output: impl Write,
+    events: Option<Events>,
+    notes: &mut dyn Write,
+) -> Result<(), String> {
+    let (stream, reader) = open(options)?;
+    let Some(events) = events else {
+        return relay(options, stream, reader, input, output);
+    };
+    let (started, start_done) = std::sync::mpsc::channel();
+    let start = events.start;
+    let spawned = std::thread::Builder::new()
+        .name("shim-start".into())
+        .spawn(move || {
+            let _ = started.send(start());
+        });
+    let relayed = relay(options, stream, reader, input, output);
+    let mut lines = match spawned {
+        Ok(_) => start_done.recv_timeout(END_WAIT).unwrap_or_default(),
+        Err(err) => vec![format!("cannot start the session start's work: {err}")],
+    };
+    // The daemon is gone when the relay failed: nothing to queue.
+    if relayed.is_ok() {
+        lines.extend((events.end)());
+    }
+    for line in lines {
+        let _ = writeln!(notes, "graphersal-memory mcp: {line}");
+    }
+    relayed
+}
+
+/// The byte relay between the harness and the daemon.
+fn relay(
+    options: &ShimOptions,
+    stream: Stream,
+    mut reader: BufReader<Stream>,
     input: impl Read + Send + 'static,
     mut output: impl Write,
 ) -> Result<(), String> {
-    let (stream, mut reader) = open(options)?;
     let mut to_daemon = stream
         .try_clone()
         .map_err(|err| format!("cannot use the daemon's socket: {err}"))?;

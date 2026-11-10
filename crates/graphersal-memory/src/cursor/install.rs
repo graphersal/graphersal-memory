@@ -131,13 +131,14 @@ pub fn mcp_entry(setup: &Setup, profile: &str) -> Value {
 }
 
 /// The hook command of an event (`session-start`, `session-end`). On Windows Cursor runs hook
-/// commands through PowerShell (cursor.com/docs/hooks), so the command is PowerShell's.
+/// commands through PowerShell (cursor.com/docs/hooks): the words every shell runs unquoted
+/// when there are such (`crate::winshell`), else PowerShell's `& '...'` form.
 pub fn hook_command(setup: &Setup, event: &str) -> String {
     hook_command_for(setup, event, cfg!(windows))
 }
 
 fn hook_command_for(setup: &Setup, event: &str, powershell: bool) -> String {
-    let command = if powershell {
+    let command = if powershell && setup.hooks.plain.is_none() {
         setup.powershell_hook_command(event)
     } else {
         setup.hook_command(event)

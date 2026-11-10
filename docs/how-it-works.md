@@ -215,8 +215,9 @@ or `GRAPHERSAL_MEMORY_DIR` gets `<data dir>/run`, so each data directory has a d
 ## Past sessions
 
 - **Which sessions.** Every Claude Code transcript `~/.claude/projects/<project>/<session>.jsonl`
-  that is finished: unchanged for 30 minutes, or named by the `SessionEnd` hook. The transcript a
-  running session writes is left for later, and the transcripts of sub-agents (in
+  that is finished: unchanged for 30 minutes, or named by the `SessionEnd` hook. The hooks and the
+  MCP server's start and end ([without hooks](#without-hooks)) ask for the indexing. The
+  transcript a running session writes is left for later, and the transcripts of sub-agents (in
   `<session>/subagents/`, and sub-agent records inside a transcript) are never indexed.
 - **What is kept.** A `session` vertex (`session:<transcript name>`: the title Claude Code
   generated, start and end, branches, the files edited relative to the project, the number of
@@ -299,6 +300,31 @@ A file that already holds the same text is left alone; a file that differs is ke
 graph's version written beside it as `<name>.graphersal.md`; nothing is deleted. Importing an
 export gives the same memories back (a test checks it); links the body does not show get a
 `Related: [[slug]]` line.
+
+### Without hooks
+
+The hooks are optional. Every harness starts the MCP server (`graphersal-memory mcp`) when a
+session starts and closes it when the session ends, so the server does the hooks' work itself:
+
+- **At the start**, right after it connected to the daemon and beside the MCP traffic (the
+  agent never waits for it): it imports the new and changed Claude Code memory files of the
+  session's project, and queues the indexing of finished sessions for every harness
+  graphersal-memory is installed in (else the harness that started it, when it can tell: Claude
+  Code sets `CLAUDECODE`).
+- **At the end** (the harness closes its input): it queues the indexing again, when the daemon
+  still runs.
+- **The start line** the session-start hook prints is covered by the server's instructions,
+  which every MCP client reads at the start: they name the memory tools and say to write
+  memories there, not into memory files.
+
+When the hooks run too, nothing happens twice: the import holds the import lock and skips files
+whose fingerprint it already has, and the daemon merges index requests and skips unchanged
+sessions. Inside a summary run (`GRAPHERSAL_MEMORY_HOOK=off`) the server does nothing of this.
+
+What still needs a hook: the server does not know which transcript is its own session's, so the
+session that just ended is indexed once it has been unchanged for 30 minutes (at a later session
+start or end, or `import --sessions`) instead of right away; the imported-files count in the
+start line; and Cursor's transcripts, which are known only from what its hooks report.
 
 The installation code talks to the harness through one interface (`src/agents.rs`: its MCP
 configuration file, settings file, instruction file, projects directory, memory directory of a

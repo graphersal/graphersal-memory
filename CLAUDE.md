@@ -96,7 +96,20 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     rule block `RULE_BLOCK` with its fingerprinted begin line), the state and backups in
     `<data dir>/install/`, `uninstall` (restore an untouched file from its backup, else remove our
     parts structurally), `inspect`/`status_lines`/`doctor`. The develop server is off by not being
-    registered (Claude Code has no global disabled state);
+    registered (Claude Code has no global disabled state). The hook form (`HookForm` in `Setup`:
+    `posix` in tests, `here` from the machine): on Windows Claude Code's hook groups are the exec
+    form (`command` + `args`, no shell), the other harnesses' commands the `plain` words when
+    there are; `is_our_hook` recognises every form (quoted, plain, bare, PowerShell, exec);
+    `git_bash_findings`/`git_bash_status` for `doctor`/`status` on Windows;
+  - `src/winshell.rs`: Windows shells: `all_shell_words` (the bare name when `PATH` resolves
+    it to this binary, else the forward-slash path, else the directory's 8.3 short path, for each
+    argument too; lookups injected), `short_path` (`GetShortPathNameW`, the crate's second
+    `unsafe`), `find_git_bash` (as Claude Code finds it: `CLAUDE_CODE_GIT_BASH_PATH`, the default
+    Git locations, the `git` on `PATH`; never WSL's bash), `needs_git_bash`;
+  - `src/session_sync.rs`: what the shim does at a session's start and end so that hooks are
+    optional (`plan`: the installed harnesses, else the one from the environment; `start`: the
+    Claude Code memory-file import of the session's project through `hook::import_project`, then
+    one indexing request per harness; `end`: the requests again, only to a running daemon);
   - `src/jsonedit.rs`: minimal-change JSON text edits (insert/remove one member or element, keep
     every other byte), used for the harness's files; `claude mcp add` is not used because it
     rewrites the whole file;
@@ -181,9 +194,11 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     order (the protocol is internal; bump `PROTOCOL` on an incompatible change);
   - `src/shim.rs`: `connect_or_start` (start lock, stale socket only after a failed connect AND a
     free `daemon.pid`, detached spawn, timeout naming the log; on Windows the spawning process's
-    standard handles are made non-inheritable first, `keep_std_handles_from_children`, the one
-    `unsafe` of the crate), the handshake with retries on
-    `restarting`/`stopping`, then a byte relay; `control` (status/stop);
+    standard handles are made non-inheritable first, `keep_std_handles_from_children`, one of the
+    two `unsafe` blocks of the crate), the handshake with retries on
+    `restarting`/`stopping`, then a byte relay (`run_with`, with optional `Events`: the session
+    start's work on a thread after the handshake, the end's after the input closed; notes to
+    stderr, never stdout); `control` (status/stop);
   - `src/daemon.rs`: the daemon: pid lock, socket, one thread per connection, routing by the
     handshake to a `StoreRuntime` (the default store opened at the start, beside the first
     handshake; others on first use) and its profile, the maintenance thread, idle exit (no exit while

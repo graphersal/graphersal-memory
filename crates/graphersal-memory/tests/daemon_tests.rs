@@ -71,6 +71,12 @@ impl Env {
             .env("LOCALAPPDATA", &self.root)
             .env_remove("XDG_RUNTIME_DIR")
             .env_remove("CLAUDECODE")
+            // The harnesses' own locations: a shim's session start looks at the harnesses
+            // installed there (`session_sync`), which must be the temporary home's.
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
             .current_dir(&self.root);
         command
     }

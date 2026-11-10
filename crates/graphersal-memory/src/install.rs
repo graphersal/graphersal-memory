@@ -10,8 +10,9 @@
 //!   `uninstall --disable-develop` unregisters it again.
 //! - **Hooks** in Claude Code's user settings (`~/.claude/settings.json`): one entry in
 //!   `hooks.SessionStart` and one in `hooks.SessionEnd`, each a group with the single command
-//!   `"<this binary>" hook session-start|session-end`. Our entries are recognised by that
-//!   command.
+//!   `"<this binary>" hook session-start|session-end` (on Windows the exec form: `command` =
+//!   this binary, `args` = `["hook", "session-start", ...]`, run without a shell; see
+//!   `crate::winshell`). Our entries are recognised by that command, in either form.
 //! - **The managed rule block** in the user instruction file (`~/.claude/CLAUDE.md`), between
 //!   `<!-- graphersal-memory:begin ... -->` and `<!-- graphersal-memory:end -->`; the begin line
 //!   carries the fingerprint of the block's text, so a hand edit inside is detected and reported
@@ -193,6 +194,8 @@ pub struct Setup {
     /// Arguments that point a started process at an explicitly chosen data or run directory
     /// (`--data-dir X`, `--run-dir Y`); empty for the defaults.
     pub dir_args: Vec<String>,
+    /// How hook commands are written on this machine (`crate::winshell`).
+    pub hooks: HookForm,
     /// Where an embedding model download connects (Hugging Face, or
     /// `GRAPHERSAL_MEMORY_HF_ENDPOINT`).
     pub source: download::Source,
@@ -301,10 +304,35 @@ impl Setup {
         self.agent().mcp_entry(&self.exe, &args)
     }
 
-    /// The hook command of an event (`session-start`, `session-end`).
-    /// The quoted program runs in a POSIX shell (Git Bash on Windows) and in `cmd.exe`.
+    /// The hook command of an event (`session-start`, `session-end`) as one shell command line.
+    /// On Windows, the words every shell runs unquoted when there are such words
+    /// ([`HookForm::plain`]); else the quoted program, which a POSIX shell (Git Bash on
+    /// Windows) and `cmd.exe` run, PowerShell not.
     pub fn hook_command(&self, event: &str) -> String {
-        self.hook_command_with(event, quote, "")
+        match &self.hooks.plain {
+            Some(words) => {
+                let mut command = format!("{} hook {event}", words[0]);
+                for word in &words[1..] {
+                    command.push(' ');
+                    command.push_str(word);
+                }
+                command
+            }
+            None => self.hook_command_with(event, quote, ""),
+        }
+    }
+
+    /// Claude Code's hook command of an event as `install` shows it: the shell command line,
+    /// or on Windows the exec form's program and arguments (run without a shell).
+    pub fn claude_hook_text(&self, event: &str) -> String {
+        if self.hooks.windows {
+            format!(
+                "{} (run without a shell)",
+                self.hook_command_with(event, quote, "")
+            )
+        } else {
+            self.hook_command(event)
+        }
     }
 
     /// [`Setup::hook_command`] for PowerShell: `& 'program' hook <event> ...` (a quoted string
@@ -329,14 +357,55 @@ impl Setup {
         command
     }
 
-    /// The hook group of an event, as it goes into the settings.
+    /// The hook group of an event, as it goes into Claude Code's settings. On Windows the exec
+    /// form (`command` = this binary, `args`; Claude Code 2.1.139 and later spawn it without a
+    /// shell, so it runs with Git Bash, with PowerShell, and whatever the path holds); elsewhere
+    /// the shell command line.
     pub fn hook_group(&self, event: &str) -> Value {
+        if self.hooks.windows {
+            let mut args = vec!["hook".to_string(), event.to_string()];
+            args.extend(self.dir_args.iter().cloned());
+            return json!({"hooks": [{"type": "command",
+                                     "command": self.exe.display().to_string(),
+                                     "args": args, "timeout": HOOK_TIMEOUT_SECS}]});
+        }
         json!({"hooks": [{"type": "command", "command": self.hook_command(event),
                           "timeout": HOOK_TIMEOUT_SECS}]})
     }
 
     fn state_dir(&self) -> PathBuf {
         self.data_dir.join(STATE_DIR)
+    }
+}
+
+/// How the hook commands are written on this machine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HookForm {
+    /// Windows: Claude Code's hooks in exec form, the other harnesses' commands in
+    /// [`HookForm::plain`] words when there are such.
+    pub windows: bool,
+    /// The program and the directory arguments as words bash, `cmd.exe` and PowerShell all run
+    /// unquoted (`crate::winshell::all_shell_words`); `None` outside Windows, or when one of
+    /// them has no such form.
+    pub plain: Option<Vec<String>>,
+}
+
+impl HookForm {
+    /// macOS and Linux: the quoted program for `sh -c`.
+    pub fn posix() -> Self {
+        Self::default()
+    }
+
+    /// The form for `exe` and `dir_args` on this machine.
+    pub fn here(exe: &Path, dir_args: &[String]) -> Self {
+        if cfg!(windows) {
+            Self {
+                windows: true,
+                plain: crate::winshell::all_shell_words_here(exe, dir_args),
+            }
+        } else {
+            Self::posix()
+        }
     }
 }
 
@@ -360,14 +429,28 @@ pub(crate) fn is_our_command(command: &str) -> bool {
     command.contains("graphersal-memory") && command.contains(" hook session-")
 }
 
+/// Whether a hook entry is ours: a shell command line of ours ([`is_our_command`]: quoted,
+/// plain or bare program), or the exec form (`command` = a `graphersal-memory` binary, `args`
+/// starting with `hook session-...`).
+pub fn is_our_hook(hook: &Value) -> bool {
+    match hook["args"].as_array() {
+        Some(args) => {
+            crate::agents::is_our_program(hook["command"].as_str().unwrap_or_default())
+                && args.first().and_then(Value::as_str) == Some("hook")
+                && args
+                    .get(1)
+                    .and_then(Value::as_str)
+                    .is_some_and(|event| event.starts_with("session-"))
+        }
+        None => is_our_command(hook["command"].as_str().unwrap_or_default()),
+    }
+}
+
 /// Whether a hook group (an element of `hooks.<Event>`) consists of our commands only.
 pub fn is_our_hook_group(group: &Value) -> bool {
-    group["hooks"].as_array().is_some_and(|hooks| {
-        !hooks.is_empty()
-            && hooks
-                .iter()
-                .all(|hook| is_our_command(hook["command"].as_str().unwrap_or_default()))
-    })
+    group["hooks"]
+        .as_array()
+        .is_some_and(|hooks| !hooks.is_empty() && hooks.iter().all(is_our_hook))
 }
 
 /// The managed block for `RULE_BLOCK` (English), marker lines included, ending with a newline.
@@ -830,7 +913,7 @@ fn plan_settings(
         lines.push(format!(
             "{event}: {} `{}`",
             if ours.is_empty() { "add" } else { "update to" },
-            setup.hook_command(sub)
+            setup.claude_hook_text(sub)
         ));
     }
     let mut plan = AutoMemoryPlan::Keep;
@@ -3159,6 +3242,13 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
         setup.paths.settings.display(),
         auto_memory_state(setup)
     ));
+    if setup.hooks.windows {
+        let settings = read_json(&setup.paths.settings, &mut Vec::new());
+        lines.push(git_bash_status(
+            &crate::winshell::find_git_bash_here(&settings),
+            &settings,
+        ));
+    }
     let errors = inspection.errors.clone();
     let nothing = inspection.nothing_installed();
     lines.extend(shared_status_lines(setup));
@@ -3359,8 +3449,82 @@ pub fn doctor(setup: &Setup) -> Vec<Finding> {
         Ok(_) => findings.push(ok("file memory: everything imported")),
         Err(err) => findings.push(problem(err, "check the file permissions")),
     }
+    if setup.hooks.windows {
+        let settings = read_json(&setup.paths.settings, &mut Vec::new());
+        findings.extend(git_bash_findings(
+            &crate::winshell::find_git_bash_here(&settings),
+            &settings,
+        ));
+    }
     findings.extend(shared_doctor(setup));
     findings
+}
+
+/// Whether one of our Claude Code hooks in `settings` is a shell command line with a quoted
+/// program (what install wrote before the exec form): only Git Bash runs it.
+fn hooks_need_git_bash(settings: &Value) -> bool {
+    HOOK_EVENTS.iter().any(|(event, _)| {
+        settings["hooks"][event].as_array().is_some_and(|groups| {
+            groups.iter().filter(|g| is_our_hook_group(g)).any(|group| {
+                group["hooks"]
+                    .as_array()
+                    .is_some_and(|hooks| hooks.iter().any(crate::winshell::needs_git_bash))
+            })
+        })
+    })
+}
+
+/// What works without Git Bash, for the doctor's finding and the docs' wording.
+const WITHOUT_GIT_BASH: &str = "What works: the memory tools, and the MCP server itself \
+    imports this project's memory files and queues the session indexing at every session start \
+    and end. What does not: the hook's session start line, and indexing a session right when it \
+    ends (it follows once it has been unchanged for 30 minutes)";
+
+/// `doctor`'s Git Bash finding on Windows: `git_bash` as Claude Code finds it, against our
+/// hooks in Claude Code's `settings`.
+pub fn git_bash_findings(git_bash: &crate::winshell::GitBash, settings: &Value) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if let Some(ignored) = &git_bash.ignored {
+        findings.push(note(
+            format!("Git Bash: {ignored}"),
+            "Claude Code ignores such a value too and looks in the default places",
+        ));
+    }
+    match &git_bash.path {
+        Some(path) => findings.push(ok(format!(
+            "Git Bash: {path} (Claude Code runs shell hooks there)"
+        ))),
+        None if hooks_need_git_bash(settings) => findings.push(problem(
+            format!(
+                "Git Bash not found, and the graphersal-memory hooks in Claude Code's settings \
+                 are written for it: without Git Bash Claude Code runs hooks in PowerShell, \
+                 which does not start a quoted program. {WITHOUT_GIT_BASH}"
+            ),
+            "run `graphersal-memory install` again (it writes hooks that Claude Code starts \
+             without a shell), or install Git for Windows (https://git-scm.com/downloads/win), \
+             or set CLAUDE_CODE_GIT_BASH_PATH to its bash.exe in the `env` of Claude Code's \
+             settings; then start a new session",
+        )),
+        None => findings.push(ok(
+            "Git Bash: not found; Claude Code runs shell hooks in PowerShell, and the \
+             graphersal-memory hooks need no shell",
+        )),
+    }
+    findings
+}
+
+/// `status`'s Git Bash line on Windows.
+pub fn git_bash_status(git_bash: &crate::winshell::GitBash, settings: &Value) -> String {
+    match &git_bash.path {
+        Some(path) => format!("  Git Bash: {path}"),
+        None if hooks_need_git_bash(settings) => "  Git Bash: not found, and the installed \
+            hooks need it (run `graphersal-memory install` again; `graphersal-memory doctor` \
+            says more)"
+            .to_string(),
+        None => "  Git Bash: not found (Claude Code runs hooks in PowerShell; the \
+            graphersal-memory hooks run without a shell)"
+            .to_string(),
+    }
 }
 
 /// `doctor`'s checks every harness shares: the settings file, the summaries' harness, the

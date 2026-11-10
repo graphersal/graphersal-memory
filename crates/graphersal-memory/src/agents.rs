@@ -110,10 +110,15 @@ pub fn is_our_entry(entry: &Value) -> bool {
         ),
         other => (other.as_str().unwrap_or_default(), entry["args"][0].clone()),
     };
-    // The file name on any platform (an entry may come from another system's path style).
+    is_our_program(command) && first == "mcp"
+}
+
+/// Whether `command` starts a `graphersal-memory` binary (its file name, on any platform: an
+/// entry may come from another system's path style).
+pub fn is_our_program(command: &str) -> bool {
     let name = command.rsplit(['/', '\\']).next().unwrap_or_default();
     let name = name.strip_suffix(".exe").unwrap_or(name);
-    name == "graphersal-memory" && first == "mcp"
+    name == "graphersal-memory"
 }
 
 /// The program an MCP entry starts (either shape).

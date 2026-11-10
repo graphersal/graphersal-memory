@@ -215,6 +215,7 @@ fn setup_with(home: &Path, data: &Path, endpoint: &str) -> Setup {
         run_dir: std::env::temp_dir().join(format!("gmm{}", std::process::id())),
         exe: std::path::PathBuf::from("/opt/gm/bin/graphersal-memory"),
         dir_args: vec!["--data-dir".into(), data.display().to_string()],
+        hooks: crate::install::HookForm::posix(),
         source: download::Source {
             endpoint: endpoint.to_string(),
             token: None,

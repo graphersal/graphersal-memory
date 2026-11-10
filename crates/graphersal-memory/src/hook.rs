@@ -32,6 +32,10 @@
 //! Cursor hooks do Cursor's part, and a Claude Code import or indexing must not run on a Cursor
 //! session.
 //!
+//! The hooks are optional: the MCP server does the same import and queues the same indexing at
+//! a session's start and end (`crate::session_sync`); when both run, the import's fingerprints
+//! and the daemon's merged, fingerprinted indexing make the second run a no-op.
+//!
 //! A hook never blocks or fails the session: the work runs on a thread with a time limit, every
 //! error becomes a note on stderr, and the exit code is always 0. With
 //! `GRAPHERSAL_MEMORY_HOOK=off` (set for the summaries' own harness runs) a hook does nothing.
@@ -126,25 +130,9 @@ pub fn work(
     let mut outcome = Outcome::default();
     let mut imported = 0;
     if let Some(dir) = session_dir {
-        let memory_dir = paths
-            .projects
-            .join(import::claude_slug(&dir.display().to_string()))
-            .join("memory");
-        if memory_dir.is_dir() {
-            match sync(&memory_dir, dir, data_dir, connect, deadline) {
-                Ok(report) => {
-                    imported = report.created + report.updated;
-                    outcome.notes.extend(report.problems);
-                    if report.timed_out {
-                        outcome.notes.push(
-                            "the import stopped at the time limit; the rest follows next time"
-                                .into(),
-                        );
-                    }
-                }
-                Err(err) => outcome.notes.push(err),
-            }
-        }
+        let (count, notes) = import_project(dir, dir, paths, data_dir, connect, deadline);
+        imported = count;
+        outcome.notes.extend(notes);
     }
     if event == HookEvent::SessionStart {
         let mut line = "graphersal-memory: your memory is served by the MCP server \
@@ -161,6 +149,38 @@ pub fn work(
         outcome.line = Some(line);
     }
     outcome
+}
+
+/// Imports the new and changed memory files Claude Code keeps for the sessions started in
+/// `dir` (`<projects>/<slug of dir>/memory`), as memories of the project of `session_dir`: how
+/// many were imported, and notes on what failed. Nothing when the directory does not exist.
+pub fn import_project(
+    dir: &Path,
+    session_dir: &Path,
+    paths: &ClaudePaths,
+    data_dir: &Path,
+    connect: &mut Connect<'_>,
+    deadline: Instant,
+) -> (usize, Vec<String>) {
+    let memory_dir = paths
+        .projects
+        .join(import::claude_slug(&dir.display().to_string()))
+        .join("memory");
+    if !memory_dir.is_dir() {
+        return (0, Vec::new());
+    }
+    match sync(&memory_dir, session_dir, data_dir, connect, deadline) {
+        Ok(report) => {
+            let mut notes = report.problems;
+            if report.timed_out {
+                notes.push(
+                    "the import stopped at the time limit; the rest follows next time".into(),
+                );
+            }
+            (report.created + report.updated, notes)
+        }
+        Err(err) => (0, vec![err]),
+    }
 }
 
 /// Imports the new and changed files of one memory directory.

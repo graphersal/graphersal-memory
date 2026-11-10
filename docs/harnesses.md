@@ -566,16 +566,39 @@ variable set by Git Bash or Cygwin is used only when `USERPROFILE` is missing.
 
 | Harness | Files on Windows | Hooks run in | Source |
 |---|---|---|---|
-| Claude Code | `%USERPROFILE%\.claude.json`, `%USERPROFILE%\.claude\` (or `%CLAUDE_CONFIG_DIR%`) | Git Bash; PowerShell when Git Bash is not installed (see below) | [settings](https://code.claude.com/docs/en/settings) ("On Windows, `~/.claude` means `%USERPROFILE%\.claude`"), [hooks](https://code.claude.com/docs/en/hooks) |
+| Claude Code | `%USERPROFILE%\.claude.json`, `%USERPROFILE%\.claude\` (or `%CLAUDE_CONFIG_DIR%`) | Git Bash; PowerShell when Git Bash is not installed. Our hooks use the exec form, which runs without a shell (see below) | [settings](https://code.claude.com/docs/en/settings) ("On Windows, `~/.claude` means `%USERPROFILE%\.claude`"), [hooks](https://code.claude.com/docs/en/hooks) ("Exec form and shell form") |
 | opencode 1.x and 2.x | `%USERPROFILE%\.config\opencode\` and `%USERPROFILE%\.local\share\opencode\opencode.db` (the XDG layout, also on Windows; `XDG_CONFIG_HOME`/`XDG_DATA_HOME` move them) | the plugin starts the binary directly (no shell), without a console window | [1.x `global.ts`](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/core/src/global.ts), [2.x `global-roots.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/util/src/global-roots.ts) |
 | Codex | `%USERPROFILE%\.codex\` (or `%CODEX_HOME%`, which Codex canonicalizes; so does install, so the hook trust keys Codex records match) | `cmd.exe /C` (`%ComSpec%`) | [`utils/home-dir`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/utils/home-dir/src/lib.rs), [`hooks/src/engine/command_runner.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/hooks/src/engine/command_runner.rs) |
-| Cursor | `%USERPROFILE%\.cursor\` | PowerShell, so install writes the hook commands in PowerShell's form (`& 'C:\...\graphersal-memory.exe' hook ...`) | [hooks](https://cursor.com/docs/hooks) ("On Windows, the desktop app runs hook commands through PowerShell") |
+| Cursor | `%USERPROFILE%\.cursor\` | PowerShell, so install writes a command PowerShell runs (see below) | [hooks](https://cursor.com/docs/hooks) ("On Windows, the desktop app runs hook commands through PowerShell") |
 
-- **Hook commands** for Claude Code and Codex start with the binary's path in double quotes,
-  which Git Bash and `cmd.exe` both run. PowerShell does not (a quoted path is a string there),
-  so a Claude Code without Git Bash, which then runs hooks in PowerShell, does not run our hooks
-  yet: the memory tools work, the session start line and the indexing at session start and end
-  do not (`import --sessions` indexes them).
+- **Hook commands.** A command whose program is a quoted path (`"C:\...\graphersal-memory.exe"
+  hook ...`) runs in Git Bash and `cmd.exe`, but not in PowerShell, which reads a quoted string
+  as a value. So install writes:
+  - **Claude Code**: the exec form, `"command": "C:\...\graphersal-memory.exe", "args": ["hook",
+    "session-start", ...]`. Claude Code starts it without any shell, so it runs with Git Bash,
+    without Git Bash, and whatever the path holds (Claude Code 2.1.139 or later, which added
+    `args`; [hooks](https://code.claude.com/docs/en/hooks), "Exec form and shell form").
+  - **Codex and Cursor**: a command every shell runs as it is: `graphersal-memory hook ...` when
+    `graphersal-memory` on your `PATH` is this binary; else the path with forward slashes and no
+    quotes (`C:/Users/you/AppData/Local/Programs/graphersal-memory/graphersal-memory.exe hook
+    ...`) when it holds only letters, digits and `_ - . / : ~`; else the folder's 8.3 short name
+    (`C:/Users/ANNLEE~1/...`) when the drive keeps short names. The same rule applies to
+    `--data-dir` and `--run-dir`. When none of these works, Codex keeps the quoted form (it runs
+    hooks in `cmd.exe`, which accepts it) and Cursor PowerShell's `& '...'` form.
+  - Running `graphersal-memory install` again replaces hooks an older version wrote; `uninstall`
+    removes ours in every form.
+- **Without Git Bash.** Claude Code runs shell hooks in PowerShell when it cannot find Git Bash.
+  Hooks written by an older graphersal-memory (the quoted form) then do nothing; `doctor` finds
+  Git Bash the way Claude Code does (`CLAUDE_CODE_GIT_BASH_PATH` from Claude Code's settings or
+  your environment, when it names an existing `bash.exe` or `sh.exe`; then `C:\Program
+  Files\Git` and `C:\Program Files (x86)\Git`; then the Git installation of the `git` on your
+  `PATH`; WSL's `C:\Windows\System32\bash.exe` never counts; [Troubleshoot
+  installation](https://code.claude.com/docs/en/troubleshoot-install), "Claude Code on Windows
+  requires either Git for Windows (for bash) or PowerShell") and says what to do: run `install`
+  again, or install Git for Windows, or set the variable. `status` shows one Git Bash line.
+  Even when no hook runs, the memory works: the MCP server itself imports the project's memory
+  files and queues the session indexing at every session start and end (see
+  [How it works: without hooks](how-it-works.md#without-hooks)).
 - **The daemon** listens on an `AF_UNIX` socket (`%LOCALAPPDATA%\graphersal-memory\run\daemon.sock`),
   which Windows has had since version 1803; it is started detached, without a console window.
 - **Summaries and `bench`** find npm's `claude.cmd` through `PATH` and `PATHEXT`; a run that

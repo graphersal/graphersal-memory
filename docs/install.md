@@ -11,7 +11,10 @@ dim and the default green. An answer of Enter shows as nothing after the prompt.
 On Windows the same commands write the same parts into the same files under your profile
 directory (`%USERPROFILE%\.claude.json`, `%USERPROFILE%\.claude\`, `%USERPROFILE%\.config\opencode\`,
 `%USERPROFILE%\.codex\`, `%USERPROFILE%\.cursor\`), the data directory is
-`%LOCALAPPDATA%\graphersal-memory`, and Cursor's hook commands are written for PowerShell. These
+`%LOCALAPPDATA%\graphersal-memory`, and the hook commands are written so that they run without
+Git Bash: Claude Code's step shows `` `"C:\...\graphersal-memory.exe" hook session-start` (run
+without a shell) ``, and Codex's and Cursor's commands carry no quotes where they can
+([Windows](harnesses.md#windows)). These
 outputs were not captured on Windows; what is tested there and what is not yet is in
 [Supported harnesses: Windows](harnesses.md#windows).
 

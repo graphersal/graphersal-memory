@@ -16,7 +16,7 @@ use crate::daemon::{self, DaemonOptions};
 use crate::import::{self, Caller, ImportState};
 use crate::install::{self, ClaudePaths, InstallOptions, Setup, UninstallOptions};
 use crate::shim::{self, DaemonLocation, ShimOptions};
-use crate::{bench, client, hook, ipc, mcp, protocol, sessions, store, summaries};
+use crate::{bench, client, hook, ipc, mcp, protocol, session_sync, sessions, store, summaries};
 
 /// How long the product's own memory calls (import) wait for one answer.
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -256,7 +256,10 @@ pub fn run_cli(
             no_daemon: false,
             project,
         } => shim_options(cli, *profile, project.as_deref())
-            .and_then(|options| shim::run(&options, stdin, stdout))
+            .and_then(|options| {
+                let events = session_events(cli, &options, project.as_deref());
+                shim::run_with(&options, stdin, stdout, events, stderr)
+            })
             .map(|()| 0),
         Command::Daemon {
             idle,
@@ -404,6 +407,7 @@ fn setup_with(cli: &Cli, probe: bool) -> Result<Setup, String> {
         search_path: None,
         data_dir,
         run_dir,
+        hooks: install::HookForm::here(&mcp::canonical(&exe), &dir_args),
         exe: mcp::canonical(&exe),
         dir_args,
         source: crate::download::Source::from_env(&env),
@@ -1097,17 +1101,8 @@ fn run_hook(
         Ok(setup) => {
             let connect = daemon_connector(&setup);
             let location = setup_location(&setup);
-            let enqueue: hook::Enqueue = Box::new(move |request: sessions::Request| {
-                let answer = shim::request(&location, &request.to_control())?;
-                if answer["ok"] == serde_json::Value::Bool(true) {
-                    Ok(())
-                } else {
-                    Err(answer["error"]["message"]
-                        .as_str()
-                        .unwrap_or("refused")
-                        .to_string())
-                }
-            });
+            let enqueue: hook::Enqueue =
+                Box::new(move |request: sessions::Request| enqueue_request(&location, &request));
             if harness == Harness::Cursor {
                 return hook::run_cursor(
                     event,
@@ -1320,6 +1315,68 @@ fn shim_options(
         project: project(project_flag)?,
         harness: shim::harness_name(&|name| std::env::var(name).ok()).to_string(),
     })
+}
+
+/// What the shim does at the session's start and end (`crate::session_sync`): `None` inside
+/// the summaries' own harness runs (`GRAPHERSAL_MEMORY_HOOK=off`), or when there is nothing to
+/// do.
+fn session_events(
+    cli: &Cli,
+    options: &ShimOptions,
+    project_flag: Option<&Path>,
+) -> Option<shim::Events> {
+    if std::env::var(summaries::HOOK_ENV).is_ok_and(|v| v == "off") {
+        return None;
+    }
+    let setup = setup_with(cli, false).ok()?;
+    let cwd = match project_flag {
+        Some(flag) => absolute(flag),
+        None => std::env::current_dir().ok()?,
+    };
+    let plan = session_sync::plan(&setup, &options.harness, &cwd, Path::new(&options.project));
+    if plan.is_empty() {
+        return None;
+    }
+    let plan = std::sync::Arc::new(plan);
+    let start_plan = plan.clone();
+    let location = setup_location(&setup);
+    let run_dir = setup.run_dir.clone();
+    let mut connect = daemon_connector(&setup);
+    Some(shim::Events {
+        start: Box::new(move || {
+            let mut enqueue = |request: sessions::Request| enqueue_request(&location, &request);
+            let deadline = std::time::Instant::now() + hook::BUDGET;
+            session_sync::start(&start_plan, &mut connect, &mut enqueue, deadline).notes
+        }),
+        end: Box::new(move || {
+            // The session ended: queue only when the daemon still runs (never start one now).
+            let mut enqueue = |request: sessions::Request| match shim::request_running(
+                &run_dir,
+                &request.to_control(),
+            )? {
+                Some(answer) => taken(&answer),
+                None => Ok(()),
+            };
+            session_sync::end(&plan, &mut enqueue).notes
+        }),
+    })
+}
+
+/// Queues an indexing request in the daemon (starting it).
+fn enqueue_request(location: &DaemonLocation, request: &sessions::Request) -> Result<(), String> {
+    taken(&shim::request(location, &request.to_control())?)
+}
+
+/// Whether the daemon took a request: its refusal as the error.
+fn taken(answer: &serde_json::Value) -> Result<(), String> {
+    if answer["ok"] == serde_json::Value::Bool(true) {
+        Ok(())
+    } else {
+        Err(answer["error"]["message"]
+            .as_str()
+            .unwrap_or("refused")
+            .to_string())
+    }
 }
 
 /// `daemon`: in this process with `--foreground`, else started detached (or found running).

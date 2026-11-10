@@ -34,6 +34,7 @@ pub(crate) fn setup_in(home: &Path, data: &Path) -> Setup {
         run_dir: short_run_dir(),
         exe: PathBuf::from("/opt/gm/bin/graphersal-memory"),
         dir_args: vec!["--data-dir".into(), data.display().to_string()],
+        hooks: install::HookForm::posix(),
         // No network in tests: a model download fails at once (nothing listens on port 1).
         source: crate::download::Source {
             endpoint: "http://127.0.0.1:1".into(),
@@ -2708,5 +2709,364 @@ fn the_wizard_lists_cursor_among_the_detected_agents() {
     );
     assert_eq!(setup.installed(), vec![Kind::Cursor]);
     assert!(!setup.paths.user_config.exists(), "Claude Code untouched");
+    memory.close();
+}
+
+// ------------------------------------------------------------------------------------------
+// M11: hook commands every Windows shell runs; the shim does the hooks' work.
+// ------------------------------------------------------------------------------------------
+
+/// `setup` as on Windows, with `plain` as the words every shell runs (or none).
+fn windows_setup(home: &Path, data: &Path, plain: Option<Vec<String>>) -> Setup {
+    let mut setup = setup_in(home, data);
+    setup.exe = PathBuf::from(r"C:\Users\Ann Lee\gm\graphersal-memory.exe");
+    setup.hooks = install::HookForm {
+        windows: true,
+        plain,
+    };
+    setup
+}
+
+fn plain_words(data: &Path) -> Option<Vec<String>> {
+    Some(vec![
+        "graphersal-memory".into(),
+        "--data-dir".into(),
+        data.display().to_string(),
+    ])
+}
+
+#[test]
+fn on_windows_claude_code_gets_the_exec_form_and_the_others_the_plain_words() {
+    let home = TempDir::new("w-forms-home");
+    let data = TempDir::new("w-forms-data");
+    existing_home(home.path());
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+    std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    let setup = windows_setup(home.path(), data.path(), plain_words(data.path()));
+    let memory = Memory::open(data.path());
+    let all = InstallOptions {
+        yes: true,
+        harnesses: Some(vec![Kind::ClaudeCode, Kind::Codex, Kind::Cursor]),
+        ..InstallOptions::default()
+    };
+    let (code, out) = run_install(&setup, &memory, all);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("(run without a shell)"), "{out}");
+    let settings = settings_json(&setup);
+    let ours = &settings["hooks"]["SessionStart"][1]["hooks"][0];
+    assert_eq!(
+        *ours,
+        json!({"type": "command", "command": r"C:\Users\Ann Lee\gm\graphersal-memory.exe",
+               "args": ["hook", "session-start", "--data-dir", data.path().display().to_string()],
+               "timeout": 30})
+    );
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+        "echo mine"
+    );
+    let words = format!("--data-dir {}", data.path().display());
+    let codex = crate::jsonedit::value_of(&read(&setup.codex.hooks_file)).unwrap();
+    assert_eq!(
+        codex["hooks"]["SessionEnd"][0]["hooks"][0]["command"],
+        format!("graphersal-memory hook session-end {words} --harness codex")
+    );
+    let cursor = crate::jsonedit::value_of(&read(&setup.cursor.hooks_file)).unwrap();
+    assert_eq!(
+        cursor["hooks"]["sessionStart"][0]["command"],
+        format!("graphersal-memory hook session-start {words} --harness cursor")
+    );
+    // Recognised as installed (status/doctor), and a second install changes nothing.
+    assert!(
+        install::doctor(&setup)
+            .iter()
+            .any(|f| f.text == "hook SessionStart: installed")
+    );
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("SessionStart: already installed"), "{out}");
+    memory.close();
+}
+
+#[test]
+fn on_windows_without_plain_words_codex_keeps_quotes_and_cursor_gets_powershell() {
+    let home = TempDir::new("w-quoted-home");
+    let data = TempDir::new("w-quoted-data");
+    let setup = windows_setup(home.path(), data.path(), None);
+    assert_eq!(
+        crate::codex::install::hook_command(&setup, "session-start"),
+        format!(
+            r#""C:\Users\Ann Lee\gm\graphersal-memory.exe" hook session-start --data-dir "{}" --harness codex"#,
+            data.path().display()
+        )
+    );
+    if cfg!(windows) {
+        assert!(
+            crate::cursor::install::hook_command(&setup, "session-start").starts_with("& '"),
+            "PowerShell's form"
+        );
+    }
+    // Claude Code's exec form needs no plain words.
+    assert_eq!(
+        setup.hook_group("session-start")["hooks"][0]["args"][1],
+        "session-start"
+    );
+}
+
+#[test]
+fn a_reinstall_replaces_the_quoted_form_and_uninstall_still_gives_the_files_back() {
+    let home = TempDir::new("w-re-home");
+    let data = TempDir::new("w-re-data");
+    existing_home(home.path());
+    let before = snapshot(home.path());
+    let memory = Memory::open(data.path());
+    // An earlier install wrote the quoted shell command.
+    let old = setup_in(home.path(), data.path());
+    assert_eq!(run_install(&old, &memory, yes()).0, 0);
+    let quoted = settings_json(&old)["hooks"]["SessionStart"][1]["hooks"][0]["command"].clone();
+    assert!(quoted.as_str().unwrap().starts_with('"'), "{quoted}");
+    // This version on Windows: the hooks are updated to the exec form, nothing else changes.
+    let setup = windows_setup(home.path(), data.path(), None);
+    assert!(
+        install::doctor(&setup)
+            .iter()
+            .any(|f| f.problem && f.text.starts_with("hook SessionStart: "))
+    );
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("SessionStart: update to"), "{out}");
+    let settings = settings_json(&setup);
+    for (event, sub) in [
+        ("SessionStart", "session-start"),
+        ("SessionEnd", "session-end"),
+    ] {
+        let ours: Vec<&Value> = settings["hooks"][event]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|g| install::is_our_hook_group(g))
+            .collect();
+        assert_eq!(ours, vec![&setup.hook_group(sub)], "{settings}");
+    }
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+        "echo mine"
+    );
+    assert_eq!(settings["model"], "opus");
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    memory.close();
+}
+
+#[test]
+fn uninstall_removes_every_form_of_our_hooks() {
+    let home = TempDir::new("w-un-home");
+    let data = TempDir::new("w-un-data");
+    existing_home(home.path());
+    let setup = windows_setup(home.path(), data.path(), plain_words(data.path()));
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, yes()).0, 0);
+    // Leftovers of other forms beside the exec form install wrote, and a user's change (so
+    // uninstall removes our parts from the current text instead of restoring the backup).
+    let settings = read(&setup.paths.settings);
+    let mut value: Value = serde_json::from_str(&settings).unwrap();
+    let start = value["hooks"]["SessionStart"].as_array_mut().unwrap();
+    start.push(json!({"hooks": [{"type": "command",
+        "command": r#""C:\Users\Ann Lee\gm\graphersal-memory.exe" hook session-start"#}]}));
+    start.push(json!({"hooks": [{"type": "command",
+        "command": "graphersal-memory hook session-start --data-dir D:/gm"}]}));
+    start.push(json!({"hooks": [{"type": "command",
+        "command": "C:/PROGRA~1/GRAPHE~1/graphersal-memory.exe hook session-start"}]}));
+    value["theme"] = json!("light");
+    std::fs::write(
+        &setup.paths.settings,
+        serde_json::to_string_pretty(&value).unwrap(),
+    )
+    .unwrap();
+
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    let settings = settings_json(&setup);
+    assert_eq!(settings["theme"], "light");
+    assert_eq!(
+        settings["hooks"]["SessionStart"],
+        json!([{"hooks": [{"type": "command", "command": "echo mine"}]}]),
+        "{settings}"
+    );
+    assert!(settings["hooks"].get("SessionEnd").is_none(), "{settings}");
+    memory.close();
+}
+
+#[test]
+fn hooks_of_every_form_are_recognised_and_others_are_not() {
+    let ours = [
+        json!({"command": "\"/x/graphersal-memory\" hook session-start"}),
+        json!({"command": "graphersal-memory hook session-end --harness codex"}),
+        json!({"command": "C:/gm/graphersal-memory.exe hook session-start"}),
+        json!({"command": "& 'C:\\gm\\graphersal-memory.exe' hook session-start --harness cursor"}),
+        json!({"command": "C:\\gm dir\\graphersal-memory.exe", "args": ["hook", "session-end"]}),
+    ];
+    for hook in &ours {
+        assert!(install::is_our_hook(hook), "{hook}");
+    }
+    let theirs = [
+        json!({"command": "echo graphersal-memory hook"}),
+        json!({"command": "C:\\gm\\graphersal-memory.exe", "args": ["mcp"]}),
+        json!({"command": "C:\\gm\\other.exe", "args": ["hook", "session-start"]}),
+        json!({"command": "node", "args": ["graphersal-memory", "hook", "session-start"]}),
+    ];
+    for hook in &theirs {
+        assert!(!install::is_our_hook(hook), "{hook}");
+    }
+}
+
+#[test]
+fn doctor_says_what_works_without_git_bash() {
+    use crate::winshell::GitBash;
+    let quoted = json!({"hooks": {"SessionStart": [{"hooks": [{"type": "command",
+        "command": "\"C:\\gm\\graphersal-memory.exe\" hook session-start"}]}]}});
+    let exec = json!({"hooks": {"SessionStart": [{"hooks": [{"type": "command",
+        "command": "C:\\gm\\graphersal-memory.exe", "args": ["hook", "session-start"]}]}]}});
+    let missing = GitBash {
+        path: None,
+        ignored: None,
+    };
+    let found = GitBash {
+        path: Some(r"C:\Program Files\Git\bin\bash.exe".into()),
+        ignored: None,
+    };
+    // Missing, and our hooks are the quoted form: a problem with what works and the fixes.
+    let findings = install::git_bash_findings(&missing, &quoted);
+    assert_eq!(findings.len(), 1);
+    let finding = &findings[0];
+    assert!(finding.problem);
+    assert!(
+        finding.text.contains("Git Bash not found"),
+        "{}",
+        finding.text
+    );
+    assert!(finding.text.contains("PowerShell"), "{}", finding.text);
+    assert!(
+        finding.text.contains("What works: the memory tools"),
+        "{}",
+        finding.text
+    );
+    let fix = finding.fix.as_deref().unwrap();
+    assert!(fix.contains("graphersal-memory install"), "{fix}");
+    assert!(fix.contains("Git for Windows"), "{fix}");
+    assert!(fix.contains("CLAUDE_CODE_GIT_BASH_PATH"), "{fix}");
+    assert!(install::git_bash_status(&missing, &quoted).contains("the installed hooks need it"));
+    // Missing, but the hooks need no shell: fine.
+    let findings = install::git_bash_findings(&missing, &exec);
+    assert!(!findings[0].problem);
+    assert!(
+        findings[0].text.contains("need no shell"),
+        "{}",
+        findings[0].text
+    );
+    assert!(install::git_bash_status(&missing, &exec).contains("run without a shell"));
+    // Found: the path.
+    let findings = install::git_bash_findings(&found, &quoted);
+    assert_eq!(
+        findings[0].text,
+        r"Git Bash: C:\Program Files\Git\bin\bash.exe (Claude Code runs shell hooks there)"
+    );
+    // An ignored variable is a note of its own.
+    let ignored = GitBash {
+        path: None,
+        ignored: Some(
+            "CLAUDE_CODE_GIT_BASH_PATH=D:\\x\\git-bash.exe is not named bash.exe or sh.exe".into(),
+        ),
+    };
+    let findings = install::git_bash_findings(&ignored, &exec);
+    assert_eq!(findings.len(), 2);
+    assert!(findings[0].text.contains("git-bash.exe") && findings[0].fix.is_some());
+    // The doctor of a non-Windows setup has no Git Bash line.
+    let home = TempDir::new("w-doc-home");
+    let data = TempDir::new("w-doc-data");
+    let setup = setup_in(home.path(), data.path());
+    assert!(
+        !install::doctor(&setup)
+            .iter()
+            .any(|f| f.text.contains("Git Bash"))
+    );
+}
+
+/// A session start through the shim and through the hook, in either order: the memory files are
+/// imported once, the same memories stay.
+#[test]
+fn the_shim_and_the_hook_import_the_same_files_once() {
+    let home = TempDir::new("w-both-home");
+    let data = TempDir::new("w-both-data");
+    let work = TempDir::new("w-both-work");
+    let project_dir = mcp::canonical(work.path());
+    std::fs::create_dir_all(project_dir.join(".git")).unwrap();
+    memory_fixture(home.path(), &project_dir);
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let project = project_dir.display().to_string();
+    let plan = crate::session_sync::plan(&setup, "claude-code", &project_dir, &project_dir);
+    assert!(plan.claude.is_some());
+    let mut queued = Vec::new();
+    let mut connect = memory.connector();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let done = {
+        let mut enqueue = |request: crate::sessions::Request| {
+            queued.push(request);
+            Ok(())
+        };
+        crate::session_sync::start(&plan, &mut connect, &mut enqueue, deadline)
+    };
+    assert!(done.notes.is_empty(), "{done:?}");
+    assert_eq!(done.imported, 3, "{done:?}");
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].harness, Kind::ClaudeCode);
+    let listed = memory.call(&project, "memories", json!({"k": 50}));
+    let count = listed.as_array().map(Vec::len).unwrap_or_default();
+    assert!(count >= 3, "{listed}");
+    // The hook then: nothing new, the same memories.
+    let mut stdout = Vec::new();
+    let code = hook::run(
+        hook::HookEvent::SessionStart,
+        Ok(setup.paths.clone()),
+        data.path().to_path_buf(),
+        Box::new(memory.connector()),
+        std::io::Cursor::new(json!({"cwd": project}).to_string().into_bytes()),
+        &mut stdout,
+        &mut Vec::new(),
+    );
+    assert_eq!(code, 0);
+    let line = String::from_utf8(stdout).unwrap();
+    assert!(!line.contains("Imported"), "{line}");
+    // And the shim once more (the next session): nothing either.
+    let done = crate::session_sync::start(&plan, &mut connect, &mut |_| Ok(()), deadline);
+    assert_eq!(done.imported, 0, "{done:?}");
+    let again = memory.call(&project, "memories", json!({"k": 50}));
+    assert_eq!(again, listed);
+    // A changed file is imported by whichever runs first, once.
+    let file = home
+        .path()
+        .join(".claude/projects")
+        .join(import::claude_slug(&project))
+        .join("memory/release-plan.md");
+    std::fs::write(
+        &file,
+        "---\nname: release-plan\ndescription: Releases go out on Mondays\ntype: project\n---\n\nMonday releases.\n",
+    )
+    .unwrap();
+    let done = crate::session_sync::start(&plan, &mut connect, &mut |_| Ok(()), deadline);
+    assert_eq!(done.imported, 1, "{done:?}");
+    let mut stdout = Vec::new();
+    hook::run(
+        hook::HookEvent::SessionStart,
+        Ok(setup.paths.clone()),
+        data.path().to_path_buf(),
+        Box::new(memory.connector()),
+        std::io::Cursor::new(json!({"cwd": project}).to_string().into_bytes()),
+        &mut stdout,
+        &mut Vec::new(),
+    );
+    assert!(!String::from_utf8(stdout).unwrap().contains("Imported"));
+    drop(connect);
     memory.close();
 }
