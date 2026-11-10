@@ -1704,7 +1704,7 @@ pub fn run(
     let _ = writeln!(
         out,
         "\n{}\n\nReport: {}",
-        report::summary(&meta, &rows, &spent),
+        report::summary_styled(&meta, &rows, &spent, options.color),
         run_dir.join("report.md").display()
     );
     if let Some(why) = &meta.stopped {

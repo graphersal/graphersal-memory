@@ -29,7 +29,10 @@ the harness keeps its own), `--yes` (do not ask), `--dry-run`. The harness comma
 drives only `claude` for now.
 
 Each run writes `report.md` and `report.json` to `bench/<timestamp>/` in the data directory, with
-the sandboxes it used (the copy of the store is deleted after the run), and prints a summary.
+the sandboxes it used (the copy of the store is deleted after the run), and prints a summary. The
+best arm of each row group (category, origin, all) is in bold in `report.md`, its name and its
+mean score, and its line of the printed summary is green on a terminal that allows colour; a
+tie of every arm marks none.
 
 ## Method
 

@@ -163,6 +163,22 @@ pub fn groups(rows: &[Row], arms: &[String]) -> Vec<Group> {
     out
 }
 
+/// Whether `group` has the best mean score of its set (same category and origin): the highest
+/// score as shown (two decimals), when at least one other arm of the set scored lower. Tied best
+/// arms are all best; when every arm scores the same, none is.
+pub fn is_best(group: &Group, groups: &[Group]) -> bool {
+    let shown = |g: &Group| (g.score * 100.0).round() as i64;
+    let set: Vec<i64> = groups
+        .iter()
+        .filter(|g| g.category == group.category && g.origin == group.origin)
+        .map(shown)
+        .collect();
+    let (Some(&max), Some(&min)) = (set.iter().max(), set.iter().min()) else {
+        return false;
+    };
+    max > min && shown(group) == max
+}
+
 /// The mean score of each repeat of `arm` (the spread between runs).
 pub fn repeat_scores(rows: &[Row], arm: &str) -> Vec<f64> {
     let last = rows.iter().map(|r| r.repeat).max().unwrap_or(0);
@@ -345,17 +361,23 @@ pub fn markdown(meta: &Meta, rows: &[Row], spent: &Spent) -> String {
             .to_string(),
         "|---|---|---|---|---|---|---|---|---|---|".to_string(),
     ]);
-    for g in groups(rows, &arms) {
+    let all = groups(rows, &arms);
+    for g in &all {
         let label = match (g.category.as_str(), g.origin.as_str()) {
             ("all", "all") => format!("**all ({})**", g.n),
             ("all", "user") => format!("your questions ({})", g.n),
             ("all", origin) => format!("{origin} questions ({})", g.n),
             (category, _) => format!("{category} ({})", g.n),
         };
+        // The best arm of each set in bold, its name and its score (the same cells the
+        // terminal summary paints green).
+        let (arm, score) = if is_best(g, &all) {
+            (format!("**{}**", g.arm), format!("**{:.2}**", g.score))
+        } else {
+            (g.arm.clone(), format!("{:.2}", g.score))
+        };
         out.push(format!(
-            "| {label} | {} | {:.2} | {} | {} | {} | {} | {} | {:.1} | {:.0} |",
-            g.arm,
-            g.score,
+            "| {label} | {arm} | {score} | {} | {} | {} | {} | {} | {:.1} | {:.0} |",
             g.confident_wrong,
             money(g.cost_usd),
             g.cost_per_point.map_or_else(|| "-".to_string(), money),
@@ -485,7 +507,14 @@ pub fn to_json(meta: &Meta, rows: &[Row], spent: &Spent) -> Value {
 }
 
 /// The printed summary: one line per arm (all categories) and the spend.
+#[cfg(test)]
 pub fn summary(meta: &Meta, rows: &[Row], spent: &Spent) -> String {
+    summary_styled(meta, rows, spent, false)
+}
+
+/// [`summary`] with the best arm's line in green when `color` is on (a terminal that allows
+/// colour), as `report.md` marks it in bold.
+pub fn summary_styled(meta: &Meta, rows: &[Row], spent: &Spent, color: bool) -> String {
     let arms: Vec<String> = meta.arms.iter().map(|(a, _)| a.clone()).collect();
     let mut out = Vec::new();
     let groups = groups(rows, &arms);
@@ -493,7 +522,7 @@ pub fn summary(meta: &Meta, rows: &[Row], spent: &Spent) -> String {
         .iter()
         .filter(|g| g.category == "all" && g.origin == "all")
     {
-        out.push(format!(
+        let line = format!(
             "  {:<6} score {:.2}/5, {} confidently wrong, {} per answer, {} input tokens, cost \
              per point {}",
             g.arm,
@@ -502,7 +531,12 @@ pub fn summary(meta: &Meta, rows: &[Row], spent: &Spent) -> String {
             money(g.cost_usd),
             tokens(g.input_tokens),
             g.cost_per_point.map_or_else(|| "-".to_string(), money)
-        ));
+        );
+        out.push(if color && is_best(g, &groups) {
+            format!("\x1b[32m{line}\x1b[0m")
+        } else {
+            line
+        });
     }
     let mine: Vec<String> = groups
         .iter()
@@ -628,7 +662,9 @@ mod tests {
         };
         let text = markdown(&meta, &rows, &spent);
         assert!(
-            text.contains("| **all (2)** | graph | 5.00 | 0 | $0.030 | $0.006 | 1,000 | 100 |"),
+            text.contains(
+                "| **all (2)** | **graph** | **5.00** | 0 | $0.030 | $0.006 | 1,000 | 100 |"
+            ),
             "{text}"
         );
         assert!(text.contains("- files: 4.00, 2.00"), "{text}");
@@ -643,5 +679,84 @@ mod tests {
         assert!(printed.contains("graph  score 5.00/5"), "{printed}");
         assert_eq!(tokens(1234567.4), "1,234,567");
         assert_eq!(tokens(12.0), "12");
+    }
+
+    fn group(arm: &str, category: &str, score: f64) -> Group {
+        Group {
+            arm: arm.into(),
+            category: category.into(),
+            origin: "all".into(),
+            n: 1,
+            score,
+            confident_wrong: 0,
+            cost_usd: 0.0,
+            input_tokens: 0.0,
+            output_tokens: 0.0,
+            turns: 0.0,
+            seconds: 0.0,
+            cost_per_point: None,
+            errors: 0,
+        }
+    }
+
+    #[test]
+    fn the_best_arm_is_the_highest_shown_score_of_its_set() {
+        let groups = vec![
+            group("files", "rule", 4.0),
+            group("graph", "rule", 5.0),
+            group("files", "history", 3.0),
+            group("graph", "history", 3.0),
+            group("none", "decision", 1.0),
+            group("files", "decision", 4.333),
+            group("graph", "decision", 4.334),
+            group("graph", "all", 4.0),
+        ];
+        let best: Vec<(&str, &str)> = groups
+            .iter()
+            .filter(|g| is_best(g, &groups))
+            .map(|g| (g.arm.as_str(), g.category.as_str()))
+            .collect();
+        // rule: graph wins; history: a tie of every arm marks none; decision: the two that show
+        // the same 4.33 are both best; a set of one arm has nobody to beat.
+        assert_eq!(
+            best,
+            [
+                ("graph", "rule"),
+                ("files", "decision"),
+                ("graph", "decision")
+            ]
+        );
+    }
+
+    #[test]
+    fn the_report_marks_the_best_arm_bold_and_the_summary_paints_it_green() {
+        let rows = vec![
+            row("Q1", "rule", "files", 1, 2, 0.02),
+            row("Q1", "rule", "graph", 1, 5, 0.03),
+        ];
+        let meta = Meta {
+            arms: vec![
+                ("files".into(), "file memory".into()),
+                ("graph".into(), "graphersal-memory".into()),
+            ],
+            ..Meta::default()
+        };
+        let spent = Spent::default();
+        let text = markdown(&meta, &rows, &spent);
+        assert!(
+            text.contains("| rule (1) | **graph** | **5.00** |"),
+            "{text}"
+        );
+        assert!(text.contains("| rule (1) | files | 2.00 |"), "{text}");
+        let plain = summary_styled(&meta, &rows, &spent, false);
+        assert!(!plain.contains('\x1b'), "{plain}");
+        let colored = summary_styled(&meta, &rows, &spent, true);
+        let graph = colored.lines().find(|l| l.contains("graph")).unwrap();
+        assert!(
+            graph.starts_with("\x1b[32m") && graph.ends_with("\x1b[0m"),
+            "{colored}"
+        );
+        let files = colored.lines().find(|l| l.contains("files")).unwrap();
+        assert!(!files.contains('\x1b'), "{colored}");
     }
 }
