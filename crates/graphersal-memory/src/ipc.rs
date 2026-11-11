@@ -6,7 +6,10 @@
 //! (`--data-dir` or `GRAPHERSAL_MEMORY_DIR`: another data directory gets a daemon of its own),
 //! then the platform's default (macOS `~/Library/Application Support/graphersal-memory/run`,
 //! Linux `$XDG_RUNTIME_DIR/graphersal-memory`, else `~/.local/state/graphersal-memory/run`,
-//! Windows `%LOCALAPPDATA%\graphersal-memory\run`). It holds:
+//! Windows `%LOCALAPPDATA%\graphersal-memory\run`). When the socket path in a default (or in
+//! `<data dir>/run`) would be longer than local sockets allow (a long home directory on macOS),
+//! the run directory is `/tmp/graphersal-memory-<fingerprint of the data directory>` instead
+//! (`short_run_dir`), the same for every process of that data directory. It holds:
 //!
 //! - `daemon.sock`: the daemon's socket (AF_UNIX on every platform), `0600` in a `0700`
 //!   directory on Unix;
@@ -71,8 +74,49 @@ pub fn resolve_run_dir(
         return Ok(PathBuf::from(dir));
     }
     if data_dir_flag.is_some() || set(DATA_DIR_ENV).is_some() {
-        return Ok(data_dir.join("run"));
+        let own = data_dir.join("run");
+        if socket_path(&own).is_err() {
+            return Ok(short_run_dir(data_dir));
+        }
+        return Ok(own);
     }
+    let default = platform_run_dir(data_dir, env, platform)?;
+    // A default whose socket path is too long for local sockets (a long home directory on
+    // macOS): a short directory of its own under the system's temporary directory, the same
+    // for every process of this data directory.
+    if socket_path(&default).is_err() {
+        return Ok(short_run_dir(data_dir));
+    }
+    Ok(default)
+}
+
+/// The run directory used when the default one's socket path would be too long:
+/// `/tmp/graphersal-memory-<fingerprint of the data directory>` (Windows: the temporary
+/// directory). Only its owner may open it (`create_run_dir` refuses one someone else made).
+pub fn short_run_dir(data_dir: &Path) -> PathBuf {
+    let base = if cfg!(unix) {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let absolute = if data_dir.is_absolute() {
+        data_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(data_dir))
+            .unwrap_or_else(|_| data_dir.to_path_buf())
+    };
+    let id = crate::fsutil::fingerprint(absolute.display().to_string().as_bytes());
+    base.join(format!("graphersal-memory-{}", &id[..12]))
+}
+
+/// The platform's default run directory (or the data directory's own, when it was chosen).
+fn platform_run_dir(
+    data_dir: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    platform: Platform,
+) -> Result<PathBuf, String> {
+    let set = |name: &str| env(name).filter(|value| !value.is_empty());
     let missing = |what: &str| {
         format!(
             "cannot find the per-user run directory ({what} is not set): pass --run-dir or set \
@@ -251,6 +295,34 @@ mod tests {
         let err = socket_path(&long).unwrap_err();
         assert!(err.contains(RUN_DIR_ENV), "{err}");
         assert!(socket_path(Path::new("/tmp/r")).is_ok());
+    }
+
+    #[test]
+    fn a_default_run_dir_too_long_for_a_socket_becomes_a_short_one() {
+        let none = env_of(&[("HOME", "/home/u")]);
+        let long = PathBuf::from("/Users")
+            .join("u".repeat(60))
+            .join("Library/Application Support/graphersal-memory");
+        let run = resolve_run_dir(None, None, &long, &none, Platform::MacOs).unwrap();
+        assert_eq!(run, short_run_dir(&long));
+        assert!(socket_path(&run).is_ok(), "{}", run.display());
+        // The same for every process of this data directory, another for another one.
+        assert_eq!(
+            run,
+            resolve_run_dir(None, None, &long, &none, Platform::MacOs).unwrap()
+        );
+        assert_ne!(run, short_run_dir(&long.join("other")));
+        // An explicit data directory's own run directory too.
+        assert_eq!(
+            resolve_run_dir(None, Some(&long), &long, &none, Platform::Xdg).unwrap(),
+            run
+        );
+        // An explicit run directory stays the user's choice (refused later when too long).
+        let explicit = PathBuf::from("/").join("r".repeat(120));
+        assert_eq!(
+            resolve_run_dir(Some(&explicit), None, &long, &none, Platform::MacOs).unwrap(),
+            explicit
+        );
     }
 
     #[test]

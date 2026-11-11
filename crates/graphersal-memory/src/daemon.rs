@@ -848,6 +848,16 @@ impl Daemon {
             dir.display(),
             opened_in.as_secs_f64()
         ));
+        if name == crate::registry::DEFAULT_STORE {
+            let call = |function: &str, args: serde_json::Value| store.call(function, args);
+            match crate::import::migrate_sources(&self.options.data_dir, &call) {
+                Ok(0) => {}
+                Ok(n) => log(&format!(
+                    "marked {n} memories imported before the import recorded their files"
+                )),
+                Err(err) => log(&format!("the import source migration failed: {err}")),
+            }
+        }
         stores.insert(name.to_string(), store.clone());
         drop(stores);
         self.apply_embedder(store.clone());

@@ -264,13 +264,15 @@ impl Setup {
             }
             Kind::OpenCode => crate::opencode::find_program(home, search),
             Kind::Codex => crate::codex::find_program(search),
-            Kind::Cursor => crate::cursor::find_program(search).or_else(|| {
-                let mut bundles = vec![home.join("Applications").join("Cursor.app")];
-                if search.is_none() {
-                    bundles.push(PathBuf::from("/Applications/Cursor.app"));
-                }
-                bundles.into_iter().find(|bundle| bundle.is_dir())
-            }),
+            Kind::Cursor => crate::cursor::find_program(search)
+                .or_else(|| {
+                    let mut bundles = vec![home.join("Applications").join("Cursor.app")];
+                    if search.is_none() {
+                        bundles.push(PathBuf::from("/Applications/Cursor.app"));
+                    }
+                    bundles.into_iter().find(|bundle| bundle.is_dir())
+                })
+                .or_else(|| first_file(cursor_windows_locations(home, search.is_none()))),
         }
     }
 
@@ -367,7 +369,7 @@ impl Setup {
                 }
                 command
             }
-            None => self.hook_command_with(event, quote, ""),
+            None => self.hook_command_with(event, self.quote_fn(), ""),
         }
     }
 
@@ -377,10 +379,20 @@ impl Setup {
         if self.hooks.windows {
             format!(
                 "{} (run without a shell)",
-                self.hook_command_with(event, quote, "")
+                self.hook_command_with(event, quote_double, "")
             )
         } else {
             self.hook_command(event)
+        }
+    }
+
+    /// How this machine's hook command lines quote a word: double quotes for Windows (`cmd.exe`
+    /// and Git Bash run them), single quotes for `sh` elsewhere.
+    fn quote_fn(&self) -> fn(&str) -> String {
+        if self.hooks.windows {
+            quote_double
+        } else {
+            quote_single
         }
     }
 
@@ -425,6 +437,39 @@ impl Setup {
     fn state_dir(&self) -> PathBuf {
         self.data_dir.join(STATE_DIR)
     }
+
+    /// What recognises our entries on this machine ([`Ours`]): this binary, and every binary
+    /// an install recorded in a state file.
+    pub fn ours(&self) -> Ours {
+        let mut programs = vec![self.exe.display().to_string()];
+        for kind in Kind::ALL {
+            if let Ok(state) = State::load_of(self, kind)
+                && let Some(exe) = state.meta.get("exe").and_then(Value::as_str)
+                && !programs.iter().any(|p| p == exe)
+            {
+                programs.push(exe.to_string());
+            }
+        }
+        Ours { programs }
+    }
+}
+
+/// Where Cursor's Windows installers put `Cursor.exe` when it is not on `PATH`: the per-user
+/// install (`%LOCALAPPDATA%\Programs\cursor`, under the home directory) and, for this process's
+/// own machine (`system`), the per-machine one (`%ProgramFiles%\cursor`) and `%LOCALAPPDATA%`
+/// itself when it is elsewhere.
+fn cursor_windows_locations(home: &Path, system: bool) -> Vec<PathBuf> {
+    let exe = |base: PathBuf| base.join("Programs").join("cursor").join("Cursor.exe");
+    let mut candidates = vec![exe(home.join("AppData").join("Local"))];
+    if system && cfg!(windows) {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(exe(PathBuf::from(local)));
+        }
+        if let Some(programs) = std::env::var_os("ProgramFiles") {
+            candidates.push(PathBuf::from(programs).join("cursor").join("Cursor.exe"));
+        }
+    }
+    candidates
 }
 
 /// How the hook commands are written on this machine.
@@ -472,8 +517,29 @@ pub fn names_of(kinds: &[Kind]) -> String {
     join_and(&kinds.iter().map(|k| k.display_name()).collect::<Vec<_>>())
 }
 
-/// `text` with the home directory written as `~` (every path that starts with it).
+/// `text` with the home directory written as `~` (every path that starts with it), except in
+/// commands shown between backticks: a shell does not expand `~` inside quotes, so a command
+/// copied from the output must carry the full path.
 pub fn tilde(text: &str, home: &Path) -> String {
+    if text.matches('`').count() >= 2 {
+        let mut out = String::new();
+        for (n, part) in text.split('`').enumerate() {
+            if n > 0 {
+                out.push('`');
+            }
+            if n % 2 == 1 && text.split('`').count() > n + 1 {
+                out.push_str(part);
+            } else {
+                out.push_str(&tilde_prose(part, home));
+            }
+        }
+        return out;
+    }
+    tilde_prose(text, home)
+}
+
+/// [`tilde`] of text without commands.
+fn tilde_prose(text: &str, home: &Path) -> String {
     let home = home.display().to_string();
     if home.is_empty() || home == "/" {
         return text.to_string();
@@ -535,9 +601,126 @@ pub(crate) fn ask_yes_no(
     }
 }
 
-/// `text` in double quotes for a shell command line.
-fn quote(text: &str) -> String {
+/// `text` in single quotes for `sh`.
+fn quote_single(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// `text` in double quotes (what earlier versions wrote on every platform).
+fn quote_double(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\\\""))
+}
+
+/// The program word of a command line and the rest: a word in double quotes (`\"` inside), in
+/// single quotes (`sh`'s `'\''` and PowerShell's `''` inside), after PowerShell's `& `, or a
+/// bare word.
+pub(crate) fn split_program(command: &str) -> Option<(String, &str)> {
+    let text = command.trim_start();
+    let text = text.strip_prefix("& ").unwrap_or(text).trim_start();
+    let bytes = text.as_bytes();
+    let mut word = String::new();
+    let mut i = 0;
+    match bytes.first()? {
+        b'"' => {
+            i = 1;
+            loop {
+                let c = text[i..].chars().next()?;
+                if c == '\\' && text[i + 1..].starts_with(['"', '\\']) {
+                    word.push(text[i + 1..].chars().next()?);
+                    i += 2;
+                } else if c == '"' {
+                    i += 1;
+                    break;
+                } else {
+                    word.push(c);
+                    i += c.len_utf8();
+                }
+            }
+        }
+        b'\'' => loop {
+            // One single-quoted run, then `\''` (sh) or `''` (PowerShell) continue the word.
+            i += 1;
+            let end = i + text[i..].find('\'')?;
+            word.push_str(&text[i..end]);
+            i = end + 1;
+            if text[i..].starts_with("\\''") {
+                word.push('\'');
+                i += 2;
+            } else if text[i..].starts_with('\'') {
+                word.push('\'');
+            } else {
+                break;
+            }
+        },
+        _ => {
+            let end = text.find(char::is_whitespace).unwrap_or(text.len());
+            word.push_str(&text[..end]);
+            i = end;
+        }
+    }
+    Some((word, &text[i..]))
+}
+
+/// What recognises our entries: the program a `graphersal-memory` binary by its file name, or
+/// exactly this binary or one an install recorded (a binary renamed or installed under another
+/// name). The same rule for MCP entries and hook commands of every harness.
+#[derive(Debug, Clone, Default)]
+pub struct Ours {
+    programs: Vec<String>,
+}
+
+impl Ours {
+    /// Whether `program` (a path or a bare name) is ours.
+    pub fn program(&self, program: &str) -> bool {
+        crate::agents::is_our_program(program) || self.programs.iter().any(|p| p == program)
+    }
+
+    /// Whether an MCP entry (either shape) starts one of our programs with `mcp`.
+    pub fn entry(&self, entry: &Value) -> bool {
+        let first = match &entry["command"] {
+            Value::Array(parts) => parts.get(1).cloned().unwrap_or(Value::Null),
+            _ => entry["args"][0].clone(),
+        };
+        self.program(crate::agents::entry_program(entry)) && first == "mcp"
+    }
+
+    /// Whether a hook command line runs one of our programs with `hook session-...`.
+    pub fn command(&self, command: &str) -> bool {
+        split_program(command).is_some_and(|(program, rest)| {
+            self.program(&program) && rest.trim_start().starts_with("hook session-")
+        })
+    }
+
+    /// Whether a hook entry is ours: a command line ([`Ours::command`]) or the exec form
+    /// (`command` = our program, `args` starting with `hook session-...`).
+    pub fn hook(&self, hook: &Value) -> bool {
+        let command = hook["command"].as_str().unwrap_or_default();
+        match hook["args"].as_array() {
+            Some(args) => {
+                self.program(command)
+                    && args.first().and_then(Value::as_str) == Some("hook")
+                    && args
+                        .get(1)
+                        .and_then(Value::as_str)
+                        .is_some_and(|event| event.starts_with("session-"))
+            }
+            None => self.command(command),
+        }
+    }
+
+    /// Whether a hook group (an element of `hooks.<Event>`) consists of our hooks only.
+    pub fn hook_group(&self, group: &Value) -> bool {
+        group["hooks"]
+            .as_array()
+            .is_some_and(|hooks| !hooks.is_empty() && hooks.iter().all(|h| self.hook(h)))
+    }
+
+    /// Whether a hook group holds one of our hooks beside hooks of others.
+    pub fn mixed_group(&self, group: &Value) -> bool {
+        group["hooks"].as_array().is_some_and(|hooks| {
+            hooks.iter().any(|h| self.hook(h)) && !hooks.iter().all(|h| self.hook(h))
+        })
+    }
 }
 
 /// `text` in single quotes for a PowerShell command line (a `'` inside is doubled).
@@ -545,31 +728,23 @@ fn quote_powershell(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
-/// Whether an MCP entry is one of ours: it starts a `graphersal-memory` binary with `mcp`.
+/// Whether an MCP entry is one of ours by its program's file name (`graphersal-memory`); with a
+/// [`Setup`], [`Setup::ours`] also knows a renamed binary.
+#[cfg(test)]
 pub fn is_our_entry(entry: &Value) -> bool {
-    crate::agents::is_our_entry(entry)
+    Ours::default().entry(entry)
 }
 
-/// Whether a hook command is one of ours.
+/// Whether a hook command is one of ours by its program's file name ([`Ours::command`]).
+#[cfg(test)]
 pub(crate) fn is_our_command(command: &str) -> bool {
-    command.contains("graphersal-memory") && command.contains(" hook session-")
+    Ours::default().command(command)
 }
 
-/// Whether a hook entry is ours: a shell command line of ours ([`is_our_command`]: quoted,
-/// plain or bare program), or the exec form (`command` = a `graphersal-memory` binary, `args`
-/// starting with `hook session-...`).
+/// Whether a hook entry is ours by its program's file name ([`Ours::hook`]).
+#[cfg(test)]
 pub fn is_our_hook(hook: &Value) -> bool {
-    match hook["args"].as_array() {
-        Some(args) => {
-            crate::agents::is_our_program(hook["command"].as_str().unwrap_or_default())
-                && args.first().and_then(Value::as_str) == Some("hook")
-                && args
-                    .get(1)
-                    .and_then(Value::as_str)
-                    .is_some_and(|event| event.starts_with("session-"))
-        }
-        None => is_our_command(hook["command"].as_str().unwrap_or_default()),
-    }
+    Ours::default().hook(hook)
 }
 
 /// Whether Claude Code's settings file (`paths.settings`) holds our SessionStart hook (then
@@ -580,11 +755,10 @@ pub fn claude_start_hook_installed(paths: &ClaudePaths) -> bool {
         .is_some_and(|groups| groups.iter().any(is_our_hook_group))
 }
 
-/// Whether a hook group (an element of `hooks.<Event>`) consists of our commands only.
+/// Whether a hook group (an element of `hooks.<Event>`) consists of our commands only (by the
+/// program's file name).
 pub fn is_our_hook_group(group: &Value) -> bool {
-    group["hooks"]
-        .as_array()
-        .is_some_and(|hooks| !hooks.is_empty() && hooks.iter().all(is_our_hook))
+    Ours::default().hook_group(group)
 }
 
 /// The managed block for `RULE_BLOCK` (English), marker lines included, ending with a newline.
@@ -669,7 +843,8 @@ pub fn find_block_in(
         .map(|(at, _)| line_end + at)
         .find(|at| text[..*at].ends_with('\n'))
         .ok_or("the managed block has no end marker")?;
-    let content = &text[line_end..end_at];
+    // A file with CRLF line ends holds the block with CRLF too: compared with LF.
+    let content = &text[line_end..end_at].replace("\r\n", "\n");
     let mut end = end_at + BLOCK_END.len();
     if text[end..].starts_with("\r\n") {
         end += 2;
@@ -677,7 +852,7 @@ pub fn find_block_in(
         end += 1;
     }
     let intact = fsutil::fingerprint(content.as_bytes()) == recorded;
-    let is_current = intact && text[start..end] == wrap_block(current);
+    let is_current = intact && text[start..end].replace("\r\n", "\n") == wrap_block(current);
     let is_ours = ours
         .iter()
         .any(|block| fsutil::fingerprint(block.as_bytes()) == recorded);
@@ -690,14 +865,26 @@ pub fn find_block_in(
     }))
 }
 
-/// The separator put before a block appended to `text`.
+/// The separator put before a block appended to `text` (CRLF when `text` uses CRLF).
 pub(crate) fn block_separator(text: &str) -> &'static str {
-    if text.is_empty() || text.ends_with("\n\n") {
+    let crlf = text.contains("\r\n");
+    if text.is_empty() || text.ends_with("\n\n") || text.ends_with("\r\n\r\n") {
         ""
     } else if text.ends_with('\n') {
-        "\n"
+        if crlf { "\r\n" } else { "\n" }
+    } else if crlf {
+        "\r\n\r\n"
     } else {
         "\n\n"
+    }
+}
+
+/// `block` (LF line ends) with the line ends of `text`: CRLF when `text` uses them.
+pub(crate) fn line_ends_like(text: &str, block: &str) -> String {
+    if text.contains("\r\n") {
+        block.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        block.to_string()
     }
 }
 
@@ -915,8 +1102,59 @@ pub(crate) fn read_text(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
+/// `err` (about one agent's file) with the way out: fix that file and run the command again, or
+/// leave that agent out with `--harness` (naming the other agents of `kinds`).
+pub(crate) fn way_out(err: &str, kinds: &[Kind], command: &str, verb: &str) -> String {
+    let owner = kinds.iter().find(|kind| {
+        let agent_dir = |kind: &Kind| match kind {
+            Kind::ClaudeCode => vec![".claude"],
+            Kind::OpenCode => vec!["opencode"],
+            Kind::Codex => vec![".codex", "codex"],
+            Kind::Cursor => vec![".cursor"],
+        };
+        agent_dir(kind).iter().any(|dir| err.contains(dir))
+    });
+    let others: Vec<&str> = kinds
+        .iter()
+        .filter(|kind| Some(*kind) != owner)
+        .map(|kind| kind.id())
+        .collect();
+    let mut text = format!(
+        "{err}; nothing was changed. Fix that file (or move it away) and run `graphersal-memory \
+         {command}` again"
+    );
+    if let (Some(owner), false) = (owner, others.is_empty()) {
+        text.push_str(&format!(
+            "; or {verb} the other agents now and leave {} out: `graphersal-memory {command} \
+             --harness <agent>` for {}",
+            owner.display_name(),
+            join_and(&others)
+        ));
+    }
+    text
+}
+
+/// `err` naming the file it is about (`path` put before it unless it names it already).
+pub(crate) fn in_file(path: &Path, err: String) -> String {
+    let name = path.display().to_string();
+    if err.contains(&name) {
+        err
+    } else {
+        format!("{name}: {err}")
+    }
+}
+
 /// An empty JSON object as the start of a file install creates.
 const EMPTY_OBJECT: &str = "{\n}\n";
+
+/// The text a JSON file's edit starts from: its text, or `empty` when it is missing or holds
+/// only whitespace (an empty file is an empty configuration, not invalid JSON).
+pub(crate) fn json_start(before: &Option<String>, empty: &str) -> String {
+    match before {
+        Some(text) if !text.trim().is_empty() => text.clone(),
+        _ => empty.to_string(),
+    }
+}
 
 /// Plans the change of the user configuration (the MCP servers).
 fn plan_user_config(
@@ -928,7 +1166,7 @@ fn plan_user_config(
     let key = agent.mcp_servers_key();
     let path = agent.mcp_config_file();
     let before = read_text(path)?;
-    let mut text = before.clone().unwrap_or_else(|| EMPTY_OBJECT.to_string());
+    let mut text = json_start(&before, EMPTY_OBJECT);
     let parsed: Value = serde_json::from_str(&text)
         .map_err(|err| format!("{} is not valid JSON: {err}", path.display()))?;
     let mut created = Vec::new();
@@ -939,7 +1177,7 @@ fn plan_user_config(
     }
     for (name, profile) in servers {
         let existing = &parsed[key][name];
-        if !existing.is_null() && !is_our_entry(existing) {
+        if !existing.is_null() && !setup.ours().entry(existing) {
             conflicts.push(format!(
                 "{}: {key}.{name} exists and is not ours; kept. Remove it ({}) and run install \
                  again.",
@@ -952,7 +1190,9 @@ fn plan_user_config(
             continue;
         }
         let entry = setup.mcp_entry(profile);
-        match jsonedit::set_member(&text, &[key], name, &entry)? {
+        match jsonedit::set_member(&text, &[key], name, &entry)
+            .map_err(|e| crate::install::in_file(path, e))?
+        {
             Some((new, made)) => {
                 lines.push(format!(
                     "{name} ({profile} profile): {}",
@@ -971,8 +1211,9 @@ fn plan_user_config(
                 "{DEVELOP_SERVER}: not registered (off; `graphersal-memory install \
                  --enable-develop` registers it)"
             ));
-        } else if is_our_entry(develop)
-            && let Some(new) = jsonedit::remove_member(&text, &[key], DEVELOP_SERVER)?
+        } else if setup.ours().entry(develop)
+            && let Some(new) = jsonedit::remove_member(&text, &[key], DEVELOP_SERVER)
+                .map_err(|e| crate::install::in_file(path, e))?
         {
             text = new;
             lines.push(format!("{DEVELOP_SERVER}: unregister (you answered no)"));
@@ -1057,35 +1298,23 @@ fn plan_settings(
 ) -> Result<(Step, Option<Change>, AutoMemoryPlan), String> {
     let path = &setup.paths.settings;
     let before = read_text(path)?;
-    let mut text = before.clone().unwrap_or_else(|| EMPTY_OBJECT.to_string());
+    let mut text = json_start(&before, EMPTY_OBJECT);
     let parsed: Value = serde_json::from_str(&text)
         .map_err(|err| format!("{} is not valid JSON: {err}", path.display()))?;
     let mut created = Vec::new();
     let mut lines = Vec::new();
+    let ours = setup.ours();
     for (event, sub) in HOOK_EVENTS {
         let group = setup.hook_group(sub);
-        let current = parsed["hooks"][event].as_array();
-        let ours: Vec<&Value> = current
-            .map(|groups| groups.iter().filter(|g| is_our_hook_group(g)).collect())
-            .unwrap_or_default();
-        if ours.len() == 1 && *ours[0] == group {
-            lines.push(format!("{event}: already installed"));
-            continue;
-        }
-        if !ours.is_empty()
-            && let Some(new) =
-                jsonedit::remove_elements(&text, &["hooks", event], &is_our_hook_group)?
-        {
-            text = new;
-        }
-        let (new, made) = jsonedit::append_element(&text, &["hooks", event], &group)?;
+        let (new, made, step) = plan_hook_event(&ours, &text, event, &group)
+            .map_err(|e| crate::install::in_file(path, e))?;
         text = new;
         created.extend(made);
-        lines.push(format!(
-            "{event}: {} `{}`",
-            if ours.is_empty() { "add" } else { "update to" },
-            setup.claude_hook_text(sub)
-        ));
+        lines.push(match step {
+            HookStep::Installed => format!("{event}: already installed"),
+            HookStep::Added => format!("{event}: add `{}`", setup.claude_hook_text(sub)),
+            HookStep::Updated => format!("{event}: update to `{}`", setup.claude_hook_text(sub)),
+        });
     }
     let mut plan = AutoMemoryPlan::Keep;
     if let Some(key) = setup.agent().auto_memory_key() {
@@ -1105,7 +1334,9 @@ fn plan_settings(
                         ", your own setting"
                     }
                 ));
-            } else if let Some((new, _)) = jsonedit::set_member(&text, &[], key, &json!(false))? {
+            } else if let Some((new, _)) = jsonedit::set_member(&text, &[], key, &json!(false))
+                .map_err(|e| crate::install::in_file(path, e))?
+            {
                 text = new;
                 lines.push(format!(
                     "{key}: false (switch Claude Code's auto-memory off). {start_note} \
@@ -1122,7 +1353,8 @@ fn plan_settings(
             if off {
                 let previous = &record["previous"];
                 let restored = if previous.is_null() {
-                    jsonedit::remove_member(&text, &[], key)?
+                    jsonedit::remove_member(&text, &[], key)
+                        .map_err(|e| crate::install::in_file(path, e))?
                 } else {
                     jsonedit::set_member(&text, &[], key, previous)?.map(|(new, _)| new)
                 };
@@ -1206,13 +1438,16 @@ fn plan_block(
         Ok(Some(found)) => Some(format!(
             "{}{}{}",
             &text[..found.start],
-            block_text_for(language),
+            line_ends_like(&text, &block_text_for(language)),
             &text[found.end..]
         )),
         Ok(None) => {
             let sep = block_separator(&text);
             separator = Some(sep.to_string());
-            Some(format!("{text}{sep}{}", block_text_for(language)))
+            Some(format!(
+                "{text}{sep}{}",
+                line_ends_like(&text, &block_text_for(language))
+            ))
         }
     };
     let line = match (&after, find_block_for(&text, language)) {
@@ -1251,7 +1486,8 @@ struct Current {
     installed: bool,
     /// The settings file.
     config: Config,
-    /// install's earlier answer to the auto-memory question, when it recorded one.
+    /// The current answer to the auto-memory question on an installed system (whether the
+    /// harness's memory is off now), `None` before the first install.
     auto_memory_answer: Option<bool>,
     /// Whether the harness's own memory is off (by anyone).
     auto_memory_off: bool,
@@ -1338,6 +1574,20 @@ impl Current {
         let recorded = state
             .file(agent.settings_file())
             .is_some_and(|entry| entry.contains_key(AUTO_MEMORY_RECORD));
+        let codex_memories_on = read_text(&setup.codex.config_file)
+            .ok()
+            .flatten()
+            .and_then(|text| crate::tomledit::parse(&text).ok())
+            .is_some_and(|doc| crate::codex::install::memories_on(&doc));
+        // On an installed system the current answer is what is true now: a user who switched
+        // the harness's memory back on after install keeps it on (unless they answer otherwise).
+        let auto_memory_answer = if state.meta.contains_key("auto_memory_off") {
+            Some(off)
+        } else if codex_state.meta.contains_key("auto_memory_off") {
+            Some(!codex_memories_on)
+        } else {
+            None
+        };
         let imports = import::plan(
             import::scan(agent.projects_dir())?,
             &ImportState::load(&setup.data_dir)?,
@@ -1349,14 +1599,12 @@ impl Current {
             start_preview,
             start_blocked,
             installed: State::exists(setup),
-            auto_memory_answer: state
-                .meta
-                .get("auto_memory_off")
-                .or_else(|| codex_state.meta.get("auto_memory_off"))
-                .and_then(Value::as_bool),
+            auto_memory_answer,
             auto_memory_off: off,
             auto_memory_off_by_user: off && !recorded,
-            develop_registered: is_our_entry(&user_config["mcpServers"][DEVELOP_SERVER]),
+            develop_registered: setup
+                .ours()
+                .entry(&user_config["mcpServers"][DEVELOP_SERVER]),
             import_pending: (with_project, new + changed),
             detected: {
                 let found = setup.detected();
@@ -1367,11 +1615,7 @@ impl Current {
                 }
             },
             config,
-            codex_memories_on: read_text(&setup.codex.config_file)
-                .ok()
-                .flatten()
-                .and_then(|text| crate::tomledit::parse(&text).ok())
-                .is_some_and(|doc| crate::codex::install::memories_on(&doc)),
+            codex_memories_on,
         })
     }
 
@@ -1607,7 +1851,7 @@ fn ask(
             );
             lines.push(format!(
                 "{}); uninstall switches them on again.",
-                setup.codex.config_file.display()
+                setup.show(&setup.codex.config_file.display().to_string())
             ));
         }
         let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
@@ -1616,7 +1860,7 @@ fn ask(
             &format!(
                 "switch it off ({} false in {})",
                 agent.auto_memory_key().unwrap_or_default(),
-                agent.settings_file().display()
+                setup.show(&agent.settings_file().display().to_string())
             ),
             "keep it on (the files it writes are imported at each session start)",
             Some(defaults.auto_memory_off),
@@ -1636,7 +1880,7 @@ fn ask(
         console.yes_no(
             &format!(
                 "switch it off ([features] memories = false in {})",
-                setup.codex.config_file.display()
+                setup.show(&setup.codex.config_file.display().to_string())
             ),
             "keep it on",
             Some(defaults.auto_memory_off),
@@ -2086,13 +2330,21 @@ pub(crate) fn confirm(question: &str, input: &mut dyn BufRead, out: &mut dyn Wri
 }
 
 /// Applies planned file changes: backs a file up before its first change, writes it, and
-/// records the change in the state.
+/// records the change in the state (`after_write` adds to the state of a file just written).
+/// A file whose text is no longer the one the plan was computed from (`bases`), or that
+/// changes while it is written, is not written: the error starts with
+/// [`fsutil::CHANGED_MEANWHILE`]. Every file written goes into `journal` with its text before
+/// (the first time only).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_changes(
     setup: &Setup,
     changes: &[Change],
     state: &mut State,
     report: &mut Vec<String>,
     backups: &mut std::collections::BTreeSet<PathBuf>,
+    bases: &std::collections::BTreeMap<PathBuf, Option<String>>,
+    journal: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
+    after_write: &mut dyn FnMut(&Path, &mut State),
 ) -> Result<(), String> {
     // One backup directory per install: the stamp of a directory already written is reused
     // (the agents' changes are applied one after the other, maybe across a second).
@@ -2106,6 +2358,11 @@ pub(crate) fn apply_changes(
         let path = &change.path;
         let current = fsutil::read_optional(path)?;
         let current_fp = current.as_deref().map(fsutil::fingerprint);
+        if let Some(base) = bases.get(path)
+            && *base != current_fp
+        {
+            return Err(format!("{}: {}", fsutil::CHANGED_MEANWHILE, path.display()));
+        }
         let known = state.file(path).cloned();
         let entry_existed = known.is_some();
         // Missing directories on the way are created and recorded.
@@ -2123,13 +2380,19 @@ pub(crate) fn apply_changes(
                 .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
             for dir in missing.iter().rev() {
                 state.add_created_dir(dir);
+                // A rollback removes it again (when empty).
+                journal.push((dir.clone(), None));
             }
         }
         let mut backup_note = String::new();
         if !entry_existed {
             let entry = state.file_mut(path);
             entry.insert("existed".into(), json!(current.is_some()));
-            entry.insert("backup_valid".into(), json!(true));
+            // A file that holds our parts already (left by an install whose record is gone, or
+            // one running at the same time) is no original: uninstall removes our parts from
+            // it instead of putting this copy back.
+            let original = !current.as_deref().is_some_and(holds_ours);
+            entry.insert("backup_valid".into(), json!(original));
             if let Some(bytes) = &current {
                 let backup = backup_file(setup, &stamp, path, bytes)?;
                 backup_note = backed_up(path, &backup, backups);
@@ -2151,9 +2414,18 @@ pub(crate) fn apply_changes(
                 }
             }
         }
+        let mut unchanged = |target: &Path| {
+            fsutil::read_optional(target)
+                .ok()
+                .map(|bytes| bytes.as_deref().map(fsutil::fingerprint))
+                == Some(current_fp.clone())
+        };
         match &change.after {
             Some(text) => {
-                fsutil::write_atomic(path, text.as_bytes())?;
+                fsutil::write_atomic_checked(path, text.as_bytes(), &mut unchanged)?;
+                if !journal.iter().any(|(p, _)| p == path) {
+                    journal.push((path.clone(), current.clone()));
+                }
                 let entry = state.file_mut(path);
                 entry.insert(
                     "written".into(),
@@ -2186,12 +2458,33 @@ pub(crate) fn apply_changes(
             }
             None => {
                 remove_file(path)?;
+                if !journal.iter().any(|(p, _)| p == path) {
+                    journal.push((path.clone(), current.clone()));
+                }
                 report.push(format!("removed {}{backup_note}", path.display()));
             }
         }
+        after_write(path, state);
         state.save(setup)?;
     }
     Ok(())
+}
+
+/// Whether a file's bytes hold one of graphersal-memory's parts (any mention of its name: an
+/// MCP entry, a hook, a rule block, the plugin). A false alarm only means uninstall removes our
+/// parts from the file instead of putting its backup back.
+pub(crate) fn holds_ours(bytes: &[u8]) -> bool {
+    bytes.windows(17).any(|w| w == b"graphersal-memory")
+}
+
+/// Whether the backup a state entry names holds our parts ([`holds_ours`]): then uninstall
+/// never puts it back.
+pub(crate) fn backup_holds_ours(entry: Option<&serde_json::Map<String, Value>>) -> bool {
+    entry
+        .and_then(|e| e.get("backup"))
+        .and_then(Value::as_str)
+        .and_then(|backup| std::fs::read(backup).ok())
+        .is_some_and(|bytes| holds_ours(&bytes))
 }
 
 /// The report's note about a backup (its directory is reported once, in `backups`).
@@ -2250,10 +2543,15 @@ pub fn install(
     if options.harnesses.is_none() && setup.detected().is_empty() {
         return Ok(refuse_without_programs(setup, out, options.color));
     }
+    // Before anything changes: a data directory that is someone else's folder, a socket path
+    // the daemon cannot use, another install running.
+    if let Some(reason) = crate::store::foreign_data_dir(&setup.data_dir) {
+        return Err(reason);
+    }
+    crate::ipc::socket_path(&setup.run_dir).map_err(|err| format!("{err}; nothing was changed"))?;
     let current = Current::read(setup)?;
     let interactive = options.interactive && !options.yes && !options.dry_run;
     let color = options.color;
-    let agent = setup.agent();
     let notes = detection_notes(setup, options);
     let answers = if interactive {
         let mut console = Console::new(input, out, options.color);
@@ -2282,7 +2580,8 @@ pub fn install(
     } else {
         default_answers(options, &current)
     };
-    let plan = plan_install(setup, options, &answers, &current)?;
+    let plan = plan_install(setup, options, &answers, &current)
+        .map_err(|err| way_out(&err, &answers.harnesses, "install", "install into"))?;
     // What must never be skipped: conflicts, Codex's hook approval, "nothing is lost".
     let mut must_read = Vec::new();
     for conflict in &plan.conflicts {
@@ -2398,126 +2697,12 @@ pub fn install(
             }
         }
     }
-    // The report: what changed per agent, then what changed in the memory itself.
+    // Nothing is written while another install or uninstall runs.
+    let _lock = InstallLock::take(setup, true)?;
     let mut report = Vec::new();
-    let mut agent_report: Vec<(Kind, Vec<String>)> = Vec::new();
-    let mut backups = std::collections::BTreeSet::new();
     let claude = answers.harnesses.contains(&Kind::ClaudeCode);
-    let mut state = State::load(setup)?;
-    for kind in &answers.harnesses {
-        let mut lines = Vec::new();
-        let mut kind_state = State::load_of(setup, *kind)?;
-        if !kind_state.meta.contains_key("installed_at") {
-            kind_state
-                .meta
-                .insert("installed_at".into(), json!(crate::daemon::now_utc()));
-        }
-        kind_state
-            .meta
-            .insert("updated_at".into(), json!(crate::daemon::now_utc()));
-        kind_state
-            .meta
-            .insert("exe".into(), json!(setup.exe.display().to_string()));
-        match kind {
-            Kind::ClaudeCode => {
-                kind_state
-                    .meta
-                    .insert("auto_memory_off".into(), json!(answers.auto_memory_off));
-                kind_state.save(setup)?;
-                apply_changes(
-                    setup,
-                    &plan.changes,
-                    &mut kind_state,
-                    &mut lines,
-                    &mut backups,
-                )?;
-                state = kind_state;
-            }
-            Kind::OpenCode => {
-                kind_state.save(setup)?;
-                apply_changes(
-                    setup,
-                    &plan.opencode_changes,
-                    &mut kind_state,
-                    &mut lines,
-                    &mut backups,
-                )?;
-            }
-            Kind::Codex => {
-                kind_state
-                    .meta
-                    .insert("auto_memory_off".into(), json!(answers.auto_memory_off));
-                kind_state.save(setup)?;
-                apply_changes(
-                    setup,
-                    &plan.codex_changes,
-                    &mut kind_state,
-                    &mut lines,
-                    &mut backups,
-                )?;
-                let config = &setup.codex.config_file;
-                match plan.codex_memories {
-                    Some(true) => {
-                        kind_state.file_mut(config).insert(
-                            crate::codex::install::MEMORIES_RECORD.into(),
-                            json!({"previous": true}),
-                        );
-                        lines.push(
-                            "Codex's memories: off (uninstall exports every memory as Markdown \
-                             and switches them on again)"
-                                .to_string(),
-                        );
-                    }
-                    Some(false) => {
-                        kind_state
-                            .file_mut(config)
-                            .remove(crate::codex::install::MEMORIES_RECORD);
-                    }
-                    None => {}
-                }
-                kind_state.save(setup)?;
-            }
-            Kind::Cursor => {
-                kind_state.save(setup)?;
-                apply_changes(
-                    setup,
-                    &plan.cursor_changes,
-                    &mut kind_state,
-                    &mut lines,
-                    &mut backups,
-                )?;
-            }
-        }
-        agent_report.push((*kind, lines));
-    }
-    match &plan.auto_memory {
-        AutoMemoryPlan::Keep => {}
-        AutoMemoryPlan::SwitchOff { previous } => {
-            state
-                .file_mut(&setup.paths.settings)
-                .insert(AUTO_MEMORY_RECORD.into(), json!({"previous": previous}));
-            state.save(setup)?;
-            let line = format!(
-                "{}'s auto-memory: off (uninstall writes every memory back to its memory files \
-                 and switches it on again)",
-                agent.display_name()
-            );
-            match agent_report
-                .iter_mut()
-                .find(|(k, _)| *k == Kind::ClaudeCode)
-            {
-                Some((_, lines)) => lines.push(line),
-                None => report.push(line),
-            }
-        }
-        AutoMemoryPlan::Restore => {
-            state
-                .file_mut(&setup.paths.settings)
-                .remove(AUTO_MEMORY_RECORD);
-            state.save(setup)?;
-        }
-    }
-
+    let (plan, agent_report, backups) =
+        apply_with_retries(setup, options, &answers, &current, plan, &mut report)?;
     // The settings file: the defaults when there is none, then the answers.
     if plan.write_config {
         let path = crate::config::path(&setup.data_dir);
@@ -2740,6 +2925,307 @@ pub fn install(
     } else {
         1
     })
+}
+
+/// Applies the agents' file changes of `plan` (each harness's state recorded as it goes) and
+/// install's auto-memory record. Every file written is recorded in `journal` with its text
+/// before (for a rollback); `bases` are the fingerprints the plan's texts were computed from.
+#[allow(clippy::too_many_arguments)]
+fn apply_agents(
+    setup: &Setup,
+    answers: &Answers,
+    plan: &InstallPlan,
+    bases: &std::collections::BTreeMap<PathBuf, Option<String>>,
+    journal: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
+    agent_report: &mut Vec<(Kind, Vec<String>)>,
+    report: &mut Vec<String>,
+    backups: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<State, String> {
+    let mut state = State::load(setup)?;
+    for kind in &answers.harnesses {
+        let mut lines = Vec::new();
+        let mut kind_state = State::load_of(setup, *kind)?;
+        if !kind_state.meta.contains_key("installed_at") {
+            kind_state
+                .meta
+                .insert("installed_at".into(), json!(crate::daemon::now_utc()));
+        }
+        kind_state
+            .meta
+            .insert("updated_at".into(), json!(crate::daemon::now_utc()));
+        kind_state
+            .meta
+            .insert("exe".into(), json!(setup.exe.display().to_string()));
+        match kind {
+            Kind::ClaudeCode => {
+                kind_state
+                    .meta
+                    .insert("auto_memory_off".into(), json!(answers.auto_memory_off));
+                kind_state.save(setup)?;
+                let settings = setup.paths.settings.clone();
+                apply_changes(
+                    setup,
+                    &plan.changes,
+                    &mut kind_state,
+                    &mut lines,
+                    backups,
+                    bases,
+                    journal,
+                    // install's auto-memory record goes with the write of the settings file.
+                    &mut |path, state| {
+                        if path != settings {
+                            return;
+                        }
+                        match &plan.auto_memory {
+                            AutoMemoryPlan::Keep => {}
+                            AutoMemoryPlan::SwitchOff { previous } => {
+                                state.file_mut(path).insert(
+                                    AUTO_MEMORY_RECORD.into(),
+                                    json!({"previous": previous}),
+                                );
+                            }
+                            AutoMemoryPlan::Restore => {
+                                state.file_mut(path).remove(AUTO_MEMORY_RECORD);
+                            }
+                        }
+                    },
+                )?;
+                state = kind_state;
+            }
+            Kind::OpenCode => {
+                kind_state.save(setup)?;
+                apply_changes(
+                    setup,
+                    &plan.opencode_changes,
+                    &mut kind_state,
+                    &mut lines,
+                    backups,
+                    bases,
+                    journal,
+                    &mut |_, _| {},
+                )?;
+            }
+            Kind::Codex => {
+                kind_state
+                    .meta
+                    .insert("auto_memory_off".into(), json!(answers.auto_memory_off));
+                kind_state.save(setup)?;
+                let config = setup.codex.config_file.clone();
+                apply_changes(
+                    setup,
+                    &plan.codex_changes,
+                    &mut kind_state,
+                    &mut lines,
+                    backups,
+                    bases,
+                    journal,
+                    // The memories record goes with the write of config.toml.
+                    &mut |path, state| {
+                        if path != config {
+                            return;
+                        }
+                        match plan.codex_memories {
+                            Some(true) => {
+                                state.file_mut(path).insert(
+                                    crate::codex::install::MEMORIES_RECORD.into(),
+                                    json!({"previous": true}),
+                                );
+                            }
+                            Some(false) => {
+                                state
+                                    .file_mut(path)
+                                    .remove(crate::codex::install::MEMORIES_RECORD);
+                            }
+                            None => {}
+                        }
+                    },
+                )?;
+                if plan.codex_memories == Some(true) {
+                    lines.push(
+                        "Codex's memories: off (uninstall exports every memory as Markdown \
+                         and switches them on again)"
+                            .to_string(),
+                    );
+                }
+            }
+            Kind::Cursor => {
+                kind_state.save(setup)?;
+                apply_changes(
+                    setup,
+                    &plan.cursor_changes,
+                    &mut kind_state,
+                    &mut lines,
+                    backups,
+                    bases,
+                    journal,
+                    &mut |_, _| {},
+                )?;
+            }
+        }
+        match agent_report.iter_mut().find(|(k, _)| k == kind) {
+            Some((_, known)) => known.extend(lines),
+            None => agent_report.push((*kind, lines)),
+        }
+    }
+    if matches!(plan.auto_memory, AutoMemoryPlan::SwitchOff { .. }) {
+        let line = format!(
+            "{}'s auto-memory: off (uninstall writes every memory back to its memory files \
+             and switches it on again)",
+            setup.agent().display_name()
+        );
+        match agent_report
+            .iter_mut()
+            .find(|(k, _)| *k == Kind::ClaudeCode)
+        {
+            Some((_, lines)) => lines.push(line),
+            None => report.push(line),
+        }
+    }
+    Ok(state)
+}
+
+/// Every file change of a plan, of every agent.
+fn all_changes(plan: &InstallPlan) -> impl Iterator<Item = &Change> {
+    plan.changes
+        .iter()
+        .chain(&plan.opencode_changes)
+        .chain(&plan.codex_changes)
+        .chain(&plan.cursor_changes)
+}
+
+/// The agents' part of an install: plans again right before writing (a harness may have
+/// rewritten its file since the plan was shown, as Claude Code does with `~/.claude.json`), refuses
+/// read-only files before anything is written, applies, plans and applies again when a file
+/// changed meanwhile (a stale merge is never written), and on any other failure puts back every
+/// file and state record it had written. Returns the plan applied, the per-agent report and the
+/// backup directories.
+#[allow(clippy::type_complexity)]
+fn apply_with_retries(
+    setup: &Setup,
+    options: &InstallOptions,
+    answers: &Answers,
+    current: &Current,
+    shown: InstallPlan,
+    report: &mut Vec<String>,
+) -> Result<
+    (
+        InstallPlan,
+        Vec<(Kind, Vec<String>)>,
+        std::collections::BTreeSet<PathBuf>,
+    ),
+    String,
+> {
+    const ATTEMPTS: usize = 5;
+    let states: Vec<(PathBuf, Option<Vec<u8>>)> = Kind::ALL
+        .iter()
+        .map(|kind| {
+            let path = State::path_of(setup, *kind);
+            fsutil::read_optional(&path).map(|bytes| (path, bytes))
+        })
+        .collect::<Result<_, _>>()?;
+    let mut journal = Vec::new();
+    let mut agent_report = Vec::new();
+    let mut backups = std::collections::BTreeSet::new();
+    let mut previous = shown;
+    for attempt in 1..=ATTEMPTS {
+        let mut bases = std::collections::BTreeMap::new();
+        for change in all_changes(&previous) {
+            let bytes = fsutil::read_optional(&change.path)?;
+            bases.insert(
+                change.path.clone(),
+                bytes.as_deref().map(fsutil::fingerprint),
+            );
+        }
+        let plan = plan_install(setup, options, answers, current)?;
+        let blocked: Vec<String> = all_changes(&plan)
+            .filter_map(|change| fsutil::not_writable(&change.path))
+            .collect();
+        if !blocked.is_empty() && journal.is_empty() {
+            return Err(format!("{}; nothing was changed", blocked.join("; ")));
+        }
+        let mut lines = Vec::new();
+        match apply_agents(
+            setup,
+            answers,
+            &plan,
+            &bases,
+            &mut journal,
+            &mut agent_report,
+            &mut lines,
+            &mut backups,
+        ) {
+            Ok(_) => {
+                report.extend(lines);
+                return Ok((plan, agent_report, backups));
+            }
+            Err(err) if err.contains(fsutil::CHANGED_MEANWHILE) && attempt < ATTEMPTS => {
+                // What was written stays (it is installed and recorded); the next plan sees it.
+                report.extend(lines);
+                previous = plan;
+            }
+            Err(err) => return Err(roll_back(setup, &err, &journal, &states)),
+        }
+    }
+    Err("the agents' files kept changing while install wrote them; run install again".into())
+}
+
+/// Puts back every file `journal` records (its text before install, or deleted when install
+/// created it) and the state files (`states`), after `err` stopped an install. The message
+/// says what failed and what was put back, or what could not be.
+fn roll_back(
+    setup: &Setup,
+    err: &str,
+    journal: &[(PathBuf, Option<Vec<u8>>)],
+    states: &[(PathBuf, Option<Vec<u8>>)],
+) -> String {
+    let mut failed = Vec::new();
+    let mut restored = Vec::new();
+    for (path, before) in journal.iter().rev().chain(states.iter()) {
+        if path.is_dir() {
+            // A directory install created: removed when nothing else is in it.
+            let _ = std::fs::remove_dir(path);
+            continue;
+        }
+        let done = match before {
+            Some(bytes) => fsutil::write_atomic(path, bytes),
+            None => remove_file(path),
+        };
+        match done {
+            Ok(()) => {
+                if journal.iter().any(|(p, _)| p == path) && !restored.contains(path) {
+                    restored.push(path.clone());
+                }
+            }
+            Err(e) => failed.push(e),
+        }
+    }
+    let names: Vec<String> = restored
+        .iter()
+        .map(|p| setup.show(&p.display().to_string()))
+        .collect();
+    if failed.is_empty() {
+        format!(
+            "{err}. Install stopped and put back what it had written ({}); nothing is installed. \
+             Fix that, then run install again (or leave this agent out with --harness)",
+            if names.is_empty() {
+                "nothing yet".to_string()
+            } else {
+                names.join(", ")
+            }
+        )
+    } else {
+        format!(
+            "{err}. Install stopped; it put back {} but could not put back: {} (the copies from \
+             before install are in {}). `graphersal-memory uninstall` removes what is left",
+            if names.is_empty() {
+                "nothing".to_string()
+            } else {
+                names.join(", ")
+            },
+            failed.join("; "),
+            setup.show(&setup.state_dir().join("backups").display().to_string())
+        )
+    }
 }
 
 /// The lines about detection before the plan: harnesses whose configuration is here but whose
@@ -3098,8 +3584,9 @@ fn remove_ours(
             &[USE_SERVER, DEVELOP_SERVER]
         };
         for name in names {
-            if is_our_entry(&parsed["mcpServers"][*name])
-                && let Some(new) = jsonedit::remove_member(&current, &["mcpServers"], name)?
+            if setup.ours().entry(&parsed["mcpServers"][*name])
+                && let Some(new) = jsonedit::remove_member(&current, &["mcpServers"], name)
+                    .map_err(|e| crate::install::in_file(path, e))?
             {
                 current = new;
                 changed = true;
@@ -3108,32 +3595,18 @@ fn remove_ours(
         if changed
             && created.iter().any(|c| c == "mcpServers")
             && jsonedit::is_empty_container(&current, &["mcpServers"])
-            && let Some(new) = jsonedit::remove_member(&current, &[], "mcpServers")?
+            && let Some(new) = jsonedit::remove_member(&current, &[], "mcpServers")
+                .map_err(|e| crate::install::in_file(path, e))?
         {
             current = new;
         }
     } else if path == setup.paths.settings {
-        for (event, _) in HOOK_EVENTS {
-            if let Some(new) =
-                jsonedit::remove_elements(&current, &["hooks", event], &is_our_hook_group)?
-            {
-                current = new;
-                changed = true;
-                let dotted = format!("hooks.{event}");
-                if created.contains(&dotted)
-                    && jsonedit::is_empty_container(&current, &["hooks", event])
-                    && let Some(new) = jsonedit::remove_member(&current, &["hooks"], event)?
-                {
-                    current = new;
-                }
-            }
-        }
-        if changed
-            && created.iter().any(|c| c == "hooks")
-            && jsonedit::is_empty_container(&current, &["hooks"])
-            && let Some(new) = jsonedit::remove_member(&current, &[], "hooks")?
+        let created: Vec<&str> = created.iter().map(String::as_str).collect();
+        if let Some(new) = remove_hook_groups(&setup.ours(), &current, &created)
+            .map_err(|e| crate::install::in_file(path, e))?
         {
             current = new;
+            changed = true;
         }
         // The auto-memory switch install turned off goes back to what it was.
         if let Some(record) = entry.and_then(|e| e.get(AUTO_MEMORY_RECORD))
@@ -3144,7 +3617,8 @@ fn remove_ours(
             if parsed[key] == Value::Bool(false) {
                 let previous = &record["previous"];
                 let restored = if previous.is_null() {
-                    jsonedit::remove_member(&current, &[], key)?
+                    jsonedit::remove_member(&current, &[], key)
+                        .map_err(|e| crate::install::in_file(path, e))?
                 } else {
                     jsonedit::set_member(&current, &[], key, previous)?.map(|(new, _)| new)
                 };
@@ -3176,6 +3650,111 @@ fn remove_ours(
             Err(err) => conflicts.push(format!("{}: {err}; not changed", path.display())),
             Ok(None) => {}
         }
+    }
+    Ok(changed.then_some(current))
+}
+
+/// What [`plan_hook_event`] does with one event.
+pub(crate) enum HookStep {
+    /// Our hook is there as it should be (in a group of its own, or inside a group with the
+    /// user's hooks, where the user moved it).
+    Installed,
+    /// Added.
+    Added,
+    /// Replaced (an older one, or ours in a shared group).
+    Updated,
+}
+
+/// Plans our hook group of `event` in `text` (`hooks.<event>` groups): kept when it is there
+/// already, else every hook of ours goes (whole groups, and ours inside groups shared with the
+/// user's hooks) and `group` is appended. Returns the new text and the containers it created.
+pub(crate) fn plan_hook_event(
+    ours: &Ours,
+    text: &str,
+    event: &str,
+    group: &Value,
+) -> Result<(String, Vec<String>, HookStep), String> {
+    let parsed = jsonedit::value_of(text).map_err(|err| err.to_string())?;
+    let groups = parsed["hooks"][event]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let whole: Vec<&Value> = groups.iter().filter(|g| ours.hook_group(g)).collect();
+    let inside: Vec<&Value> = groups
+        .iter()
+        .filter(|g| ours.mixed_group(g))
+        .flat_map(|g| g["hooks"].as_array().into_iter().flatten())
+        .filter(|h| ours.hook(h))
+        .collect();
+    let wanted = &group["hooks"][0];
+    if (whole.len() == 1 && whole[0] == group && inside.is_empty())
+        || (whole.is_empty() && inside.len() == 1 && inside[0] == wanted)
+    {
+        return Ok((text.to_string(), Vec::new(), HookStep::Installed));
+    }
+    let mut text = text.to_string();
+    if let Some(new) =
+        jsonedit::remove_elements(&text, &["hooks", event], &|g: &Value| ours.hook_group(g))?
+    {
+        text = new;
+    }
+    if let Some(new) =
+        jsonedit::remove_inner_elements(&text, &["hooks", event], "hooks", &|h: &Value| {
+            ours.hook(h)
+        })?
+    {
+        text = new;
+    }
+    let (new, made) = jsonedit::append_element(&text, &["hooks", event], group)?;
+    let step = if whole.is_empty() && inside.is_empty() {
+        HookStep::Added
+    } else {
+        HookStep::Updated
+    };
+    Ok((new, made, step))
+}
+
+/// `text` (a settings or `hooks.json` file with `hooks.<Event>` groups) without our hook
+/// groups and without our hooks inside groups shared with the user's hooks (someone moved ours
+/// there), then without the containers install created (`created`, dotted) that are empty now.
+/// `None` when none of ours is in it.
+pub(crate) fn remove_hook_groups(
+    ours: &Ours,
+    text: &str,
+    created: &[&str],
+) -> Result<Option<String>, String> {
+    let mut current = text.to_string();
+    let mut changed = false;
+    for (event, _) in HOOK_EVENTS {
+        if let Some(new) =
+            jsonedit::remove_elements(&current, &["hooks", event], &|g: &Value| ours.hook_group(g))?
+        {
+            current = new;
+            changed = true;
+        }
+        if let Some(new) =
+            jsonedit::remove_inner_elements(&current, &["hooks", event], "hooks", &|h: &Value| {
+                ours.hook(h)
+            })?
+        {
+            current = new;
+            changed = true;
+        }
+        let dotted = format!("hooks.{event}");
+        if changed
+            && created.contains(&dotted.as_str())
+            && jsonedit::is_empty_container(&current, &["hooks", event])
+            && let Some(new) = jsonedit::remove_member(&current, &["hooks"], event)?
+        {
+            current = new;
+        }
+    }
+    if changed
+        && created.contains(&"hooks")
+        && jsonedit::is_empty_container(&current, &["hooks"])
+        && let Some(new) = jsonedit::remove_member(&current, &[], "hooks")?
+    {
+        current = new;
     }
     Ok(changed.then_some(current))
 }
@@ -3224,9 +3803,17 @@ pub fn uninstall_with(
             installed
         }
     });
-    let exporting = !options.disable_develop_only && !options.no_export;
+    // Nothing installed in the harnesses asked for: nothing to export or remove (no daemon is
+    // started, nothing is created); `--purge` still deletes the data.
+    let installed = setup.installed();
+    let nothing_installed = !kinds.iter().any(|kind| installed.contains(kind));
+    let exporting = !options.disable_develop_only && !options.no_export && !nothing_installed;
+    // No store: no memory to export (and no daemon started to find that out).
+    let no_store = !crate::store::default_store_dir(&setup.data_dir).exists();
     // The memories first: if they cannot be read, nothing is removed.
-    let rows = if exporting && !options.dry_run {
+    let rows = if exporting && !options.dry_run && no_store {
+        Some(Vec::new())
+    } else if exporting && !options.dry_run {
         let source = source.ok_or(
             "the memories cannot be exported here; nothing was removed (`--no-export` \
              uninstalls without exporting)",
@@ -3247,7 +3834,9 @@ pub fn uninstall_with(
     let mut conflicts = Vec::new();
     let mut changes: Vec<(Kind, Change, &'static str)> = Vec::new();
     if kinds.contains(&Kind::ClaudeCode) {
-        for (change, what) in claude_removal(setup, options, &state, &mut conflicts)? {
+        for (change, what) in claude_removal(setup, options, &state, &mut conflicts)
+            .map_err(|err| way_out(&err, &kinds, "uninstall", "uninstall from"))?
+        {
             changes.push((Kind::ClaudeCode, change, what));
         }
     }
@@ -3257,7 +3846,9 @@ pub fn uninstall_with(
             &opencode_state,
             options.disable_develop_only,
             &mut conflicts,
-        )? {
+        )
+        .map_err(|err| way_out(&err, &kinds, "uninstall", "uninstall from"))?
+        {
             changes.push((Kind::OpenCode, change, what));
         }
     }
@@ -3267,7 +3858,9 @@ pub fn uninstall_with(
             &codex_state,
             options.disable_develop_only,
             &mut conflicts,
-        )? {
+        )
+        .map_err(|err| way_out(&err, &kinds, "uninstall", "uninstall from"))?
+        {
             changes.push((Kind::Codex, change, what));
         }
     }
@@ -3277,7 +3870,9 @@ pub fn uninstall_with(
             &cursor_state,
             options.disable_develop_only,
             &mut conflicts,
-        )? {
+        )
+        .map_err(|err| way_out(&err, &kinds, "uninstall", "uninstall from"))?
+        {
             changes.push((Kind::Cursor, change, what));
         }
     }
@@ -3454,6 +4049,8 @@ pub fn uninstall_with(
             }
         }
     }
+    // Nothing is written while another install or uninstall runs.
+    let _lock = InstallLock::take(setup, false)?;
     let mut report = Vec::new();
     let mut agent_report: Vec<(Kind, Vec<String>)> =
         shown.iter().map(|kind| (*kind, Vec::new())).collect();
@@ -3488,12 +4085,23 @@ pub fn uninstall_with(
             .iter()
             .any(|(_, change, _)| change.path == setup.paths.settings)
     {
+        // Back only when it is still off; a value the user set since install stays.
+        let off_now = setup.agent().auto_memory_key().is_some_and(|key| {
+            read_json(&setup.paths.settings, &mut Vec::new())[key] == Value::Bool(false)
+        });
         push_for(
             Kind::ClaudeCode,
-            format!(
-                "{}'s auto-memory: back to how it was before install",
-                setup.agent().display_name()
-            ),
+            if off_now {
+                format!(
+                    "{}'s auto-memory: back to how it was before install",
+                    setup.agent().display_name()
+                )
+            } else {
+                format!(
+                    "{}'s auto-memory: kept as you set it after install",
+                    setup.agent().display_name()
+                )
+            },
             &mut report,
         );
     }
@@ -3636,12 +4244,18 @@ fn claude_removal(
         let Some(bytes) = fsutil::read_optional(path)? else {
             continue;
         };
+        // An empty file holds nothing of ours (and is no JSON to parse).
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
         let entry = state.file(path);
         let fp = fsutil::fingerprint(&bytes);
         let untouched = entry.is_some_and(|e| {
             e.get("written").and_then(Value::as_str) == Some(fp.as_str())
                 && e.get("backup_valid") == Some(&Value::Bool(true))
         });
+        // A backup that holds our parts (an install that ran twice at once) is never put back.
+        let untouched = untouched && !crate::install::backup_holds_ours(entry);
         if untouched && !options.disable_develop_only {
             let existed = entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(true)));
             let after = if existed {
@@ -3682,7 +4296,9 @@ fn claude_removal(
             entry,
             options.disable_develop_only,
             conflicts,
-        )? {
+        )
+        .map_err(|e| in_file(path, e))?
+        {
             let created_by_us =
                 entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(false)));
             let delete = created_by_us && is_empty_remainder(path, &new);
@@ -3706,31 +4322,13 @@ fn claude_removal(
     Ok(changes)
 }
 
-/// Deletes the data directory (after stopping its daemon) and the daemon's files.
+/// Deletes what graphersal-memory created in the data directory (after stopping its daemon):
+/// only the entries of [`crate::store::OUR_ENTRIES`], then the directory itself when nothing
+/// else is left in it; anything else in it stays and is named in the report. Then the daemon's
+/// files in a run directory outside it.
 fn purge(setup: &Setup) -> Result<Vec<String>, String> {
     let mut report = Vec::new();
     let data = &setup.data_dir;
-    if data.exists() {
-        let ours = [
-            "stores",
-            "registry.json",
-            "config.json",
-            "install",
-            "import",
-            "projects.json",
-            "run",
-        ]
-        .iter()
-        .any(|name| data.join(name).exists());
-        let empty = std::fs::read_dir(data).is_ok_and(|mut entries| entries.next().is_none());
-        if !ours && !empty {
-            return Err(format!(
-                "{} does not look like a graphersal-memory data directory (no stores, no \
-                 registry); not deleted",
-                data.display()
-            ));
-        }
-    }
     if crate::shim::control(&setup.run_dir, "stop")?.is_some() {
         report.push("stopped the daemon".to_string());
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -3740,10 +4338,28 @@ fn purge(setup: &Setup) -> Result<Vec<String>, String> {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
-    if data.exists() {
-        std::fs::remove_dir_all(data)
-            .map_err(|err| format!("cannot delete {}: {err}", data.display()))?;
-        report.push(format!("deleted the data directory {}", data.display()));
+    if data.is_dir() {
+        let foreign = crate::store::foreign_entries(data);
+        for name in crate::store::OUR_ENTRIES {
+            let path = data.join(name);
+            let removed = match std::fs::symlink_metadata(&path) {
+                Err(_) => continue,
+                Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path),
+                Ok(_) => std::fs::remove_file(&path),
+            };
+            removed.map_err(|err| format!("cannot delete {}: {err}", path.display()))?;
+        }
+        if foreign.is_empty() {
+            // Only what the system puts into any folder is left (or nothing).
+            let _ = std::fs::remove_dir_all(data);
+            report.push(format!("deleted the data directory {}", data.display()));
+        } else {
+            report.push(format!(
+                "deleted graphersal-memory's data in {}; kept what else is in it ({})",
+                data.display(),
+                foreign.join(", ")
+            ));
+        }
     }
     if setup.run_dir.exists() && !setup.run_dir.starts_with(data) {
         for name in [
@@ -3763,6 +4379,49 @@ fn purge(setup: &Setup) -> Result<Vec<String>, String> {
         }
     }
     Ok(report)
+}
+
+/// The lock that lets one install or uninstall run at a time (`<data dir>/install/install.lock`).
+pub(crate) struct InstallLock {
+    _lock: Box<fd_lock::RwLock<std::fs::File>>,
+}
+
+/// What a second install or uninstall says while the first runs.
+pub const ANOTHER_INSTALL: &str = "another graphersal-memory install or uninstall is running \
+    (it holds the install lock); nothing was changed. Wait until it ends, then run this again";
+
+impl InstallLock {
+    /// Takes the lock, creating the data directory when `create`; `Ok(None)` when the data
+    /// directory does not exist and `create` is false (then no install ran and none runs:
+    /// an install creates the directory before anything else). `Err` when another process
+    /// holds it.
+    pub(crate) fn take(setup: &Setup, create: bool) -> Result<Option<Self>, String> {
+        let dir = setup.state_dir();
+        if !create && !setup.data_dir.is_dir() {
+            return Ok(None);
+        }
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+        let path = dir.join("install.lock");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|err| format!("cannot open {}: {err}", path.display()))?;
+        let mut lock = Box::new(fd_lock::RwLock::new(file));
+        match lock.try_write() {
+            // The guard only borrows the lock; forgetting it keeps the lock held until the
+            // file closes, when `InstallLock` is dropped (the OS releases it then).
+            Ok(guard) => std::mem::forget(guard),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err(ANOTHER_INSTALL.to_string());
+            }
+            Err(err) => return Err(format!("cannot lock {}: {err}", path.display())),
+        }
+        Ok(Some(Self { _lock: lock }))
+    }
 }
 
 /// The state of one installable part.
@@ -3820,6 +4479,7 @@ impl Inspection {
 
 pub(crate) fn read_json(path: &Path, errors: &mut Vec<String>) -> Value {
     match read_text(path) {
+        Ok(Some(text)) if text.trim().is_empty() => Value::Null,
         Ok(Some(text)) => match jsonedit::value_of(&text) {
             Ok(value) => value,
             Err(err) => {
@@ -3844,7 +4504,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
         let entry = &config["mcpServers"][name];
         if entry.is_null() {
             PartState::Missing
-        } else if !is_our_entry(entry) {
+        } else if !setup.ours().entry(entry) {
             PartState::Conflict("another program's entry has this name".to_string())
         } else {
             let command = entry["command"].as_str().unwrap_or_default();
@@ -3876,7 +4536,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
         .map(|(event, sub)| {
             let groups = settings["hooks"][event].as_array();
             let ours: Vec<&Value> = groups
-                .map(|g| g.iter().filter(|g| is_our_hook_group(g)).collect())
+                .map(|g| g.iter().filter(|g| setup.ours().hook_group(g)).collect())
                 .unwrap_or_default();
             let state = match ours.as_slice() {
                 [] => PartState::Missing,

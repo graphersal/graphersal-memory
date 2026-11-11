@@ -199,14 +199,21 @@ pub fn run_cli(
                 color: terminal() && crate::prompt::color_allowed(&|name| std::env::var(name).ok()),
             };
             setup(cli).and_then(|setup| {
+                // A daemon the export starts is stopped again afterwards (one that ran before
+                // keeps running).
+                let was_running = ipc::daemon_alive(&setup.run_dir).unwrap_or(true);
                 let mut source = DaemonSource(setup_location(&setup));
-                install::uninstall_with(
+                let result = install::uninstall_with(
                     &setup,
                     &options,
                     Some(&mut source),
                     &mut BufReader::new(stdin),
                     &mut stdout,
-                )
+                );
+                if !was_running && ipc::daemon_alive(&setup.run_dir).unwrap_or(false) {
+                    let _ = shim::control(&setup.run_dir, "stop");
+                }
+                result
             })
         }
         Command::Export {
@@ -1117,12 +1124,16 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
         )
     );
     let mut problems = 0;
+    let mut actions = Vec::new();
     for (heading, findings) in &sections {
         let _ = writeln!(out, "\n{heading}:");
         let prefix = format!("{heading}: ");
         for finding in findings {
             let text = setup.show(finding.text.strip_prefix(&prefix).unwrap_or(&finding.text));
-            if finding.problem {
+            if text.starts_with("ACTION NEEDED") {
+                let _ = writeln!(out, "  {}", crate::prompt::action_needed(color, &text));
+                actions.push(text);
+            } else if finding.problem {
                 problems += 1;
                 let _ = writeln!(
                     out,
@@ -1154,6 +1165,10 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
             format!("{problems} problem(s) found.")
         }
     );
+    // What only the user can do comes last, as in `status`.
+    for action in &actions {
+        let _ = writeln!(out, "\n{}", crate::prompt::action_needed(color, action));
+    }
     if problems == 0 { 0 } else { EXIT_FAILED }
 }
 
@@ -1737,15 +1752,20 @@ pub fn status_text_with(
             if kinds.contains(&crate::agents::Kind::Cursor) {
                 lines.extend(crate::cursor::install::status_lines(setup));
             }
+            // Claude Code's own section is shown when nothing is installed: not listed again.
+            let shown = |kind: &crate::agents::Kind| {
+                kinds.contains(kind)
+                    || (kinds.is_empty() && *kind == crate::agents::Kind::ClaudeCode)
+            };
             let found: Vec<_> = setup
                 .detected()
                 .into_iter()
-                .filter(|kind| !kinds.contains(kind))
+                .filter(|kind| !shown(kind))
                 .collect();
             let leftovers: Vec<_> = setup
                 .leftovers()
                 .into_iter()
-                .filter(|(kind, _)| !kinds.contains(kind))
+                .filter(|(kind, _)| !shown(kind))
                 .collect();
             if !found.is_empty() || !leftovers.is_empty() {
                 lines.push("Other agents:".to_string());
@@ -1892,6 +1912,17 @@ mod tests {
             );
             assert!(text.contains(&format!("stage {stage}")), "{text}");
         }
+    }
+
+    #[test]
+    fn status_on_a_fresh_machine_names_claude_code_once() {
+        let data = crate::mcp_tests::TempDir::new("st-n6");
+        let home = crate::mcp_tests::TempDir::new("st-n6home");
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        let setup = crate::install_tests::setup_in(home.path(), data.path());
+        let text = status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
+        assert!(!text.contains("Claude Code: found, not set up"), "{text}");
+        assert!(!text.contains("Other agents:"), "{text}");
     }
 
     #[test]

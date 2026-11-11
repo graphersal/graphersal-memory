@@ -28,7 +28,7 @@ const QUERIES: &str = include_str!("catalog/queries.json");
 const INTERNAL: &str = include_str!("catalog/internal.json");
 
 /// The internal functions, in the order of `catalog/internal.json`.
-pub const INTERNAL_FUNCTIONS: [&str; 8] = [
+pub const INTERNAL_FUNCTIONS: [&str; 9] = [
     "indexed_sessions",
     "index_session",
     "index_turns",
@@ -37,6 +37,7 @@ pub const INTERNAL_FUNCTIONS: [&str; 8] = [
     "export_memories",
     "start_context",
     "open_conflicts",
+    "migrate_import_sources",
 ];
 
 /// The folder of the product's saved queries.
@@ -97,6 +98,7 @@ fn body(name: &str) -> Option<&'static str> {
         "export_memories" => include_str!("catalog/export_memories.rhai"),
         "start_context" => include_str!("catalog/start_context.rhai"),
         "open_conflicts" => include_str!("catalog/open_conflicts.rhai"),
+        "migrate_import_sources" => include_str!("catalog/migrate_import_sources.rhai"),
         _ => return None,
     })
 }

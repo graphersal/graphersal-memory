@@ -187,7 +187,7 @@
             "object",
             "null"
           ],
-          "description": "import only: {path, modified_at} of the memory file"
+          "description": "import only: {path, modified_at, dir} of the memory file"
         },
         "default": null
       },

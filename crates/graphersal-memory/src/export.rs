@@ -30,7 +30,7 @@ use serde_json::Value;
 use crate::agents::Agent;
 
 /// One memory as the export reads it from the graph (`export_memories`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Row {
     /// Its slug.
     pub slug: String,
@@ -50,6 +50,12 @@ pub struct Row {
     pub links: Vec<String>,
     /// Whether it is pinned (listed under `## Pinned` in `MEMORY.md`).
     pub pinned: bool,
+    /// The memory that supersedes it (empty when none) and the date of that decision.
+    pub superseded_by: String,
+    /// When it was superseded (`YYYY-MM-DD`, empty when unknown).
+    pub superseded_at: String,
+    /// The memories it is in an open conflict with.
+    pub conflicts_with: Vec<String>,
 }
 
 impl Row {
@@ -76,6 +82,25 @@ impl Row {
                 .map(str::to_string)
                 .collect(),
             pinned: value["pinned"] == Value::Bool(true),
+            superseded_by: value["marks"]["superseded_by"]
+                .as_array()
+                .and_then(|by| by.first())
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            superseded_at: value["marks"]["superseded_at"]
+                .as_array()
+                .and_then(|at| at.first())
+                .and_then(Value::as_str)
+                .map(|at| at.chars().take(10).collect())
+                .unwrap_or_default(),
+            conflicts_with: value["marks"]["conflicts_with"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
         })
     }
 }
@@ -131,9 +156,48 @@ fn tail_start(body: &str) -> Option<usize> {
     }
 }
 
+/// How the export's note above a body ends (the import takes such a note off again).
+pub const NOTE_END: &str = "(graphersal-memory)";
+
+/// The first paragraph of a superseded memory's file: `SUPERSEDED by <slug> on <date>`.
+pub const SUPERSEDED_NOTE: &str = "SUPERSEDED by";
+
+/// The first paragraph of the file of a memory in an open conflict: `CONFLICT with <slug>`.
+pub const CONFLICT_NOTE: &str = "CONFLICT with";
+
+/// The note above a row's body, when it needs one: superseded (nothing is lost, but the file
+/// says it no longer holds) or in an open conflict (naming the other memory).
+fn note(row: &Row) -> Option<String> {
+    if !row.superseded_by.is_empty() {
+        let on = if row.superseded_at.is_empty() {
+            String::new()
+        } else {
+            format!(" on {}", row.superseded_at)
+        };
+        return Some(format!(
+            "{SUPERSEDED_NOTE} {}{on}: a later memory replaces this one; kept for its history \
+             {NOTE_END}",
+            row.superseded_by
+        ));
+    }
+    (!row.conflicts_with.is_empty()).then(|| {
+        format!(
+            "{CONFLICT_NOTE} {}: not settled yet, ask the user which one holds {NOTE_END}",
+            row.conflicts_with.join(", ")
+        )
+    })
+}
+
 /// The text of one memory file.
 pub fn file_text(row: &Row) -> String {
     let mut body = row.body.trim().to_string();
+    if let Some(note) = note(row) {
+        body = if body.is_empty() {
+            note
+        } else {
+            format!("{note}\n\n{body}")
+        };
+    }
     let missing: Vec<String> = row
         .links
         .iter()
@@ -253,8 +317,11 @@ pub struct Report {
     pub projects: usize,
     /// Files written.
     pub written: Vec<PathBuf>,
-    /// Files that already held the text (left alone).
+    /// Files that already held the text, or said the same in other formatting (left alone).
     pub unchanged: usize,
+    /// Files rewritten with the graph's version because they were unchanged since their
+    /// import (the memory changed in the graph since then).
+    pub refreshed: Vec<PathBuf>,
     /// Files kept because they differ, with where the export's text went instead.
     pub conflicts: Vec<(PathBuf, PathBuf)>,
     /// `MEMORY.md` files kept with index lines appended, and how many.
@@ -279,6 +346,12 @@ impl Report {
         )];
         for path in &self.written {
             lines.push(format!("  wrote {}", path.display()));
+        }
+        for path in &self.refreshed {
+            lines.push(format!(
+                "  updated {} (unchanged since its import; the memory changed since)",
+                path.display()
+            ));
         }
         for (kept, beside) in &self.conflicts {
             lines.push(format!(
@@ -336,6 +409,94 @@ fn put(path: &Path, text: &str, report: &mut Report) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// Writes a memory file by the conflict rules, knowing what the import read (`imported`: the
+/// fingerprint of the file's text at its last import): the same text, or the same meaning in
+/// other formatting ([`crate::import::meaning`]) -> left alone; missing -> written; unchanged
+/// since its import -> rewritten with the graph's version (front-matter keys of others kept);
+/// else (edited since) -> kept, the graph's version beside it.
+fn put_memory(
+    path: &Path,
+    text: &str,
+    imported: Option<&str>,
+    report: &mut Report,
+) -> Result<(), String> {
+    let Some(bytes) = crate::fsutil::read_optional(path)? else {
+        return put(path, text, report);
+    };
+    if bytes == text.as_bytes() {
+        report.unchanged += 1;
+        return Ok(());
+    }
+    let existing = String::from_utf8_lossy(&bytes).into_owned();
+    if crate::import::meaning(&existing) == crate::import::meaning(text) {
+        report.unchanged += 1;
+        return Ok(());
+    }
+    if imported == Some(crate::fsutil::fingerprint(&bytes).as_str()) {
+        crate::fsutil::write_atomic(path, keep_front_matter(&existing, text).as_bytes())?;
+        report.refreshed.push(path.to_path_buf());
+        return Ok(());
+    }
+    put(path, text, report)
+}
+
+/// `ours` (a memory file the export renders) with the front-matter keys of `theirs` that the
+/// export does not write (an `originSessionId`, a `metadata` key of another tool) kept after
+/// its own, in their order.
+fn keep_front_matter(theirs: &str, ours: &str) -> String {
+    let theirs = theirs.replace("\r\n", "\n");
+    let front = |text: &str| -> Option<(usize, usize)> {
+        let rest = text.strip_prefix("---\n")?;
+        let end = rest.find("\n---\n")?;
+        Some((4, 4 + end + 1))
+    };
+    let (Some((ts, te)), Some((_, oe))) = (front(&theirs), front(ours)) else {
+        return ours.to_string();
+    };
+    // Their top-level keys, each with its indented lines; `metadata` split into its children.
+    let mut extra_top = Vec::new();
+    let mut extra_meta = Vec::new();
+    let mut current: Option<String> = None;
+    for line in theirs[ts..te].lines() {
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        if !indented {
+            let key = line
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            current = Some(key.clone());
+            if !["name", "description", "metadata", "type"].contains(&key.as_str()) {
+                extra_top.push(line.to_string());
+            }
+            continue;
+        }
+        match current.as_deref() {
+            Some("metadata") => {
+                let key = line.trim().split(':').next().unwrap_or_default().trim();
+                let child_start = !line.trim_start().starts_with('-')
+                    && line.len() - line.trim_start().len() <= 2;
+                if key != "type" || !child_start {
+                    extra_meta.push(line.to_string());
+                }
+            }
+            Some("name" | "description" | "type") => {}
+            _ => extra_top.push(line.to_string()),
+        }
+    }
+    if extra_top.is_empty() && extra_meta.is_empty() {
+        return ours.to_string();
+    }
+    let mut out = ours[..oe].to_string();
+    for line in extra_meta.iter().chain(extra_top.iter()) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&ours[oe..]);
+    out
 }
 
 /// Writes a project's index: a missing `MEMORY.md` gets the whole index; an identical one is
@@ -412,6 +573,7 @@ pub fn write(agent: &dyn Agent, data_dir: &Path, rows: &[Row]) -> Result<Report,
             .or_default()
             .push(row);
     }
+    let imported = crate::import::ImportState::load(data_dir).unwrap_or_default();
     for (project, rows) in &by_project {
         report.memories += rows.len();
         if project.is_empty() {
@@ -429,13 +591,18 @@ pub fn write(agent: &dyn Agent, data_dir: &Path, rows: &[Row]) -> Result<Report,
         }
         let dir = agent.memory_dir(&root);
         for row in rows {
-            put(
-                &dir.join(format!("{}.md", row.slug)),
-                &file_text(row),
-                &mut report,
-            )?;
+            let path = dir.join(format!("{}.md", row.slug));
+            let known = imported.content_of(&path);
+            put_memory(&path, &file_text(row), known, &mut report)?;
         }
-        put_index(&dir.join("MEMORY.md"), rows, &mut report)?;
+        // A superseded memory keeps its file, but the index (what the harness loads) leaves
+        // it out: a file in context would outweigh the graph's later decision.
+        let listed: Vec<&Row> = rows
+            .iter()
+            .copied()
+            .filter(|row| row.superseded_by.is_empty())
+            .collect();
+        put_index(&dir.join("MEMORY.md"), &listed, &mut report)?;
     }
     Ok(report)
 }
@@ -455,6 +622,7 @@ mod tests {
             hook: "pnpm, not npm".into(),
             links: vec!["other".into()],
             pinned: false,
+            ..Row::default()
         }
     }
 

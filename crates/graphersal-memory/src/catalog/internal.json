@@ -132,5 +132,17 @@
         "default": ""
       }
     ]
+  },
+  {
+    "name": "migrate_import_sources",
+    "description": "Internal (once, at the daemon's start): memories imported before the import marked them get their file as source and their import time.",
+    "params": [
+      {
+        "name": "records",
+        "schema": {
+          "type": "array"
+        }
+      }
+    ]
   }
 ]
