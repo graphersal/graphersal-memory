@@ -434,7 +434,7 @@ impl Setup {
                           "timeout": HOOK_TIMEOUT_SECS}]})
     }
 
-    fn state_dir(&self) -> PathBuf {
+    pub(crate) fn state_dir(&self) -> PathBuf {
         self.data_dir.join(STATE_DIR)
     }
 
@@ -768,6 +768,7 @@ pub fn block_text() -> String {
 }
 
 /// The managed block of a memory language, marker lines included, ending with a newline.
+#[cfg(test)]
 pub fn block_text_for(language: Language) -> String {
     wrap_block(rule_block(language))
 }
@@ -805,13 +806,28 @@ pub fn find_block(text: &str) -> Result<Option<FoundBlock>, String> {
 
 /// [`find_block`] with the block of `language` as the current one.
 pub fn find_block_for(text: &str, language: Language) -> Result<Option<FoundBlock>, String> {
+    find_block_with(text, language, &[])
+}
+
+/// [`find_block_for`] with the read-only line naming `read_only` in the current block
+/// (`crate::coexist::rule_with`).
+pub fn find_block_with(
+    text: &str,
+    language: Language,
+    read_only: &[String],
+) -> Result<Option<FoundBlock>, String> {
     let ours = [rule_block(Language::English), rule_block(Language::Any)];
     find_block_in(
         text,
-        rule_block(language),
+        &crate::coexist::rule_with(rule_block(language), read_only),
         &ours,
         PREVIOUS_BLOCK_FINGERPRINTS,
     )
+}
+
+/// The managed block of `language` naming `read_only`, marker lines included.
+pub fn block_text_with(language: Language, read_only: &[String]) -> String {
+    wrap_block(&crate::coexist::rule_with(rule_block(language), read_only))
 }
 
 /// The managed block of `text` with `current` as the block this version writes, `ours` the
@@ -853,9 +869,11 @@ pub fn find_block_in(
     }
     let intact = fsutil::fingerprint(content.as_bytes()) == recorded;
     let is_current = intact && text[start..end].replace("\r\n", "\n") == wrap_block(current);
-    let is_ours = ours
-        .iter()
-        .any(|block| fsutil::fingerprint(block.as_bytes()) == recorded);
+    // A block of ours whatever other memory tools its last line names read-only (M15).
+    let base = crate::coexist::strip_read_only(content);
+    let is_ours = ours.iter().any(|block| {
+        fsutil::fingerprint(block.as_bytes()) == recorded || (base != content && *block == base)
+    });
     Ok(Some(FoundBlock {
         start,
         end,
@@ -911,6 +929,19 @@ pub struct InstallOptions {
     pub no_import: bool,
     /// Keep the harness's own memory on (`--keep-auto-memory`).
     pub keep_auto_memory: bool,
+    /// Other memory tools (MCP server names) the rule block names read-only
+    /// (`--other-read-only`).
+    pub other_read_only: Vec<String>,
+    /// Other memory tools kept as they are, not named (`--keep-other`).
+    pub keep_other: Vec<String>,
+    /// Other memory tools whose MCP entries are switched off (`--disable-other`; the only way
+    /// besides a yes in the wizard: `--yes` alone never switches anything of another tool off).
+    pub disable_other: Vec<String>,
+    /// Other memory tools install switched off that are switched on again (`--enable-other`).
+    pub enable_other: Vec<String>,
+    /// The project whose own instruction files and MCP files are read for the "Other memory"
+    /// findings (the current directory's; `None`: user scope only, as in tests).
+    pub project_dir: Option<PathBuf>,
     /// Ask the wizard's questions (stdin and stdout are terminals, no `--yes`).
     pub interactive: bool,
     /// Colour in the wizard.
@@ -1050,6 +1081,11 @@ impl State {
         self.files.get(&path.display().to_string())
     }
 
+    /// Every file entry, by path.
+    pub(crate) fn files(&self) -> impl Iterator<Item = (&String, &serde_json::Map<String, Value>)> {
+        self.files.iter()
+    }
+
     pub(crate) fn file_mut(&mut self, path: &Path) -> &mut serde_json::Map<String, Value> {
         self.files.entry(path.display().to_string()).or_default()
     }
@@ -1091,6 +1127,10 @@ struct InstallPlan {
     imports: Vec<DirPlan>,
     write_config: bool,
     auto_memory: AutoMemoryPlan,
+    /// Other memory tools' entries switched off now: (harness, file, name, record).
+    other_off: Vec<(Kind, PathBuf, String, Value)>,
+    /// Other memory tools' entries switched on again now (install had switched them off).
+    other_on: Vec<(Kind, PathBuf, String)>,
 }
 
 pub(crate) fn read_text(path: &Path) -> Result<Option<String>, String> {
@@ -1400,6 +1440,7 @@ fn plan_settings(
 fn plan_block(
     setup: &Setup,
     language: Language,
+    read_only: &[String],
     conflicts: &mut Vec<String>,
 ) -> Result<(Step, Option<Change>), String> {
     let agent = setup.agent();
@@ -1408,7 +1449,7 @@ fn plan_block(
     let text = before.clone().unwrap_or_default();
     let title = format!("Write the managed rule block into {}", path.display());
     let mut separator = None;
-    let after = match find_block_for(&text, language) {
+    let after = match find_block_with(&text, language, read_only) {
         Err(err) => {
             conflicts.push(format!(
                 "{}: {err}; kept as it is. Remove the begin line or add the end line, then run \
@@ -1438,7 +1479,7 @@ fn plan_block(
         Ok(Some(found)) => Some(format!(
             "{}{}{}",
             &text[..found.start],
-            line_ends_like(&text, &block_text_for(language)),
+            line_ends_like(&text, &block_text_with(language, read_only)),
             &text[found.end..]
         )),
         Ok(None) => {
@@ -1446,11 +1487,11 @@ fn plan_block(
             separator = Some(sep.to_string());
             Some(format!(
                 "{text}{sep}{}",
-                line_ends_like(&text, &block_text_for(language))
+                line_ends_like(&text, &block_text_with(language, read_only))
             ))
         }
     };
-    let line = match (&after, find_block_for(&text, language)) {
+    let line = match (&after, find_block_with(&text, language, read_only)) {
         (_, Err(_)) | (None, Ok(Some(FoundBlock { known: false, .. }))) => {
             "CONFLICT (see the report)".to_string()
         }
@@ -1506,6 +1547,16 @@ struct Current {
     start_preview: crate::start_context::StartContext,
     /// Why the start context cannot carry the always-loaded memories, when it cannot.
     start_blocked: Option<String>,
+    /// Other memory on this machine (M15).
+    others: crate::coexist::Findings,
+    /// The recorded choices about other memory tools (an earlier install's).
+    other_choices: Option<crate::coexist::Choices>,
+    /// The other tools' importable data.
+    other_sources: Vec<crate::coexist::other_import::Source>,
+    /// Tools found whose memory is not importable (or whose data was not found).
+    not_importable: Vec<String>,
+    /// The other tools' memories not imported yet (new or changed items).
+    other_pending: usize,
 }
 
 /// The start context Claude Code's memory files give once imported: per project its pinned,
@@ -1560,7 +1611,7 @@ pub fn start_context_blocked(config: &Config) -> Option<String> {
 }
 
 impl Current {
-    fn read(setup: &Setup) -> Result<Self, String> {
+    fn read(setup: &Setup, project: Option<&Path>) -> Result<Self, String> {
         let state = State::load(setup)?;
         let codex_state = State::load_of(setup, Kind::Codex)?;
         let config = Config::load(&setup.data_dir)?;
@@ -1595,9 +1646,21 @@ impl Current {
         let (with_project, _, new, changed, _) = import::totals(&imports);
         let start_preview = start_preview(&imports, config.start_context_chars());
         let start_blocked = start_context_blocked(&config);
+        let others = crate::coexist::detect(setup, project);
+        let (other_sources, not_importable) = crate::coexist::other_import::sources(setup, &others);
+        let other_state = crate::coexist::other_import::State::load(&setup.data_dir);
+        let other_pending = other_sources
+            .iter()
+            .map(|source| other_state.pending_count(source))
+            .sum();
         Ok(Self {
+            other_pending,
             start_preview,
             start_blocked,
+            other_choices: crate::coexist::Choices::load(setup),
+            others,
+            other_sources,
+            not_importable,
             installed: State::exists(setup),
             auto_memory_answer,
             auto_memory_off: off,
@@ -1625,6 +1688,12 @@ impl Current {
         (claude_possible && !self.auto_memory_off_by_user)
             || (codex_possible && self.codex_memories_on)
     }
+
+    /// Whether the wizard's "Other memory" step applies for the harnesses `kinds`: another
+    /// memory tool's user-scope entry there, or memories of another tool to import.
+    fn other_step(&self, kinds: &[Kind]) -> bool {
+        !self.others.names(kinds).is_empty() || self.other_pending > 0
+    }
 }
 
 /// The wizard's answers: what install makes true.
@@ -1644,6 +1713,14 @@ pub struct Answers {
     pub summaries: bool,
     /// The develop server registered.
     pub develop: bool,
+    /// Other memory tools the rule block names read-only (graphersal-memory is the main memory).
+    pub read_only: Vec<String>,
+    /// Other memory tools kept as they are (not named).
+    pub kept: Vec<String>,
+    /// Other memory tools whose MCP entries are (or stay) switched off.
+    pub disable_other: Vec<String>,
+    /// Import the other tools' memories whose format is known.
+    pub import_other: bool,
 }
 
 /// The model the answers default to: the flag, else the current model (unless the language
@@ -1665,11 +1742,17 @@ fn default_answers(options: &InstallOptions, current: &Current) -> Answers {
         .language
         .or(current.config.language)
         .unwrap_or_default();
+    let harnesses = options
+        .harnesses
+        .clone()
+        .unwrap_or_else(|| current.detected.clone());
+    let others = other_defaults(options, current, &harnesses);
     Answers {
-        harnesses: options
-            .harnesses
-            .clone()
-            .unwrap_or_else(|| current.detected.clone()),
+        read_only: others.read_only,
+        kept: others.kept,
+        disable_other: others.disable,
+        import_other: !options.no_import,
+        harnesses,
         model: default_model(options, current, language),
         language,
         import: !options.no_import,
@@ -1682,6 +1765,67 @@ fn default_answers(options: &InstallOptions, current: &Current) -> Answers {
         summaries: options.summaries || current.config.summaries.enabled,
         develop: options.enable_develop || current.develop_registered,
     }
+}
+
+/// What happens to each other memory tool without questions.
+struct OtherDefaults {
+    read_only: Vec<String>,
+    kept: Vec<String>,
+    disable: Vec<String>,
+}
+
+/// The defaults for the other memory tools of `harnesses`: switched off only by its flag (or
+/// when an earlier install switched it off and `--enable-other` does not name it; `--yes`
+/// alone never switches anything of another tool off); else named read-only by its flag, kept
+/// by its flag, else the earlier choice, else read-only for a known memory tool and kept for one
+/// recognised only by its name or tools.
+fn other_defaults(
+    options: &InstallOptions,
+    current: &Current,
+    harnesses: &[Kind],
+) -> OtherDefaults {
+    use crate::coexist::ServerState;
+    let mut out = OtherDefaults {
+        read_only: Vec::new(),
+        kept: Vec::new(),
+        disable: Vec::new(),
+    };
+    for name in current.others.names(harnesses) {
+        let servers: Vec<&crate::coexist::Server> = current
+            .others
+            .user_servers(harnesses)
+            .into_iter()
+            .filter(|s| s.name == name)
+            .collect();
+        let off_by_us = servers.iter().any(|s| s.state == ServerState::OffByUs);
+        let disable = options.disable_other.contains(&name)
+            || (off_by_us && !options.enable_other.contains(&name));
+        if disable {
+            out.disable.push(name);
+            continue;
+        }
+        if servers.iter().all(|s| s.state == ServerState::Off) {
+            continue;
+        }
+        let choices = current.other_choices.as_ref();
+        let read_only = if options.other_read_only.contains(&name) {
+            true
+        } else if options.keep_other.contains(&name) {
+            false
+        } else if let Some(choices) =
+            choices.filter(|c| c.read_only.contains(&name) || c.kept.contains(&name))
+        {
+            choices.read_only.contains(&name)
+        } else {
+            servers.iter().any(|s| s.main_by_default())
+        };
+        if read_only {
+            out.read_only.push(name);
+        } else {
+            out.kept.push(name);
+        }
+    }
+    out
 }
 
 /// The interactive wizard: one question per step that applies, with the current answers (or
@@ -1733,7 +1877,14 @@ fn ask(
     };
     let claude = harnesses.contains(&Kind::ClaudeCode);
     // Steps counted while another harness could be chosen but not asked for this choice.
-    let total = total - skipped_steps(current, claude_possible, codex_possible, &harnesses);
+    let total = total
+        - skipped_steps(
+            options,
+            current,
+            claude_possible,
+            codex_possible,
+            &harnesses,
+        );
 
     console.step(
         next(),
@@ -1889,6 +2040,17 @@ fn ask(
         defaults.auto_memory_off
     };
 
+    let others = ask_other_memory(
+        setup,
+        options,
+        current,
+        &harnesses,
+        defaults.import_other,
+        console,
+        total,
+        &mut next,
+    )?;
+
     let mut summary_lines = vec![
         "Past sessions are indexed locally (their raw turns, no model call). Optionally each"
             .to_string(),
@@ -1944,7 +2106,160 @@ fn ask(
         auto_memory_off,
         summaries,
         develop,
+        read_only: others.0.read_only,
+        kept: others.0.kept,
+        disable_other: others.0.disable,
+        import_other: others.1,
     })
+}
+
+/// The wizard's "Other memory" step (when it applies for `harnesses`): what was found, then per
+/// other memory tool the choice (graphersal-memory is the main memory and the tool read-only;
+/// switch it off; keep both), and whether to import the memories of a tool whose format is
+/// known. Without the step: the defaults.
+#[allow(clippy::too_many_arguments)]
+fn ask_other_memory(
+    setup: &Setup,
+    options: &InstallOptions,
+    current: &Current,
+    harnesses: &[Kind],
+    import_default: bool,
+    console: &mut Console<'_>,
+    total: usize,
+    next: &mut dyn FnMut() -> usize,
+) -> Result<(OtherDefaults, bool), crate::prompt::NoAnswer> {
+    use crate::coexist::ServerState;
+    let defaults = other_defaults(options, current, harnesses);
+    if !current.other_step(harnesses) {
+        return Ok((defaults, import_default));
+    }
+    let mut lines = vec![
+        "graphersal-memory found other memory on this machine. Two memories split the facts:"
+            .to_string(),
+        "an agent saves into one and later searches the other.".to_string(),
+    ];
+    for server in current.others.user_servers(harnesses) {
+        lines.push(format!(
+            "- {} ({}): {}{}",
+            server.name,
+            server.place(setup),
+            server.what(),
+            match server.state {
+                ServerState::Off => ", switched off by you",
+                ServerState::OffByUs => ", switched off by graphersal-memory install",
+                ServerState::On => "",
+            }
+        ));
+    }
+    for mention in current.others.mentions.iter().take(5) {
+        lines.push(format!(
+            "- {}:{} says \"{}\" (never edited; `graphersal-memory doctor` suggests an edit)",
+            setup.show(&mention.file.display().to_string()),
+            mention.line,
+            mention.text
+        ));
+    }
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    console.step(next(), total, "Other memory", &lines);
+    let mut out = OtherDefaults {
+        read_only: Vec::new(),
+        kept: Vec::new(),
+        disable: Vec::new(),
+    };
+    for name in current.others.names(harnesses) {
+        let servers: Vec<&crate::coexist::Server> = current
+            .others
+            .user_servers(harnesses)
+            .into_iter()
+            .filter(|s| s.name == name)
+            .collect();
+        let main = servers.iter().any(|s| s.main_by_default());
+        let mut files: Vec<String> = Vec::new();
+        for server in &servers {
+            let file = setup.show(&server.file.display().to_string());
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+        if servers.iter().any(|s| s.state == ServerState::OffByUs) {
+            let _ = writeln!(console.out(), "  {name}:");
+            if console.yes_no(
+                &format!("keep {name} switched off (uninstall switches it on again)"),
+                &format!("switch {name} on again now"),
+                Some(defaults.disable.contains(&name)),
+            )? {
+                out.disable.push(name);
+            } else if main {
+                out.read_only.push(name);
+            } else {
+                out.kept.push(name);
+            }
+            continue;
+        }
+        if servers.iter().all(|s| s.state == ServerState::Off) {
+            continue;
+        }
+        let default = if defaults.disable.contains(&name) {
+            1
+        } else if defaults.read_only.contains(&name) {
+            0
+        } else {
+            2
+        };
+        let _ = writeln!(console.out(), "  {name}:");
+        let choice = console.choose(
+            &[
+                Choice::new(
+                    "graphersal-memory is the main memory",
+                    format!(
+                        "{name} stays, named read-only in the rule block\n(search it when \
+                         needed, never write there)"
+                    ),
+                ),
+                Choice::new(
+                    format!("Switch {name} off"),
+                    format!(
+                        "in {}; backed up, uninstall switches it on again",
+                        files.join(" and ")
+                    ),
+                ),
+                Choice::new(
+                    "Keep both as they are",
+                    "the rule block does not name it".to_string(),
+                ),
+            ],
+            Some(default),
+        )?;
+        match choice {
+            0 => out.read_only.push(name),
+            1 => out.disable.push(name),
+            _ => out.kept.push(name),
+        }
+    }
+    let mut import = import_default;
+    if current.other_pending > 0 {
+        let names: Vec<String> = current
+            .other_sources
+            .iter()
+            .map(|s| s.server.clone())
+            .collect();
+        let _ = writeln!(console.out(), "  Import:");
+        import = console.yes_no(
+            &format!(
+                "import {} memor{} of {} now (global memories; the files are only read)",
+                current.other_pending,
+                if current.other_pending == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+                names.join(", ")
+            ),
+            "not now (`graphersal-memory install` offers it again)",
+            Some(import_default),
+        )?;
+    }
+    Ok((out, import))
 }
 
 /// The number of wizard steps (the summary included): the harness question when more than
@@ -1959,24 +2274,42 @@ fn wizard_steps(
     let ask_harnesses = options.harnesses.is_none() && current.detected.len() > 1;
     let import = claude_possible && current.import_pending.1 > 0;
     let auto = current.ask_auto_memory(claude_possible, codex_possible);
-    4 + usize::from(ask_harnesses) + usize::from(import) + usize::from(auto) + 1
+    let others = current.other_step(&possible_harnesses(options, current));
+    4 + usize::from(ask_harnesses)
+        + usize::from(import)
+        + usize::from(auto)
+        + usize::from(others)
+        + 1
+}
+
+/// The harnesses the wizard may install into: the flag's, else every one found.
+fn possible_harnesses(options: &InstallOptions, current: &Current) -> Vec<Kind> {
+    options
+        .harnesses
+        .clone()
+        .unwrap_or_else(|| current.detected.clone())
 }
 
 /// The steps [`wizard_steps`] counted that the choice of `chosen` harnesses leaves out: the
 /// import and the auto-memory question when Claude Code (or, for the memories, Codex) is not
 /// chosen.
 fn skipped_steps(
+    options: &InstallOptions,
     current: &Current,
     claude_possible: bool,
     codex_possible: bool,
     chosen: &[Kind],
 ) -> usize {
+    let others_counted = current.other_step(&possible_harnesses(options, current));
+    let others_skipped = usize::from(others_counted && !current.other_step(chosen));
     let claude = chosen.contains(&Kind::ClaudeCode);
     let import_counted = claude_possible && current.import_pending.1 > 0;
     let auto_counted = current.ask_auto_memory(claude_possible, codex_possible);
     let auto_asked = (claude && !current.auto_memory_off_by_user)
         || (chosen.contains(&Kind::Codex) && current.codex_memories_on);
-    usize::from(import_counted && !claude) + usize::from(auto_counted && !auto_asked)
+    usize::from(import_counted && !claude)
+        + usize::from(auto_counted && !auto_asked)
+        + others_skipped
 }
 
 /// The command the summaries run through for `harnesses`: the settings file's, except that
@@ -2133,7 +2466,8 @@ fn plan_install(
         auto_memory = plan;
         steps.push(step);
         changes.extend(change);
-        let (step, change) = plan_block(setup, answers.language, &mut conflicts)?;
+        let (step, change) =
+            plan_block(setup, answers.language, &answers.read_only, &mut conflicts)?;
         steps.push(step);
         changes.extend(change);
         sections.push((Kind::ClaudeCode.display_name().to_string(), steps));
@@ -2143,7 +2477,12 @@ fn plan_install(
     }
     let mut opencode_changes = Vec::new();
     if opencode {
-        let plan = crate::opencode::install::plan(setup, answers.language, answers.develop)?;
+        let plan = crate::opencode::install::plan(
+            setup,
+            answers.language,
+            &answers.read_only,
+            answers.develop,
+        )?;
         sections.push((Kind::OpenCode.display_name().to_string(), plan.steps));
         opencode_changes = plan.changes;
         conflicts.extend(plan.conflicts);
@@ -2154,6 +2493,7 @@ fn plan_install(
         let plan = crate::codex::install::plan(
             setup,
             answers.language,
+            &answers.read_only,
             answers.develop,
             answers.auto_memory_off,
         )?;
@@ -2164,10 +2504,33 @@ fn plan_install(
     }
     let mut cursor_changes = Vec::new();
     if answers.harnesses.contains(&Kind::Cursor) {
-        let plan = crate::cursor::install::plan(setup, answers.language, answers.develop)?;
+        let plan = crate::cursor::install::plan(
+            setup,
+            answers.language,
+            &answers.read_only,
+            answers.develop,
+        )?;
         sections.push((Kind::Cursor.display_name().to_string(), plan.steps));
         cursor_changes = plan.changes;
         conflicts.extend(plan.conflicts);
+    }
+    let mut other_off = Vec::new();
+    let mut other_on = Vec::new();
+    let other_steps = plan_other_memory(
+        setup,
+        answers,
+        current,
+        [
+            (Kind::ClaudeCode, &mut changes),
+            (Kind::OpenCode, &mut opencode_changes),
+            (Kind::Codex, &mut codex_changes),
+            (Kind::Cursor, &mut cursor_changes),
+        ],
+        &mut other_off,
+        &mut other_on,
+    )?;
+    if !other_steps.is_empty() {
+        sections.push(("Other memory".to_string(), other_steps));
     }
     after.push(plan_sessions(setup, options, answers, current)?);
     let look_alikes = crate::projects::look_alike_lines(&setup.data_dir);
@@ -2192,7 +2555,242 @@ fn plan_install(
         imports,
         write_config,
         auto_memory,
+        other_off,
+        other_on,
     })
+}
+
+/// The change of `changes` for `path`, made from the file's current text when there is none.
+fn change_for<'a>(changes: &'a mut Vec<Change>, path: &Path) -> Result<&'a mut Change, String> {
+    if let Some(at) = changes.iter().position(|c| c.path == path) {
+        return Ok(&mut changes[at]);
+    }
+    let text = read_text(path)?.unwrap_or_default();
+    let at = changes.len();
+    changes.push(Change {
+        path: path.to_path_buf(),
+        after: Some(text),
+        created: Vec::new(),
+        separator: None,
+    });
+    Ok(&mut changes[at])
+}
+
+/// The "Other memory" part of the plan: each other memory tool of the chosen harnesses with
+/// what happens to it (named read-only, switched off in its file, kept, switched on again),
+/// the import of the tools whose format is known, and what is only shown (instruction files,
+/// memory files another program writes). Switching an entry off or on is folded into the
+/// harness's change of that file (one backup, one write, one rollback for the file).
+fn plan_other_memory(
+    setup: &Setup,
+    answers: &Answers,
+    current: &Current,
+    mut changes: [(Kind, &mut Vec<Change>); 4],
+    other_off: &mut Vec<(Kind, PathBuf, String, Value)>,
+    other_on: &mut Vec<(Kind, PathBuf, String)>,
+) -> Result<Vec<Step>, String> {
+    use crate::coexist::ServerState;
+    let mut steps = Vec::new();
+    let mut lines = Vec::new();
+    for server in &current.others.servers {
+        if !answers.harnesses.contains(&server.harness) {
+            continue;
+        }
+        let place = server.place(setup);
+        if server.project.is_some() {
+            lines.push(format!(
+                "{} ({place}): a project's own registration, left as it is (`graphersal-memory \
+                 doctor` says how to switch it off)",
+                server.name
+            ));
+            continue;
+        }
+        let disable = answers.disable_other.contains(&server.name);
+        let Some((_, list)) = changes.iter_mut().find(|(k, _)| *k == server.harness) else {
+            continue;
+        };
+        match (&server.state, disable) {
+            (ServerState::On, true) => {
+                let change = change_for(list, &server.file)?;
+                let text = change.after.clone().unwrap_or_default();
+                match crate::coexist::disable_edit(server, &text)
+                    .map_err(|e| in_file(&server.file, e))?
+                {
+                    Some((new, record)) => {
+                        change.after = Some(new);
+                        other_off.push((
+                            server.harness,
+                            server.file.clone(),
+                            server.name.clone(),
+                            record,
+                        ));
+                        lines.push(format!(
+                            "{} ({place}): switch it off (the file is backed up first; \
+                             uninstall switches it on again)",
+                            server.name
+                        ));
+                    }
+                    None => lines.push(format!(
+                        "{} ({place}): cannot be switched off in place; kept as it is (by hand: \
+                         {})",
+                        server.name,
+                        crate::coexist::off_by_hand(server)
+                    )),
+                }
+            }
+            (ServerState::OffByUs, false) => {
+                let state = State::load_of(setup, server.harness)?;
+                let record = state
+                    .file(&server.file)
+                    .and_then(|e| e.get(crate::coexist::OFF_RECORD))
+                    .and_then(|r| r.get(&server.name))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let change = change_for(list, &server.file)?;
+                let text = change.after.clone().unwrap_or_default();
+                if let Some(new) =
+                    crate::coexist::restore_edit(server.harness, &text, &server.name, &record)
+                        .map_err(|e| in_file(&server.file, e))?
+                {
+                    change.after = Some(new);
+                }
+                other_on.push((server.harness, server.file.clone(), server.name.clone()));
+                lines.push(format!(
+                    "{} ({place}): switch it on again (install had switched it off)",
+                    server.name
+                ));
+            }
+            (ServerState::OffByUs, true) => lines.push(format!(
+                "{} ({place}): stays switched off (uninstall switches it on again)",
+                server.name
+            )),
+            (ServerState::Off, _) => lines.push(format!(
+                "{} ({place}): switched off by you; left as it is",
+                server.name
+            )),
+            (ServerState::On, false) if answers.read_only.contains(&server.name) => {
+                lines.push(format!(
+                    "{} ({place}): {}; stays, named read-only in the rule block (graphersal-memory \
+                     is the main memory)",
+                    server.name,
+                    server.what()
+                ))
+            }
+            (ServerState::On, false) => lines.push(format!(
+                "{} ({place}): {}; kept as it is (the rule block does not name it)",
+                server.name,
+                server.what()
+            )),
+        }
+    }
+    // A change made only for an entry that ends up as it was is no change.
+    for (_, list) in changes.iter_mut() {
+        list.retain(|change| {
+            change.after.is_none()
+                || read_text(&change.path).ok().flatten().as_ref() != change.after.as_ref()
+        });
+    }
+    for plugin in &current.others.plugins {
+        if answers.harnesses.contains(&plugin.harness) {
+            lines.push(format!(
+                "{} plugin or hook {}: another memory beside graphersal-memory; left as it is \
+                 (graphersal-memory does not change plugins)",
+                plugin.harness.display_name(),
+                plugin.name
+            ));
+        }
+    }
+    if !lines.is_empty() {
+        steps.push(Step {
+            title: "Other memory tools".to_string(),
+            lines,
+        });
+    }
+    let mut import_lines = Vec::new();
+    for source in &current.other_sources {
+        let state = crate::coexist::other_import::State::load(&setup.data_dir);
+        let pending = state.pending_count(source);
+        import_lines.push(format!(
+            "{} ({}): {} memor{} in {}, {pending} new or changed{}",
+            source.server,
+            source.tool.name,
+            source.items.len(),
+            if source.items.len() == 1 { "y" } else { "ies" },
+            source.path.display(),
+            if pending == 0 {
+                String::new()
+            } else if answers.import_other {
+                ": imported as global memories (the file is only read)".to_string()
+            } else {
+                ": not now (--no-import)".to_string()
+            }
+        ));
+    }
+    import_lines.extend(current.not_importable.iter().cloned());
+    if !import_lines.is_empty() {
+        steps.push(Step {
+            title: "Import the other memory tools' memories".to_string(),
+            lines: import_lines,
+        });
+    }
+    let mentions: Vec<String> = current
+        .others
+        .mentions
+        .iter()
+        .map(|m| {
+            format!(
+                "{}:{}: \"{}\" (contradicts the rule block; `graphersal-memory doctor` \
+                 suggests an edit)",
+                m.file.display(),
+                m.line,
+                m.text
+            )
+        })
+        .collect();
+    if !mentions.is_empty() {
+        steps.push(Step {
+            title: "Instruction files that keep memory elsewhere (never changed by \
+                    graphersal-memory)"
+                .to_string(),
+            lines: mentions,
+        });
+    }
+    if answers.harnesses.contains(&Kind::ClaudeCode) && !current.others.writers.is_empty() {
+        let mut lines: Vec<String> = current
+            .others
+            .writers
+            .iter()
+            .map(|w| {
+                format!(
+                    "{}{}{}",
+                    w.dir.display(),
+                    w.header
+                        .as_ref()
+                        .map(|h| format!(": MEMORY.md says \"{h}\""))
+                        .unwrap_or_default(),
+                    if w.outside > 0 {
+                        format!(
+                            "; {} file{} changed outside any Claude Code session",
+                            w.outside,
+                            if w.outside == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        String::new()
+                    }
+                )
+            })
+            .collect();
+        lines.push(
+            "they are imported like any memory file; what that program writes comes back into \
+             the graph (`graphersal-memory import --ignore <dir>` stops it)"
+                .to_string(),
+        );
+        steps.push(Step {
+            title: "Memory files another program writes".to_string(),
+            lines,
+        });
+    }
+    Ok(steps)
 }
 
 /// The import step of Claude Code's file memory.
@@ -2215,6 +2813,15 @@ fn plan_import(setup: &Setup, answers: &Answers) -> Result<(Step, Vec<DirPlan>),
         lines.push(format!(
             "{skipped} director{} skipped: the project's directory no longer exists",
             if skipped == 1 { "y" } else { "ies" }
+        ));
+    }
+    let ignored: usize = imports.iter().map(|plan| plan.ignored).sum();
+    if ignored > 0 {
+        lines.push(format!(
+            "{ignored} memory file{} not imported: you ignored {} (`graphersal-memory import \
+             --unignore <path>` imports again)",
+            if ignored == 1 { "" } else { "s" },
+            if ignored == 1 { "it" } else { "them" }
         ));
     }
     if answers.import {
@@ -2549,10 +3156,27 @@ pub fn install(
         return Err(reason);
     }
     crate::ipc::socket_path(&setup.run_dir).map_err(|err| format!("{err}; nothing was changed"))?;
-    let current = Current::read(setup)?;
+    let current = Current::read(setup, options.project_dir.as_deref())?;
     let interactive = options.interactive && !options.yes && !options.dry_run;
     let color = options.color;
-    let notes = detection_notes(setup, options);
+    let mut notes = detection_notes(setup, options);
+    // A name in an "other memory" flag that matches no user-scope entry.
+    let all = current.others.names(&Kind::ALL);
+    for (flag, names) in [
+        ("--disable-other", &options.disable_other),
+        ("--enable-other", &options.enable_other),
+        ("--other-read-only", &options.other_read_only),
+        ("--keep-other", &options.keep_other),
+    ] {
+        for name in names {
+            if !all.contains(name) {
+                notes.push(format!(
+                    "warning: {flag} {name}: no other memory tool's MCP entry of that name is \
+                     found at user scope; nothing changes for it"
+                ));
+            }
+        }
+    }
     let answers = if interactive {
         let mut console = Console::new(input, out, options.color);
         let offered = options
@@ -2612,6 +3236,7 @@ pub fn install(
         let codex_possible = ask_harnesses || offered.contains(&Kind::Codex);
         let total = wizard_steps(options, &current, claude_possible, codex_possible)
             - skipped_steps(
+                options,
                 &current,
                 claude_possible,
                 codex_possible,
@@ -2839,6 +3464,25 @@ pub fn install(
         report.push("imported nothing: no new or changed memory files".to_string());
     }
 
+    // The other memory tools' memories whose format is known (M15), as global memories.
+    if answers.import_other && current.other_pending > 0 {
+        let done =
+            crate::coexist::other_import::apply(&current.other_sources, connect, &setup.data_dir);
+        report.push(done.line(&current.other_sources));
+        for problem in &done.problems {
+            report.push(format!("import failed: {problem}"));
+        }
+        failures += done.problems.len();
+    }
+    // The choices about other memory tools: what the rule block names read-only.
+    let choices = crate::coexist::Choices {
+        read_only: answers.read_only.clone(),
+        kept: answers.kept.clone(),
+    };
+    if current.other_choices.as_ref() != Some(&choices) {
+        choices.save(setup)?;
+    }
+
     // Summaries: only with consent (--summaries, a yes in the wizard, or yes to the question;
     // --yes alone: off).
     let settings = Config::load(&setup.data_dir)?;
@@ -2973,6 +3617,7 @@ fn apply_agents(
                     journal,
                     // install's auto-memory record goes with the write of the settings file.
                     &mut |path, state| {
+                        record_other(plan, Kind::ClaudeCode, path, state);
                         if path != settings {
                             return;
                         }
@@ -3002,7 +3647,7 @@ fn apply_agents(
                     backups,
                     bases,
                     journal,
-                    &mut |_, _| {},
+                    &mut |path, state| record_other(plan, Kind::OpenCode, path, state),
                 )?;
             }
             Kind::Codex => {
@@ -3021,6 +3666,7 @@ fn apply_agents(
                     journal,
                     // The memories record goes with the write of config.toml.
                     &mut |path, state| {
+                        record_other(plan, Kind::Codex, path, state);
                         if path != config {
                             return;
                         }
@@ -3058,8 +3704,21 @@ fn apply_agents(
                     backups,
                     bases,
                     journal,
-                    &mut |_, _| {},
+                    &mut |path, state| record_other(plan, Kind::Cursor, path, state),
                 )?;
+            }
+        }
+        for (k, path, name, _) in &plan.other_off {
+            if k == kind {
+                lines.push(format!(
+                    "{name}: switched off in {} (uninstall switches it on again)",
+                    path.display()
+                ));
+            }
+        }
+        for (k, path, name) in &plan.other_on {
+            if k == kind {
+                lines.push(format!("{name}: switched on again in {}", path.display()));
             }
         }
         match agent_report.iter_mut().find(|(k, _)| k == kind) {
@@ -3082,6 +3741,32 @@ fn apply_agents(
         }
     }
     Ok(state)
+}
+
+/// Records in `state` (the harness `kind`'s) what the plan switched off in `path` (the entry
+/// and how to undo it) and forgets what it switched on again, with the write of that file.
+fn record_other(plan: &InstallPlan, kind: Kind, path: &Path, state: &mut State) {
+    let key = crate::coexist::OFF_RECORD;
+    for (k, p, name, record) in &plan.other_off {
+        if *k == kind && p == path {
+            let entry = state.file_mut(path);
+            let records = entry.entry(key).or_insert_with(|| json!({}));
+            if let Some(records) = records.as_object_mut() {
+                records.insert(name.clone(), record.clone());
+            }
+        }
+    }
+    for (k, p, name) in &plan.other_on {
+        if *k == kind && p == path {
+            let entry = state.file_mut(path);
+            if let Some(records) = entry.get_mut(key).and_then(Value::as_object_mut) {
+                records.remove(name);
+                if records.is_empty() {
+                    entry.remove(key);
+                }
+            }
+        }
+    }
 }
 
 /// Every file change of a plan, of every agent.
@@ -3390,6 +4075,63 @@ fn recap(
     if answers.develop {
         lines.push(("Develop server", format!("{DEVELOP_SERVER} registered")));
     }
+    let mut others = Vec::new();
+    if !answers.read_only.is_empty() {
+        others.push(format!(
+            "graphersal-memory is the main memory; {} read-only",
+            answers.read_only.join(", ")
+        ));
+    }
+    if !answers.disable_other.is_empty() {
+        others.push(format!(
+            "{} switched off (uninstall switches {} on again)",
+            answers.disable_other.join(", "),
+            if answers.disable_other.len() == 1 {
+                "it"
+            } else {
+                "them"
+            }
+        ));
+    }
+    if !answers.kept.is_empty() {
+        others.push(format!("{} kept as {}", answers.kept.join(", "), {
+            if answers.kept.len() == 1 {
+                "it is"
+            } else {
+                "they are"
+            }
+        }));
+    }
+    if answers.import_other && current.other_pending > 0 {
+        others.push(format!(
+            "{} memor{} imported",
+            current.other_pending,
+            if current.other_pending == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        ));
+    }
+    if !current.others.mentions.is_empty() {
+        others.push(format!(
+            "{} instruction file line{} about memory elsewhere, never edited (`doctor` shows {})",
+            current.others.mentions.len(),
+            if current.others.mentions.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if current.others.mentions.len() == 1 {
+                "it"
+            } else {
+                "them"
+            }
+        ));
+    }
+    if !others.is_empty() {
+        lines.push(("Other memory", others.join("; ")));
+    }
     lines
 }
 
@@ -3549,6 +4291,13 @@ pub fn import_conflict_lines(report: &import::ImportReport) -> Vec<String> {
             report.stale_files.len()
         ));
         lines.extend(report.stale_files.iter().map(|line| format!("  {line}")));
+    }
+    if !report.returning.is_empty() {
+        lines.push(format!(
+            "files that brought back a memory changed or forgotten in the graph: {}",
+            report.returning.len()
+        ));
+        lines.extend(report.returning.iter().map(|line| format!("  {line}")));
     }
     lines
 }
@@ -3876,6 +4625,22 @@ pub fn uninstall_with(
             changes.push((Kind::Cursor, change, what));
         }
     }
+    // Other memory tools' entries install switched off go back on (M15).
+    let mut restored: Vec<(Kind, String)> = Vec::new();
+    if !options.disable_develop_only {
+        for (kind, kind_state) in [
+            (Kind::ClaudeCode, &state),
+            (Kind::OpenCode, &opencode_state),
+            (Kind::Codex, &codex_state),
+            (Kind::Cursor, &cursor_state),
+        ] {
+            if !kinds.contains(&kind) {
+                continue;
+            }
+            restore_others(kind, kind_state, &mut changes, &mut restored)
+                .map_err(|err| way_out(&err, &kinds, "uninstall", "uninstall from"))?;
+        }
+    }
     // The harnesses it actually changes (or is recorded in); the title names only these.
     let active: Vec<Kind> = kinds
         .iter()
@@ -3965,6 +4730,9 @@ pub fn uninstall_with(
                 "  - {}: {what}",
                 setup.show(&change.path.display().to_string())
             );
+        }
+        for (_, line) in restored.iter().filter(|(k, _)| k == kind) {
+            let _ = writeln!(out, "  - {}", setup.show(line));
         }
     }
     if !conflicts.is_empty() {
@@ -4120,6 +4888,9 @@ pub fn uninstall_with(
             &mut report,
         );
     }
+    for (kind, line) in &restored {
+        push_for(*kind, line.clone(), &mut report);
+    }
     let mut states = [
         (Kind::ClaudeCode, state),
         (Kind::OpenCode, opencode_state),
@@ -4182,6 +4953,10 @@ pub fn uninstall_with(
             }
         }
     }
+    // The choices about other memory tools go with the last harness.
+    if !options.disable_develop_only && conflicts.is_empty() && setup.installed().is_empty() {
+        crate::coexist::Choices::remove(setup)?;
+    }
     if options.purge {
         report.extend(purge(setup)?);
     }
@@ -4221,6 +4996,88 @@ pub fn uninstall_with(
         );
     }
     Ok(if conflicts.is_empty() { 0 } else { 1 })
+}
+
+/// The entries of other memory tools that install switched off in `kind`'s files (recorded in
+/// `state`), switched on again: folded into the removal's change of that file (a file put back
+/// from its backup has them already), or a change of their own. One line per entry in
+/// `restored`.
+fn restore_others(
+    kind: Kind,
+    state: &State,
+    changes: &mut Vec<(Kind, Change, &'static str)>,
+    restored: &mut Vec<(Kind, String)>,
+) -> Result<(), String> {
+    for (file, entry) in state.files() {
+        let Some(records) = entry
+            .get(crate::coexist::OFF_RECORD)
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        let path = PathBuf::from(file);
+        for (name, record) in records {
+            let line = format!(
+                "{name}: switched on again in {} (install had switched it off)",
+                path.display()
+            );
+            match changes
+                .iter_mut()
+                .find(|(k, change, _)| *k == kind && change.path == path)
+            {
+                Some((_, change, what)) => match &change.after {
+                    Some(text) => {
+                        match crate::coexist::restore_edit(kind, text, name, record)
+                            .map_err(|e| in_file(&path, e))?
+                        {
+                            Some(new) => change.after = Some(new),
+                            None if what.starts_with("restore the file") => {}
+                            None => continue,
+                        }
+                        restored.push((kind, line));
+                    }
+                    // A file install created whose rest is empty: kept for the entry.
+                    None if record["how"] == "removed" => {
+                        let keys: Vec<&str> = record["path"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect();
+                        if let Some((new, _)) =
+                            jsonedit::set_member(EMPTY_OBJECT, &keys, name, &record["entry"])?
+                        {
+                            change.after = Some(new);
+                            *what = "remove our parts (the entry of another tool stays)";
+                            restored.push((kind, line));
+                        }
+                    }
+                    None => {}
+                },
+                None => {
+                    let Some(text) = read_text(&path)? else {
+                        continue;
+                    };
+                    if let Some(new) = crate::coexist::restore_edit(kind, &text, name, record)
+                        .map_err(|e| in_file(&path, e))?
+                    {
+                        changes.push((
+                            kind,
+                            Change {
+                                path: path.clone(),
+                                after: Some(new),
+                                created: Vec::new(),
+                                separator: None,
+                            },
+                            "switch on again what install switched off",
+                        ));
+                        restored.push((kind, line));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The removal of our parts from Claude Code's files: one `(change, what)` per file.
@@ -4554,18 +5411,20 @@ pub fn inspect(setup: &Setup) -> Inspection {
         .map(|config| config.language())
         .unwrap_or_default();
     let block = match read_text(&setup.paths.instructions) {
-        Ok(Some(text)) => match find_block_for(&text, language) {
-            Ok(None) => PartState::Missing,
-            Ok(Some(found)) if found.current => PartState::Installed,
-            Ok(Some(found)) if found.known => {
-                PartState::Outdated("written by an earlier version".to_string())
+        Ok(Some(text)) => {
+            match find_block_with(&text, language, &crate::coexist::read_only_names(setup)) {
+                Ok(None) => PartState::Missing,
+                Ok(Some(found)) if found.current => PartState::Installed,
+                Ok(Some(found)) if found.known => {
+                    PartState::Outdated("written by an earlier version".to_string())
+                }
+                Ok(Some(found)) if found.intact => {
+                    PartState::Outdated("written by another version".to_string())
+                }
+                Ok(Some(_)) => PartState::Conflict("edited by hand".to_string()),
+                Err(err) => PartState::Conflict(err),
             }
-            Ok(Some(found)) if found.intact => {
-                PartState::Outdated("written by another version".to_string())
-            }
-            Ok(Some(_)) => PartState::Conflict("edited by hand".to_string()),
-            Err(err) => PartState::Conflict(err),
-        },
+        }
         Ok(None) => PartState::Missing,
         Err(err) => {
             errors.push(err);
@@ -4715,7 +5574,7 @@ pub(crate) fn ok(text: impl Into<String>) -> Finding {
     }
 }
 
-fn note(text: impl Into<String>, hint: impl Into<String>) -> Finding {
+pub(crate) fn note(text: impl Into<String>, hint: impl Into<String>) -> Finding {
     Finding {
         problem: false,
         text: text.into(),

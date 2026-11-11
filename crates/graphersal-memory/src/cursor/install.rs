@@ -117,9 +117,33 @@ pub fn find_block(
     )
 }
 
+/// [`find_block`] with the read-only line naming `read_only` in the current block
+/// (`crate::coexist::rule_with`).
+pub fn find_block_with(
+    text: &str,
+    language: Language,
+    read_only: &[String],
+) -> Result<Option<crate::install::FoundBlock>, String> {
+    find_block_in(
+        text,
+        &crate::coexist::rule_with(rule_block(language), read_only),
+        &[RULE_BLOCK, RULE_BLOCK_ANY],
+        PREVIOUS_BLOCK_FINGERPRINTS,
+    )
+}
+
 /// The whole text of our rule file.
+#[cfg(test)]
 pub fn rules_text(language: Language) -> String {
-    format!("{FRONT_MATTER}{}", wrap_block(rule_block(language)))
+    rules_text_with(language, &[])
+}
+
+/// The whole text of our rule file, its block naming `read_only`.
+pub fn rules_text_with(language: Language, read_only: &[String]) -> String {
+    format!(
+        "{FRONT_MATTER}{}",
+        wrap_block(&crate::coexist::rule_with(rule_block(language), read_only))
+    )
 }
 
 /// The MCP entry of a profile.
@@ -165,7 +189,12 @@ pub struct Plan {
 }
 
 /// Plans Cursor's part of the install.
-pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, String> {
+pub fn plan(
+    setup: &Setup,
+    language: Language,
+    read_only: &[String],
+    develop: bool,
+) -> Result<Plan, String> {
     let mut conflicts = Vec::new();
     let mut steps = Vec::new();
     let mut changes = Vec::new();
@@ -306,10 +335,10 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
     let before = read_text(path)?;
     let (after, line) = match &before {
         None => (
-            Some(rules_text(language)),
+            Some(rules_text_with(language, read_only)),
             "create it (front matter alwaysApply: true, and the rule block)".to_string(),
         ),
-        Some(current) => match find_block(current, language) {
+        Some(current) => match find_block_with(current, language, read_only) {
             Err(err) => {
                 conflicts.push(format!("{}: {err}; kept as it is.", path.display()));
                 (None, "CONFLICT (see the report)".to_string())
@@ -343,7 +372,7 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
                 Some(format!(
                     "{}{}{}",
                     &current[..found.start],
-                    wrap_block(rule_block(language)),
+                    wrap_block(&crate::coexist::rule_with(rule_block(language), read_only)),
                     &current[found.end..]
                 )),
                 "update the block to this version".to_string(),
@@ -653,18 +682,22 @@ pub fn inspect(setup: &Setup) -> Inspection {
         .map(|c| c.language())
         .unwrap_or_default();
     let rules = match read_text(&paths.rules_file) {
-        Ok(Some(text)) => match find_block(&text, language) {
-            Ok(None) => PartState::Conflict("a file of another program has this name".to_string()),
-            Ok(Some(found)) if found.current => PartState::Installed,
-            Ok(Some(found)) if found.known => {
-                PartState::Outdated("written by an earlier version".to_string())
+        Ok(Some(text)) => {
+            match find_block_with(&text, language, &crate::coexist::read_only_names(setup)) {
+                Ok(None) => {
+                    PartState::Conflict("a file of another program has this name".to_string())
+                }
+                Ok(Some(found)) if found.current => PartState::Installed,
+                Ok(Some(found)) if found.known => {
+                    PartState::Outdated("written by an earlier version".to_string())
+                }
+                Ok(Some(found)) if found.intact => {
+                    PartState::Outdated("written by another version".to_string())
+                }
+                Ok(Some(_)) => PartState::Conflict("edited by hand".to_string()),
+                Err(err) => PartState::Conflict(err),
             }
-            Ok(Some(found)) if found.intact => {
-                PartState::Outdated("written by another version".to_string())
-            }
-            Ok(Some(_)) => PartState::Conflict("edited by hand".to_string()),
-            Err(err) => PartState::Conflict(err),
-        },
+        }
         Ok(None) => PartState::Missing,
         Err(err) => {
             errors.push(err);

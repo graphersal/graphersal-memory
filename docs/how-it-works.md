@@ -407,6 +407,26 @@ import takes both lines off again. Importing an
 export gives the same memories back (a test checks it); links the body does not show get a
 `Related: [[slug]]` line.
 
+### Other memory, and facts that come back
+
+Install, `status` and `doctor` read the other memories on the machine (built-in memories, other
+memory tools' MCP entries, memory plugins, instruction files, external writers; see
+[Supported harnesses](harnesses.md#other-memory-beside-graphersal-memory)) from files only. What
+the user chose is kept in `install/other-memory.json` (the tools the rule block names read-only,
+the ones kept as they are); an MCP entry install switched off is recorded in the harness's install
+state beside the file it was in (`other_memory_off`: the removed entry, or the switch and its value
+before), so `uninstall` can switch it on again. An import from another tool goes through a `use`
+connection without a project (an empty `project.root` in the handshake: global memories only) and
+records each item's fingerprint in `import/other-memory.json`.
+
+Every imported memory knows its file (`source`, `imported_at`; [conflicts](#conflicts-between-memories)).
+When the import of a changed file finds that the memory was forgotten in the graph, or that an
+agent changed it there since the last import, it still writes the file's version (the file
+changed: that is a decision too) and records `returned` in the file's record of
+`import/claude-code.json`; the import's report, `status` and `doctor` name the file and the ways
+out. `import --ignore PATH` adds a file or directory to the record's `ignored` list: the import
+skips it from then on (`--unignore` takes it off again).
+
 ### Without hooks
 
 The hooks are optional. Every harness starts the MCP server (`graphersal-memory mcp`) when a

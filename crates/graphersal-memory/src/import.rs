@@ -414,7 +414,7 @@ fn parse_file(
 }
 
 /// The front matter (between the first two `---` lines) and the rest.
-fn split_front_matter(text: &str) -> (&str, &str) {
+pub(crate) fn split_front_matter(text: &str) -> (&str, &str) {
     if let Some(rest) = text.strip_prefix("---\n")
         && let Some(end) = rest.find("\n---")
     {
@@ -443,7 +443,7 @@ fn strip_export_note(body: &str) -> &str {
 
 /// A front-matter field (top-level or nested one level, as `metadata.type`), unquoted; a
 /// folded or literal block (`>`, `>-`, `|`, `|-`) joined from its indented lines.
-fn field(front: &str, key: &str) -> Option<String> {
+pub(crate) fn field(front: &str, key: &str) -> Option<String> {
     let lines: Vec<&str> = front.lines().collect();
     lines.iter().enumerate().find_map(|(at, line)| {
         let (name, value) = line.trim().split_once(':')?;
@@ -676,6 +676,9 @@ fn walk(dir: &Path, rest: &str, budget: &mut usize) -> Option<PathBuf> {
 #[derive(Debug, Clone, Default)]
 pub struct ImportState {
     files: BTreeMap<String, Value>,
+    /// Files and directories the user excluded from the import (`import --ignore`): their
+    /// memory files are never read into the graph (M15: a file another program keeps writing).
+    ignored: Vec<String>,
 }
 
 impl ImportState {
@@ -699,7 +702,18 @@ impl ImportState {
             .and_then(Value::as_object)
             .map(|files| files.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
-        Ok(Self { files })
+        let ignored = value
+            .get("ignored")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Self { files, ignored })
     }
 
     /// The fingerprint of `file`'s text when this import last read it (`None`: never imported).
@@ -729,7 +743,10 @@ impl ImportState {
         std::fs::create_dir_all(&dir)
             .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
         let files: serde_json::Map<String, Value> = self.files.clone().into_iter().collect();
-        let value = json!({"version": FORMAT, "files": files});
+        let mut value = json!({"version": FORMAT, "files": files});
+        if !self.ignored.is_empty() {
+            value["ignored"] = json!(self.ignored);
+        }
         fsutil::write_atomic(
             &path,
             format!("{}\n", crate::jsonedit::render(&value, Some("  "), 0)).as_bytes(),
@@ -816,6 +833,66 @@ impl ImportState {
     pub fn len(&self) -> usize {
         self.files.len()
     }
+
+    /// Whether `file` is excluded from the import: it, or a directory it is in, was ignored
+    /// (`import --ignore`).
+    pub fn is_ignored(&self, file: &Path) -> bool {
+        self.ignored
+            .iter()
+            .any(|ignored| file == Path::new(ignored) || file.starts_with(ignored))
+    }
+
+    /// The ignored files and directories.
+    pub fn ignored(&self) -> &[String] {
+        &self.ignored
+    }
+
+    /// Excludes `path` (a file or a directory) from the import; false when it was already.
+    pub fn ignore(&mut self, path: &Path) -> bool {
+        let text = path.display().to_string();
+        if self.ignored.contains(&text) {
+            return false;
+        }
+        self.ignored.push(text);
+        self.ignored.sort();
+        true
+    }
+
+    /// Imports `path` again from now on; false when it was not ignored.
+    pub fn unignore(&mut self, path: &Path) -> bool {
+        let text = path.display().to_string();
+        let before = self.ignored.len();
+        self.ignored.retain(|item| *item != text);
+        before != self.ignored.len()
+    }
+
+    /// Whether this import read `file` before (it has a record).
+    pub fn knows(&self, file: &Path) -> bool {
+        self.files.contains_key(&file.display().to_string())
+    }
+
+    /// The files that brought back a memory forgotten or changed in the graph (M15): each with
+    /// its record (`slug`, `project`, `returned`: `{what: "forgotten" | "changed", at}`).
+    pub fn returned(&self) -> Vec<(String, Value)> {
+        self.files
+            .iter()
+            .filter(|(_, entry)| entry["returned"].is_object())
+            .map(|(path, entry)| (path.clone(), entry.clone()))
+            .collect()
+    }
+
+    /// Every imported file with its record (for the external-writer check of `crate::coexist`).
+    pub fn entries(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.files.iter()
+    }
+
+    /// Notes that `file`'s import brought back a memory that was forgotten (`what` =
+    /// `forgotten`) or changed by an agent (`changed`) in the graph since its last import.
+    fn record_returned(&mut self, file: &MemoryFile, what: &str) {
+        if let Some(entry) = self.files.get_mut(&file.path.display().to_string()) {
+            entry["returned"] = json!({"what": what, "at": crate::daemon::now_utc()});
+        }
+    }
 }
 
 /// What an import will do with one directory.
@@ -829,6 +906,8 @@ pub struct DirPlan {
     pub changed: Vec<MemoryFile>,
     /// Files unchanged since their import.
     pub unchanged: usize,
+    /// Files left out because the user ignored them (`import --ignore`).
+    pub ignored: usize,
 }
 
 /// Plans the import of `dirs` against `state`.
@@ -838,7 +917,12 @@ pub fn plan(dirs: Vec<MemoryDir>, state: &ImportState) -> Vec<DirPlan> {
             let mut new = Vec::new();
             let mut changed = Vec::new();
             let mut unchanged = 0;
+            let mut ignored = 0;
             for file in &dir.files {
+                if state.is_ignored(&file.path) {
+                    ignored += 1;
+                    continue;
+                }
                 match state.fingerprint_of(&file.path) {
                     None => new.push(file.clone()),
                     Some(known) if known != file.fingerprint => changed.push(file.clone()),
@@ -850,6 +934,7 @@ pub fn plan(dirs: Vec<MemoryDir>, state: &ImportState) -> Vec<DirPlan> {
                 new,
                 changed,
                 unchanged,
+                ignored,
             }
         })
         .collect()
@@ -922,6 +1007,9 @@ pub struct ImportReport {
     pub conflicts: Vec<String>,
     /// Files that still hold a superseded memory, one line each (edit or delete them).
     pub stale_files: Vec<String>,
+    /// Files that brought back a memory forgotten or changed in the graph since their last
+    /// import, one line each with the fix (M15).
+    pub returning: Vec<String>,
 }
 
 /// Runs `plans`: every new or changed file goes through `remember` (in index order, then a
@@ -986,6 +1074,24 @@ pub fn apply(
                 }
                 None => {}
             }
+            // A file read before whose text changed: does it bring back a memory that was
+            // forgotten in the graph, or one an agent changed there since?
+            let returned = if state.knows(&file.path) {
+                match caller.call("memory", json!({"slug": file.slug})) {
+                    Ok(found)
+                        if found
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .is_some_and(|e| e.starts_with("no memory")) =>
+                    {
+                        Some("forgotten")
+                    }
+                    Ok(found) if found["source"] == "remember" => Some("changed"),
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let pinned = state.pinned_arg(file);
             let order = state.order_arg(file);
             match caller.call(
@@ -1005,6 +1111,14 @@ pub fn apply(
                         report.unchecked += 1;
                     }
                     state.record(file, project);
+                    if let Some(what) = returned {
+                        state.record_returned(file, what);
+                        report.returning.push(returning_line(
+                            &file.path.display().to_string(),
+                            &file.slug,
+                            what,
+                        ));
+                    }
                     let missing: Vec<&str> = answer["missing_targets"]
                         .as_array()
                         .map(|m| m.iter().filter_map(Value::as_str).collect())
@@ -1056,6 +1170,21 @@ pub fn apply(
         }
     }
     report
+}
+
+/// The line about a file that brought back the memory `slug` (`what`: `forgotten` or
+/// `changed`), with the ways out.
+pub fn returning_line(file: &str, slug: &str, what: &str) -> String {
+    format!(
+        "{file} brought back the memory {slug}, which was {} in the graph; edit or delete the \
+         file (or stop the program that writes it), or stop importing it: `graphersal-memory \
+         import --ignore {file}`",
+        if what == "forgotten" {
+            "forgotten"
+        } else {
+            "changed by an agent"
+        }
+    )
 }
 
 /// The lines of a `conflicts()` answer: the open conflicts (both memories with their files)

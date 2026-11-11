@@ -15,6 +15,9 @@
 //!   `requested`, `completed`, `report`); see `crate::sessions`. An older daemon refuses them as
 //!   unknown control requests, which the callers report and survive.
 //!
+//!   An empty `root` is no project: the connection sees and writes the global memories only
+//!   (the product's own import of another memory tool's memories, `crate::coexist`).
+//!
 //!   `start_context` (`full`, the default, `short` or `none`) says whether the `use` server's
 //!   instructions of the connection carry the start context ([`StartContextMode`]). `{"protocol":
 //!   1, "control": "start_context", "project", "max_chars"?}` answers the start context of a
@@ -203,7 +206,6 @@ pub fn parse_opening(line: &[u8]) -> Result<Opening, (Refusal, String)> {
         .get("project")
         .and_then(|project| project.get("root"))
         .and_then(Value::as_str)
-        .filter(|root| !root.is_empty())
         .ok_or_else(|| bad("no project root"))?;
     let harness = object
         .get("harness")
@@ -352,6 +354,18 @@ mod tests {
         assert_eq!(value["error"]["code"], "stopping");
         assert!(Refusal::is_retryable_code("restarting"));
         assert!(!Refusal::is_retryable_code("protocol"));
+    }
+
+    #[test]
+    fn an_empty_root_is_no_project() {
+        let opening = parse_opening(
+            br#"{"protocol":1,"shim_version":"0.0.0","profile":"use","project":{"root":""},"harness":{"name":"graphersal-memory"}}"#,
+        )
+        .unwrap();
+        match opening {
+            Opening::Handshake(handshake) => assert_eq!(handshake.project, ""),
+            _ => panic!("a handshake"),
+        }
     }
 
     #[test]

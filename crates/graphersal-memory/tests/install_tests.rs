@@ -599,3 +599,75 @@ fn cursor_install_hooks_status_and_uninstall_through_the_binary() {
     assert!(uninstall.status.success(), "{}", text(&uninstall));
     assert_eq!(env.home_snapshot(), before, "{}", text(&uninstall));
 }
+
+/// M15 through the real binary and daemon: the reference memory server's graph imported as
+/// global memories (a connection without a project), its entry named read-only, then switched
+/// off with `--disable-other` and given back byte for byte by uninstall; status and doctor show
+/// the "Other memory" section without an ACTION NEEDED line.
+#[test]
+fn other_memory_is_imported_named_switched_off_and_given_back() {
+    let env = Env::new();
+    let home = env.home();
+    std::fs::create_dir_all(home.join("kg")).unwrap();
+    std::fs::write(
+        home.join("kg").join("memory.jsonl"),
+        concat!(
+            r#"{"type":"entity","name":"Aleks","entityType":"person","observations":["Prefers short answers"]}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let entry = json!({"type": "stdio", "command": "npx",
+                       "args": ["-y", "@modelcontextprotocol/server-memory"],
+                       "env": {"MEMORY_FILE_PATH": home.join("kg/memory.jsonl").display().to_string()}});
+    std::fs::write(
+        home.join(".claude.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&json!({"mcpServers": {"memory": entry}})).unwrap()
+        ),
+    )
+    .unwrap();
+    let before = env.home_snapshot();
+    let output = env.run(&["install", "--yes", "--model", "builtin"]);
+    let out = text(&output);
+    assert!(output.status.success(), "{out}");
+    assert!(
+        out.contains("other memory: imported 1 memory (1 new, 0 updated; 0 unchanged) as global memories from memory"),
+        "{out}"
+    );
+    let rules = std::fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap();
+    assert!(rules.contains("the MCP server `memory`"), "{rules}");
+    let status = text(&env.run(&["status"]));
+    assert!(status.contains("\nOther memory:\n"), "{status}");
+    assert!(
+        status.contains("named read-only in the rule block"),
+        "{status}"
+    );
+    assert!(!status.contains("ACTION NEEDED"), "{status}");
+    let doctor = env.run(&["doctor"]);
+    assert!(doctor.status.success(), "{}", text(&doctor));
+    assert!(
+        text(&doctor).contains("\nOther memory:\n"),
+        "{}",
+        text(&doctor)
+    );
+    // Switched off, then given back by uninstall.
+    let output = env.run(&[
+        "install",
+        "--yes",
+        "--model",
+        "builtin",
+        "--disable-other",
+        "memory",
+    ]);
+    assert!(output.status.success(), "{}", text(&output));
+    let config: Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
+    assert!(config["mcpServers"]["memory"].is_null(), "{config}");
+    let output = env.run(&["uninstall", "--yes", "--no-export"]);
+    let out = text(&output);
+    assert!(output.status.success(), "{out}");
+    assert!(out.contains("memory: switched on again in"), "{out}");
+    assert_eq!(env.home_snapshot(), before, "{out}");
+}

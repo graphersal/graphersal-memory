@@ -321,9 +321,169 @@ pub fn set_bool(text: &str, table: &str, key: &str, value: bool) -> Result<Optio
     Ok(None)
 }
 
+/// Whether a header line's table name (`a.b`, `a."b"`, `a.'b'`) is `table` (dotted, unquoted).
+fn header_is(line: &str, table: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('[') || trimmed.starts_with("[[") {
+        return false;
+    }
+    let name = trimmed
+        .split('#')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim();
+    let name: String = name
+        .split('.')
+        .map(|part| part.trim().trim_matches('"').trim_matches('\''))
+        .collect::<Vec<_>>()
+        .join(".");
+    name == table
+}
+
+/// The document `before` with `value` set (or, `None`, removed) at `table` (dotted) + `key`.
+fn expected_with(before: &Value, table: &[&str], key: &str, value: Option<bool>) -> Value {
+    let mut expected = before.clone();
+    let mut at = &mut expected;
+    for part in table {
+        at = &mut at[*part];
+    }
+    match (value, at.as_object_mut()) {
+        (Some(value), Some(object)) => {
+            object.insert(key.to_string(), Value::Bool(value));
+        }
+        (None, Some(object)) => {
+            object.remove(key);
+        }
+        _ => {}
+    }
+    expected
+}
+
+/// `text` with the boolean `key` of the table `table` (path segments, e.g. `["mcp_servers",
+/// "mem0"]`) set to `value`: replaced in place when the table's header line sets it, else a
+/// `key = value` line inserted right after the header line. `None` when the table is not written
+/// as a header line of its own (an inline or dotted table) or the key is not a plain boolean
+/// there. The result is checked: only that value differs.
+pub fn set_table_bool(
+    text: &str,
+    table: &[&str],
+    key: &str,
+    value: bool,
+) -> Result<Option<String>, String> {
+    let before = parse(text)?;
+    let dotted = table.join(".");
+    let mut at = 0;
+    let mut in_table = false;
+    let mut header_end = None;
+    for line in text.split_inclusive('\n') {
+        if line.trim().starts_with('[') {
+            if in_table {
+                break;
+            }
+            in_table = header_is(line, &dotted);
+            if in_table {
+                header_end = Some(at + line.len());
+            }
+        } else if in_table && let Some((value_start, rest)) = assignment(line, key) {
+            let lead = rest.len() - rest.trim_start().len();
+            let token_start = at + value_start + lead;
+            let old = if rest.trim_start().starts_with("true") {
+                "true"
+            } else if rest.trim_start().starts_with("false") {
+                "false"
+            } else {
+                return Ok(None);
+            };
+            let new = format!(
+                "{}{value}{}",
+                &text[..token_start],
+                &text[token_start + old.len()..]
+            );
+            let expected = expected_with(&before, table, key, Some(value));
+            return Ok((parse(&new).ok() == Some(expected)).then_some(new));
+        }
+        at += line.len();
+    }
+    let Some(end) = header_end else {
+        return Ok(None);
+    };
+    let newline = if text[..end].ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let new = format!("{}{newline}{key} = {value}\n{}", &text[..end], &text[end..]);
+    let expected = expected_with(&before, table, key, Some(value));
+    Ok((parse(&new).ok() == Some(expected)).then_some(new))
+}
+
+/// `text` without the line setting `key` in the table `table` (written as a header line), or
+/// `None` when there is no such line. The result is checked: only that key is gone.
+pub fn remove_table_key(text: &str, table: &[&str], key: &str) -> Result<Option<String>, String> {
+    let before = parse(text)?;
+    let dotted = table.join(".");
+    let mut at = 0;
+    let mut in_table = false;
+    for line in text.split_inclusive('\n') {
+        if line.trim().starts_with('[') {
+            if in_table {
+                break;
+            }
+            in_table = header_is(line, &dotted);
+        } else if in_table && assignment(line, key).is_some() {
+            let new = format!("{}{}", &text[..at], &text[at + line.len()..]);
+            let expected = expected_with(&before, table, key, None);
+            return Ok((parse(&new).ok() == Some(expected)).then_some(new));
+        }
+        at += line.len();
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_table_boolean_is_inserted_replaced_and_removed() {
+        let text = "model = \"o3\"\n\n[mcp_servers.mem0]\ncommand = \"mem0\"\n\n[x]\ny = 1\n";
+        let off = set_table_bool(text, &["mcp_servers", "mem0"], "enabled", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            off,
+            "model = \"o3\"\n\n[mcp_servers.mem0]\nenabled = false\ncommand = \"mem0\"\n\n[x]\ny = 1\n"
+        );
+        assert_eq!(
+            remove_table_key(&off, &["mcp_servers", "mem0"], "enabled")
+                .unwrap()
+                .unwrap(),
+            text
+        );
+        let on = "[mcp_servers.\"mem0\"]\nenabled = true # mine\n";
+        let off = set_table_bool(on, &["mcp_servers", "mem0"], "enabled", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(off, "[mcp_servers.\"mem0\"]\nenabled = false # mine\n");
+        // Not a header table: nothing.
+        assert_eq!(
+            set_table_bool(
+                "mcp_servers.mem0 = { command = \"m\" }\n",
+                &["mcp_servers", "mem0"],
+                "enabled",
+                false
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            remove_table_key(text, &["mcp_servers", "mem0"], "enabled").unwrap(),
+            None
+        );
+    }
 
     const BODY: &str = "[mcp_servers.x]\ncommand = \"/x\"\nargs = [\"mcp\"]\n";
 

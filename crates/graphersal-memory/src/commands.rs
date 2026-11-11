@@ -123,6 +123,7 @@ pub fn run_cli(
             keep_auto_memory,
             enable_develop,
             summaries,
+            other,
         } => {
             let harnesses = match harness {
                 None => None,
@@ -145,6 +146,11 @@ pub fn run_cli(
                 keep_auto_memory: *keep_auto_memory,
                 enable_develop: *enable_develop,
                 summaries: *summaries,
+                other_read_only: other.other_read_only.clone(),
+                keep_other: other.keep_other.clone(),
+                disable_other: other.disable_other.clone(),
+                enable_other: other.enable_other.clone(),
+                project_dir: current_project(),
                 interactive: terminal,
                 color: terminal && crate::prompt::color_allowed(&|name| std::env::var(name).ok()),
             };
@@ -268,12 +274,21 @@ pub fn run_cli(
             Ok(0)
         }),
         Command::Import {
+            ignore: Some(path), ..
+        } => setup(cli).and_then(|setup| ignore_import(&setup, path, true, &mut stdout)),
+        Command::Import {
+            unignore: Some(path),
+            ..
+        } => setup(cli).and_then(|setup| ignore_import(&setup, path, false, &mut stdout)),
+        Command::Import {
             dry_run,
             sessions: true,
+            ..
         } => setup(cli).and_then(|setup| import_sessions(&setup, *dry_run, &mut stdout)),
         Command::Import {
             dry_run,
             sessions: false,
+            ..
         } => setup(cli).and_then(|setup| {
             let mut connect = daemon_connector(&setup);
             run_import(&setup, *dry_run, &mut connect, &mut stdout)
@@ -790,6 +805,52 @@ pub fn run_import(
     })
 }
 
+/// The project of the current directory (its git root), whose own instruction and MCP files
+/// the "Other memory" findings read.
+fn current_project() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .map(|dir| PathBuf::from(mcp::project_key(None, &dir)))
+}
+
+/// `import --ignore PATH` / `--unignore PATH`: stops (or resumes) the import of a memory file
+/// or directory; nothing is imported or removed now (memories already imported from it stay).
+pub fn ignore_import(
+    setup: &Setup,
+    path: &Path,
+    ignore: bool,
+    out: &mut dyn Write,
+) -> Result<u8, String> {
+    let path = absolute(path);
+    let _ = import::with_lock(&setup.data_dir, Duration::from_secs(60), || {
+        let mut state = ImportState::load(&setup.data_dir)?;
+        let changed = if ignore {
+            state.ignore(&path)
+        } else {
+            state.unignore(&path)
+        };
+        if changed {
+            state.save(&setup.data_dir)?;
+        }
+        let shown = setup.show(&path.display().to_string());
+        let line = match (ignore, changed) {
+            (true, true) => format!(
+                "{shown}: not imported any more (the memories already imported from it stay; \
+                 `graphersal-memory import --unignore {shown}` imports it again)"
+            ),
+            (true, false) => format!("{shown}: ignored already"),
+            (false, true) => {
+                format!("{shown}: imported again from the next import (`graphersal-memory import`)")
+            }
+            (false, false) => format!("{shown}: was not ignored"),
+        };
+        let _ = writeln!(out, "{line}");
+        Ok::<_, String>(())
+    })?
+    .ok_or("another import is running; try again later")?;
+    Ok(0)
+}
+
 /// Where the daemon of `setup` is.
 fn setup_location(setup: &Setup) -> DaemonLocation {
     DaemonLocation {
@@ -1106,6 +1167,13 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
             Kind::Cursor => crate::cursor::install::doctor(setup),
         };
         sections.push((kind.display_name().to_string(), findings));
+    }
+    let others = crate::coexist::detect(setup, current_project().as_deref());
+    if others.anything() {
+        sections.push((
+            "Other memory".to_string(),
+            crate::coexist::doctor_findings(setup, &others),
+        ));
     }
     let mut shared = install::shared_doctor(setup);
     if ipc::connect(&setup.run_dir).is_ok() {
@@ -1616,11 +1684,12 @@ fn status(cli: &Cli, mut stdout: impl Write) -> Result<(), String> {
         std::io::stdout().is_terminal()
             && crate::prompt::color_allowed(&|name| std::env::var(name).ok())
     };
-    let text = status_text_with(
+    let text = status_text_for(
         &data_dir,
         &run_dir,
         setup.as_ref().map_err(String::as_str),
         color,
+        current_project().as_deref(),
     )?;
     let _ = write!(stdout, "{text}");
     Ok(())
@@ -1658,11 +1727,23 @@ pub fn status_text(
 /// sessions, stores), then one section per topic after a blank line (Memory, each agent), the
 /// home directory as `~`, the data directory once and the paths in it relative; every ACTION
 /// NEEDED line highlighted (`color`) and repeated as the last line.
+#[cfg(test)]
 pub fn status_text_with(
     data_dir: &Path,
     run_dir: &Path,
     setup: Result<&Setup, &str>,
     color: bool,
+) -> Result<String, String> {
+    status_text_for(data_dir, run_dir, setup, color, None)
+}
+
+/// [`status_text_with`] with the "Other memory" section reading `project`'s own files too.
+pub fn status_text_for(
+    data_dir: &Path,
+    run_dir: &Path,
+    setup: Result<&Setup, &str>,
+    color: bool,
+    project: Option<&Path>,
 ) -> Result<String, String> {
     let log = run_dir.join(ipc::LOG_FILE);
     let (running, daemon) = match shim::control(run_dir, "status") {
@@ -1767,6 +1848,10 @@ pub fn status_text_with(
                 .into_iter()
                 .filter(|(kind, _)| !shown(kind))
                 .collect();
+            lines.extend(crate::coexist::status_lines(
+                setup,
+                &crate::coexist::detect(setup, project),
+            ));
             if !found.is_empty() || !leftovers.is_empty() {
                 lines.push("Other agents:".to_string());
                 for kind in found {

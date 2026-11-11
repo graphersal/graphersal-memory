@@ -74,7 +74,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     transcripts left out); Cursor's chat database is never read;
   - `src/tomledit.rs`: minimal-change TOML edits (parse with the `toml` crate, write as text: a
     fingerprinted managed block inserted before the first table, `remove_table` for our tables
-    whose markers were lost, `set_bool` in place; every edit re-parsed and checked);
+    whose markers were lost, `set_bool` in place, `set_table_bool`/`remove_table_key` for another
+    tool's `[mcp_servers.<name>] enabled`; every edit re-parsed and checked);
   - `src/prompt.rs`: the wizard's console (`Console`: "Step N of M", numbered choices, the
     default on Enter, re-ask, `confirm_install` with `d` for every change; colour only on a
     terminal without `NO_COLOR`), `paint`, `action_needed` and the `SEPARATOR` the other
@@ -94,7 +95,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     front-matter keys, other differing memory files kept with `<slug>.graphersal.md` beside
     them, superseded memories written with a `SUPERSEDED by` first line and left out of
     `MEMORY.md`, open conflicts with a `CONFLICT with` line, a differing `MEMORY.md` kept with the missing index lines appended; opencode, Codex
-    and Cursor: the same files as Markdown under `~/graphersal-memory-export/<harness>/`);
+    and Cursor: the same files as Markdown under `~/graphersal-memory-export/<harness>/`; global
+    memories imported from another memory tool left out, `from_other_tools`);
   - `src/install.rs`: the wizard (`Current` = the current answers, `default_answers` for
     `--yes`/no terminal, `ask` for the interactive steps, `plan_install`, `install`), the
     auto-memory switch (`autoMemoryEnabled`, its previous value recorded in the settings file's
@@ -111,6 +113,13 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     program word); `apply_with_retries` (plan again right before writing, refuse read-only files,
     plan again when a file changed meanwhile, roll back everything on another failure);
     `plan_hook_event`/`remove_hook_groups` (our hook also inside a group shared with the user's);
+    other memory (M15): `other_defaults` (switched off only by `--disable-other` or a yes in the
+    wizard, `ask_other_memory`), `plan_other_memory` (the switch-off folded into the harness's
+    change of that file, so backup, re-plan, read-only refusal and rollback cover it),
+    `record_other` (the record with the file's write), `restore_others` (uninstall), the rule
+    block naming the read-only tools (`find_block_with`, `block_text_with`); `commands` adds
+    `import --ignore/--unignore` (`ignore_import`) and the "Other memory" section of `status` and
+    `doctor` (the current directory's project, `current_project`);
     `way_out`/`in_file` (errors name the file and `--harness`); hook commands quote with single
     quotes for `sh`, double quotes on Windows; The develop server is off by not being
     registered (Claude Code has no global disabled state). The hook form (`HookForm` in `Setup`:
@@ -137,7 +146,24 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     descriptions read, `from_file.dir` sent so memories of one directory are not `unchecked`
     against each other, `migrate_sources` once at the daemon's start for memories imported before
     M12; `## Pinned` lines become `pinned`, the index position the memory's `order`, both sent only
-    when the file's line changed since this import set them);
+    when the file's line changed since this import set them; files and directories of the state's
+    `ignored` list (`import --ignore`) skipped by `plan`; a changed file that brings back a memory
+    forgotten in the graph or changed there by an agent is still written and gets `returned` in
+    its record, `returning_line` in the report);
+  - `src/coexist.rs` + `src/coexist/other_import.rs`: other memory beside ours (M15; files only,
+    no other server started): `detect` (`BuiltIn` per harness, `Server` = another memory tool's
+    MCP entry by the known `TOOLS`, a name saying memory or `MEMORY_TOOL_NAMES` from the entry or
+    Claude Code's `permissions` rules; `Plugin`; `Mention` = an instruction-file line about memory
+    elsewhere, `mentions_in`; `Writer` = a generated header or imported files changed outside every
+    transcript's span; `Returning` from the import records), `Choices`
+    (`<data dir>/install/other-memory.json`: read-only and kept tools), the rule block's
+    `read_only_line` (`rule_with`, `strip_read_only` so a block naming other tools stays ours),
+    `disable_edit`/`restore_edit` per harness (Claude Code and Cursor: entry removed and kept in
+    the record `OFF_RECORD`; opencode `enabled`/`disabled`; Codex `enabled = false`),
+    `status_lines`/`doctor_findings` (notes, never problems or ACTION NEEDED);
+    `other_import`: the reference memory server's JSONL and Basic Memory's notes as global
+    memories `kg-*`/`basic-*` through a connection without a project, item fingerprints in
+    `<data dir>/import/other-memory.json`;
   - `src/client.rs`: a small MCP client; `connect` opens a `use` connection to the daemon (the
     product's own calls go through the daemon, the single writer);
   - `src/hook.rs`: `hook session-start|session-end`: time-boxed import of the session project's
@@ -233,8 +259,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/protocol.rs`: the shim <-> daemon handshake and control lines, refusal codes, version
     order, `StartContextMode` (the handshake's optional `start_context`: `full` | `short` (Claude
     Code without our hook: within `CLAUDE_CODE_INSTRUCTIONS_CHARS`) | `none` (Claude Code with
-    our SessionStart hook, `commands::start_context_mode`; the product's own connections)) (the
-    protocol is internal; bump `PROTOCOL` on an incompatible change);
+    our SessionStart hook, `commands::start_context_mode`; the product's own connections)); an
+    empty `project.root` is no project (global memories only; the import from another memory
+    tool) (the protocol is internal; bump `PROTOCOL` on an incompatible change);
   - `src/shim.rs`: `connect_or_start` (start lock, stale socket only after a failed connect AND a
     free `daemon.pid`, detached spawn, timeout naming the log; on Windows the spawning process's
     standard handles are made non-inheritable first, `keep_std_handles_from_children`, one of the
@@ -287,6 +314,10 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/model_tests.rs`: the model download from a local fake Hugging Face server (tiny
     synthetic Model2Vec model), install's model step, the store switching its vector rules to the
     model and back (`StoreRuntime::switch_embedder`).
+  - `src/coexist_tests.rs`: other memory on temporary homes with realistic configurations of
+    other tools (detection per harness, defaults, switch-off and the byte-identical give-back,
+    symlinked/read-only/rollback, the wizard step, imports, instruction lines, writers, returning
+    facts and `import --ignore`, the rule block with a read-only line, the export leaving them out);
   - `src/install_tests.rs`: install/uninstall/import/status/doctor/hooks on temporary homes with
     the store served in the test process (byte-identical round trips, idempotence, dry run,
     conflicts, structural uninstall, develop on/off, import of a fixture memory directory).

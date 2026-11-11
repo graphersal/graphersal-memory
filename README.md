@@ -151,6 +151,11 @@ before anything happens. The full captured output of an install and an uninstall
    `~/.claude/settings.json`, so the same facts are not kept twice. Nothing is lost: if you
    uninstall graphersal-memory later, every memory, including new ones, is written back to
    Claude Code's memory files and its auto-memory is switched back on.
+   **Other memory** (only when found: another memory tool such as mem0, Basic Memory or the
+   reference memory server, an instruction line about memory elsewhere): graphersal-memory becomes
+   the main memory and the other tool read-only (default), or you switch it off (uninstall switches
+   it on again), or keep both; its memories can be imported. See
+   [harnesses.md](docs/harnesses.md#other-memory-beside-graphersal-memory).
 5. **Session summaries** (no default: you choose). Past sessions are always indexed locally from
    their raw turns. Summaries go through your own `claude -p`, so the step shows the number of
    sessions and an estimated cost; see [Privacy](#privacy).
@@ -280,7 +285,8 @@ Next steps
 </details>
 
 Every question has a flag for scripts: `--language english|any`, `--model <repo>|builtin`,
-`--no-import`, `--keep-auto-memory`, `--summaries`, `--enable-develop`. With `--yes`, or without a
+`--no-import`, `--keep-auto-memory`, `--summaries`, `--enable-develop`, `--other-read-only NAME`,
+`--keep-other NAME`, `--disable-other NAME`, `--enable-other NAME`. With `--yes`, or without a
 terminal, every question takes its default (summaries and the develop server stay off unless
 their flag is given); without `--yes` it still asks once before applying (and, with nothing to
 answer, such as a pipe, says so and changes nothing). The wizard's last step is a short recap;

@@ -77,13 +77,13 @@ fn short_run_dir() -> PathBuf {
 type Servers = Arc<Mutex<Vec<JoinHandle<Result<(), String>>>>>;
 
 /// The memory served in this process: one store, a connection per project.
-struct Memory {
-    runtime: Arc<StoreRuntime>,
+pub(crate) struct Memory {
+    pub(crate) runtime: Arc<StoreRuntime>,
     servers: Servers,
 }
 
 impl Memory {
-    fn open(data: &Path) -> Self {
+    pub(crate) fn open(data: &Path) -> Self {
         let runtime = StoreRuntime::open(
             registry::DEFAULT_STORE,
             &store::default_store_dir(data),
@@ -97,7 +97,9 @@ impl Memory {
     }
 
     /// A connector like the daemon's.
-    fn connector(&self) -> impl FnMut(&str) -> Result<Box<dyn Caller>, String> + Send + 'static {
+    pub(crate) fn connector(
+        &self,
+    ) -> impl FnMut(&str) -> Result<Box<dyn Caller>, String> + Send + 'static {
         let runtime = self.runtime.clone();
         let servers = self.servers.clone();
         move |project: &str| -> Result<Box<dyn Caller>, String> {
@@ -120,13 +122,13 @@ impl Memory {
     }
 
     /// One call in `project`.
-    fn call(&self, project: &str, name: &str, arguments: Value) -> Value {
+    pub(crate) fn call(&self, project: &str, name: &str, arguments: Value) -> Value {
         let mut connect = self.connector();
         let mut caller = connect(project).unwrap();
         caller.call(name, arguments).unwrap()
     }
 
-    fn close(self) {
+    pub(crate) fn close(self) {
         let servers: Vec<_> = self.servers.lock().unwrap().drain(..).collect();
         for server in servers {
             assert_eq!(server.join().unwrap(), Ok(()));
@@ -135,27 +137,27 @@ impl Memory {
     }
 }
 
-fn run_install(setup: &Setup, memory: &Memory, options: InstallOptions) -> (u8, String) {
+pub(crate) fn run_install(setup: &Setup, memory: &Memory, options: InstallOptions) -> (u8, String) {
     let mut connect = memory.connector();
     let mut out = Vec::new();
     let code = install::install(setup, &options, &mut connect, &mut &b""[..], &mut out).unwrap();
     (code, String::from_utf8(out).unwrap())
 }
 
-fn yes() -> InstallOptions {
+pub(crate) fn yes() -> InstallOptions {
     InstallOptions {
         yes: true,
         ..InstallOptions::default()
     }
 }
 
-fn run_uninstall(setup: &Setup, options: UninstallOptions) -> (u8, String) {
+pub(crate) fn run_uninstall(setup: &Setup, options: UninstallOptions) -> (u8, String) {
     let mut out = Vec::new();
     let code = install::uninstall(setup, &options, &mut &b""[..], &mut out).unwrap();
     (code, String::from_utf8(out).unwrap())
 }
 
-fn uninstall_yes() -> UninstallOptions {
+pub(crate) fn uninstall_yes() -> UninstallOptions {
     // These tests check what uninstall gives back of the harness's files; the export of the
     // memories into the file memory has its own tests (`export_*`).
     UninstallOptions {
@@ -166,7 +168,7 @@ fn uninstall_yes() -> UninstallOptions {
 }
 
 /// The bytes of every file under `dir` (relative path -> content).
-fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+pub(crate) fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(next) = stack.pop() {
@@ -185,12 +187,12 @@ fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     out
 }
 
-fn read(path: &Path) -> String {
+pub(crate) fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
 /// A home with Claude Code files in an unusual but valid formatting.
-fn existing_home(home: &Path) {
+pub(crate) fn existing_home(home: &Path) {
     std::fs::write(
         home.join(".claude.json"),
         "{\"numStartups\": 3, \"theme\":\"dark\",\n \"mcpServers\": {\"other\": {\"command\":\"x\",\"args\":[]}}}\n",
@@ -483,7 +485,7 @@ fn the_develop_server_is_off_until_enabled_and_can_be_disabled_again() {
 
 /// A Claude Code memory directory for the project directory `project`, with a transcript
 /// naming it.
-fn memory_fixture(home: &Path, project: &Path) -> PathBuf {
+pub(crate) fn memory_fixture(home: &Path, project: &Path) -> PathBuf {
     let name = import::claude_slug(&project.display().to_string());
     let dir = home.join(".claude").join("projects").join(&name);
     let memory = dir.join("memory");
@@ -956,7 +958,7 @@ fn run_uninstall_exporting(
     (code, String::from_utf8(out).unwrap())
 }
 
-fn run_wizard(setup: &Setup, memory: &Memory, input: &str) -> (u8, String) {
+pub(crate) fn run_wizard(setup: &Setup, memory: &Memory, input: &str) -> (u8, String) {
     let mut connect = memory.connector();
     let mut out = Vec::new();
     let options = InstallOptions {
@@ -4223,7 +4225,7 @@ fn an_import_reports_conflicts_and_files_and_never_brings_back_a_settled_memory(
 
 // ---- M16: do-no-harm audit (reports/2026-11-12-do-no-harm-audit.md) ----
 
-fn all_four() -> InstallOptions {
+pub(crate) fn all_four() -> InstallOptions {
     InstallOptions {
         yes: true,
         harnesses: Some(Kind::ALL.to_vec()),
@@ -4231,7 +4233,7 @@ fn all_four() -> InstallOptions {
     }
 }
 
-fn all_four_uninstall() -> UninstallOptions {
+pub(crate) fn all_four_uninstall() -> UninstallOptions {
     UninstallOptions {
         harnesses: Some(Kind::ALL.to_vec()),
         ..uninstall_yes()
@@ -4239,7 +4241,7 @@ fn all_four_uninstall() -> UninstallOptions {
 }
 
 /// A home with every agent's files (Claude Code, opencode, Codex, Cursor).
-fn every_agent_home(home: &Path) {
+pub(crate) fn every_agent_home(home: &Path) {
     existing_home(home);
     existing_opencode_home(home);
     existing_codex_home(home);
@@ -4629,9 +4631,9 @@ fn b8_a_read_only_file_is_refused_and_nothing_changes() {
 
 /// Input that answers "y" to the question, but first rewrites a file the way a running agent
 /// does (Claude Code rewrites `~/.claude.json` often).
-struct RacingInput {
-    path: PathBuf,
-    answered: bool,
+pub(crate) struct RacingInput {
+    pub(crate) path: PathBuf,
+    pub(crate) answered: bool,
 }
 
 impl std::io::Read for RacingInput {
