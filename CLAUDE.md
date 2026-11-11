@@ -188,7 +188,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `parse_import` of text, `Q:`/`A:` and JSON); `bench/arms.rs` the sandbox per arm (`mcp.json`, `settings.json`, `system.md`,
     `cwd/`; the graph arm on `Store::fork_dir` of the live store served by `mcp --no-daemon`);
     `bench/report.rs` the aggregation (per category, per origin, unjudged rows in no mean) and
-    `report.md`/`report.json` in `bench/<timestamp>/`;
+    `report.md`/`report.json` in `bench/<timestamp>/`; `bench/rule_changes.rs` `bench
+    rule-changes` (built-in rule changes, arms plain/marked/file, each a store of its own in the
+    run directory, verdict by the answer's words, no judge call; Claude Code only);
   - `src/bench_tests.rs`: `bench` in-process with a scripted harness on a temporary home and data
     directory (the live files unchanged, the sandboxes never naming them, report numbers, budget
     refusal and stop, confirmation, dry run, the user's own questions);
@@ -299,8 +301,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
 
 ## Memory model
 
-- Labels `memory`, `session`, `turn`, `fact`; edges `relates_to`, `supersedes`, `about`,
-  `contains`, `edited` (`src/catalog/schema.json`, mode `open`; `emb` is a vector rule over
+- Labels `memory`, `session`, `turn`, `fact`; edges `relates_to`, `supersedes`,
+  `conflicts_with`, `narrows`, `about`, `contains`, `edited` (`src/catalog/schema.json`, mode `open`; `emb` is a vector rule over
   `embed_text`; the schema file names the built-in `hash-ngram/1`, `catalog::apply` keeps the
   embedder the store has, and the daemon switches it to `embedding.model` of `config.json`).
 - Project scoping: a vertex with a `project` property (the project's stable id, `crate::projects`)
@@ -309,12 +311,22 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   `links` look in the project first, then in the global memory. `pinned` (bool) and `order`
   (int) select and order the start context (`crate::start_context`); `remember`'s `pinned`
   default `null` keeps the memory's pin; `pin` is a `use` tool.
+- Conflicts (M12, `docs/how-it-works.md#conflicts-between-memories`): `remember` answers
+  `nearest` (the `recall` scoring on its slug + summary, k=5, without itself and superseded ones)
+  and a `check` text only when something is near; `remember(supersedes: [slug])` and
+  `settle(slug, compatible|narrows|supersedes|conflict, other)` write the edges (each with
+  `at`); `conflicts()` lists open conflicts, `unchecked` imported memories and stale files. A
+  superseded memory is marked "SUPERSEDED by <slug> on <date>:" by `memories`, `recall` and
+  `memory` (with its `chain`), never hidden, and left out of `start_context`; the internal
+  `open_conflicts` feeds the start context and `status`/`doctor`. Imports pass `from_file`
+  (`source` = the file, `imported_at`, `updated_at` = the file's mtime). Storage holds edges and
+  properties only, never text markers (the UI reads them).
 - Sessions: `session:<transcript name>` (with `fingerprint` of its indexed lines, `summarized` =
   the fingerprint its summary came from, `harness`), `turn:<session>:<n>`, `fact:<session>:<kind>:<i>`
   (`fact_kind` decision | correction | outcome | open_thread), all with the session's `project`;
   `session -contains-> turn|fact`. They are written only by the internal catalog functions
   (`src/catalog/internal.json`: `indexed_sessions`, `index_session`, `index_turns`,
-  `set_summary`; plus `merge_project`, `export_memories` and `start_context`), which the daemon runs on the
+  `set_summary`; plus `merge_project`, `export_memories`, `start_context` and `open_conflicts`), which the daemon runs on the
   store's session thread (`catalog::call`); they are never tools of the `use` server (its tool
   list is `FUNCTIONS`).
 - **No LLM call without consent**: summaries run only when `summaries.enabled` is true, only

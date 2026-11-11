@@ -119,5 +119,18 @@
         "default": ""
       }
     ]
+  },
+  {
+    "name": "open_conflicts",
+    "description": "Internal (session start, status, import): the open conflicts between a project's and the global memories, and how many imported memories wait for their conflict check.",
+    "params": [
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
   }
 ]

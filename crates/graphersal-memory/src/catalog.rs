@@ -28,7 +28,7 @@ const QUERIES: &str = include_str!("catalog/queries.json");
 const INTERNAL: &str = include_str!("catalog/internal.json");
 
 /// The internal functions, in the order of `catalog/internal.json`.
-pub const INTERNAL_FUNCTIONS: [&str; 7] = [
+pub const INTERNAL_FUNCTIONS: [&str; 8] = [
     "indexed_sessions",
     "index_session",
     "index_turns",
@@ -36,22 +36,41 @@ pub const INTERNAL_FUNCTIONS: [&str; 7] = [
     "merge_project",
     "export_memories",
     "start_context",
+    "open_conflicts",
 ];
 
 /// The folder of the product's saved queries.
 pub const FOLDER: &str = "memory";
 
 /// The memory functions, in the order of the `use` profile's tool list.
-pub const FUNCTIONS: [&str; 8] = [
-    "memories", "memory", "remember", "forget", "pin", "sessions", "session", "recall",
+pub const FUNCTIONS: [&str; 10] = [
+    "memories",
+    "memory",
+    "remember",
+    "forget",
+    "pin",
+    "conflicts",
+    "settle",
+    "sessions",
+    "session",
+    "recall",
 ];
 
 /// The functions that declare the `project` parameter, which each MCP connection binds to its
 /// project (`graphersal_mcp::Profile::with_bound_params` binds it for every saved query that
 /// declares it; a test keeps this list and the declarations in step).
 #[cfg(test)]
-pub const PROJECT_BOUND: [&str; 8] = [
-    "memories", "memory", "remember", "forget", "pin", "sessions", "session", "recall",
+pub const PROJECT_BOUND: [&str; 10] = [
+    "memories",
+    "memory",
+    "remember",
+    "forget",
+    "pin",
+    "conflicts",
+    "settle",
+    "sessions",
+    "session",
+    "recall",
 ];
 
 /// The name of the parameter bound to the connection's project (`crate::mcp`).
@@ -65,6 +84,8 @@ fn body(name: &str) -> Option<&'static str> {
         "remember" => include_str!("catalog/remember.rhai"),
         "forget" => include_str!("catalog/forget.rhai"),
         "pin" => include_str!("catalog/pin.rhai"),
+        "conflicts" => include_str!("catalog/conflicts.rhai"),
+        "settle" => include_str!("catalog/settle.rhai"),
         "sessions" => include_str!("catalog/sessions.rhai"),
         "session" => include_str!("catalog/session.rhai"),
         "recall" => include_str!("catalog/recall.rhai"),
@@ -75,6 +96,7 @@ fn body(name: &str) -> Option<&'static str> {
         "merge_project" => include_str!("catalog/merge_project.rhai"),
         "export_memories" => include_str!("catalog/export_memories.rhai"),
         "start_context" => include_str!("catalog/start_context.rhai"),
+        "open_conflicts" => include_str!("catalog/open_conflicts.rhai"),
         _ => return None,
     })
 }
@@ -534,6 +556,431 @@ mod tests {
             }
         }
         assert!(policy.allows(ActionKind::Read, ResourceKind::Data));
+    }
+
+    /// A session with the catalog and the memories `(slug, scope, summary)` of project `/p`.
+    fn conflict_store(memories: &[(&str, &str, &str)]) -> Session {
+        let mut session = Session::new();
+        apply(&mut session).unwrap();
+        for (slug, scope, summary) in memories {
+            remember_in(
+                &mut session,
+                json!({"slug": slug, "summary": summary, "scope": scope}),
+            );
+        }
+        session
+    }
+
+    /// `remember` in project `/p` with `args` over the defaults (kind project, body = summary).
+    fn remember_in(session: &mut Session, args: Value) -> Value {
+        let mut full = json!({"kind": "project", "body": args["summary"], "project": "/p"});
+        for (key, value) in args.as_object().unwrap() {
+            full[key] = value.clone();
+        }
+        call(session, "remember", &full).unwrap()
+    }
+
+    fn call_in(session: &mut Session, name: &str, args: Value) -> Value {
+        let mut full = json!({"project": "/p"});
+        for (key, value) in args.as_object().unwrap() {
+            full[key] = value.clone();
+        }
+        call(session, name, &full).unwrap()
+    }
+
+    #[test]
+    fn the_schema_declares_the_conflict_edges_and_import_marks() {
+        let schema: Value = serde_json::from_str(SCHEMA).unwrap();
+        for edge in ["conflicts_with", "narrows"] {
+            assert!(schema["edges"][edge].is_object(), "{edge}");
+            assert!(schema["edges"][edge]["schema"]["properties"]["at"].is_object());
+        }
+        assert!(schema["edges"]["supersedes"]["schema"]["properties"]["at"].is_object());
+        let memory = &schema["vertices"]["memory"]["schema"]["properties"];
+        assert_eq!(memory["imported_at"]["format"], "date-time");
+        assert_eq!(memory["unchecked"]["type"], "boolean");
+    }
+
+    #[test]
+    fn remember_answers_the_nearest_memories_and_the_check_only_when_there_are_any() {
+        let mut session = conflict_store(&[]);
+        let first = remember_in(
+            &mut session,
+            json!({"slug": "use-npm", "summary": "Install dependencies with npm install"}),
+        );
+        assert!(first.get("nearest").is_none(), "{first}");
+        assert!(first.get("check").is_none(), "{first}");
+        remember_in(
+            &mut session,
+            json!({"slug": "never-push", "summary": "Never push without asking", "scope": "global"}),
+        );
+        let second = remember_in(
+            &mut session,
+            json!({"slug": "pnpm-instead-of-npm",
+                   "summary": "Since today we install dependencies with pnpm instead of npm"}),
+        );
+        let nearest = second["nearest"].as_array().unwrap();
+        assert!(nearest.len() <= 5, "{second}");
+        assert_eq!(nearest[0]["slug"], "use-npm", "{second}");
+        for field in ["slug", "scope", "kind", "summary", "source", "updated_at"] {
+            assert!(nearest[0].get(field).is_some(), "{field}: {second}");
+        }
+        assert_eq!(nearest[0]["source"], "remember");
+        assert!(
+            nearest.iter().all(|m| m["slug"] != "pnpm-instead-of-npm"),
+            "never itself: {second}"
+        );
+        assert!(
+            nearest.iter().any(|m| m["scope"] == "global"),
+            "the global memories are candidates too: {second}"
+        );
+        let check = second["check"].as_str().unwrap();
+        for word in [
+            "compatible",
+            "replaces",
+            "supersedes: [old slug]",
+            "contradicts",
+            "settle(\"pnpm-instead-of-npm\", \"conflict\"",
+            "narrows a global one is compatible",
+            "file source",
+        ] {
+            assert!(check.contains(word), "{word}: {check}");
+        }
+    }
+
+    #[test]
+    fn a_superseded_memory_is_marked_everywhere_and_never_starts_a_session() {
+        let mut session = conflict_store(&[]);
+        remember_in(
+            &mut session,
+            json!({"slug": "use-npm", "kind": "feedback", "summary": "Install dependencies with npm install"}),
+        );
+        let newer = remember_in(
+            &mut session,
+            json!({"slug": "pnpm-instead-of-npm", "kind": "feedback",
+                   "summary": "We install dependencies with pnpm instead of npm",
+                   "supersedes": ["use-npm", "no-such-memory"]}),
+        );
+        assert_eq!(newer["superseded"], json!(["use-npm"]), "{newer}");
+        assert_eq!(
+            newer["missing_targets"],
+            json!(["no-such-memory"]),
+            "{newer}"
+        );
+        assert!(
+            newer["nearest"]
+                .as_array()
+                .is_none_or(|n| n.iter().all(|m| m["slug"] != "use-npm")),
+            "a superseded memory is no candidate: {newer}"
+        );
+
+        let found = call_in(
+            &mut session,
+            "memories",
+            json!({"text": "install dependencies npm", "k": 5, "kind": ""}),
+        );
+        let old = found
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["slug"] == "use-npm")
+            .unwrap_or_else(|| panic!("marked, never hidden: {found}"));
+        let summary = old["summary"].as_str().unwrap();
+        assert!(
+            summary.starts_with("SUPERSEDED by pnpm-instead-of-npm on 20"),
+            "{summary}"
+        );
+        assert_eq!(old["superseded_by"], "pnpm-instead-of-npm");
+
+        let listed = call_in(
+            &mut session,
+            "memories",
+            json!({"text": "", "k": 10, "kind": ""}),
+        );
+        let old = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["slug"] == "use-npm")
+            .unwrap();
+        assert!(
+            old["hook"]
+                .as_str()
+                .unwrap()
+                .starts_with("SUPERSEDED by pnpm-instead-of-npm on "),
+            "{old}"
+        );
+
+        let recalled = call_in(
+            &mut session,
+            "recall",
+            json!({"text": "npm install", "k": 5, "label": "memory"}),
+        );
+        let old = recalled
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "use-npm")
+            .unwrap();
+        assert!(
+            old["summary"]
+                .as_str()
+                .unwrap()
+                .starts_with("SUPERSEDED by ")
+        );
+
+        let read = call_in(&mut session, "memory", json!({"slug": "use-npm"}));
+        assert_eq!(
+            read["superseded_by"][0]["slug"], "pnpm-instead-of-npm",
+            "{read}"
+        );
+        assert_eq!(
+            read["chain"],
+            json!(["use-npm", "pnpm-instead-of-npm"]),
+            "{read}"
+        );
+        let read = call_in(
+            &mut session,
+            "memory",
+            json!({"slug": "pnpm-instead-of-npm"}),
+        );
+        assert_eq!(read["supersedes"][0]["slug"], "use-npm", "{read}");
+        assert_eq!(
+            read["chain"],
+            json!(["use-npm", "pnpm-instead-of-npm"]),
+            "{read}"
+        );
+        assert_eq!(read["links"], json!([]), "supersedes is no link: {read}");
+
+        let start = call_in(&mut session, "start_context", json!({}));
+        let slugs: Vec<&str> = start
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["slug"].as_str().unwrap())
+            .collect();
+        assert_eq!(slugs, ["pnpm-instead-of-npm"], "{start}");
+    }
+
+    #[test]
+    fn a_chain_of_three_decisions_reads_from_the_oldest_to_the_newest() {
+        let mut session = conflict_store(&[
+            ("node-18", "project", "The project targets Node 18"),
+            ("node-20", "project", "The project targets Node 20"),
+        ]);
+        call_in(
+            &mut session,
+            "settle",
+            json!({"slug": "node-20", "decision": "supersedes", "other": "node-18"}),
+        );
+        remember_in(
+            &mut session,
+            json!({"slug": "node-22", "summary": "Upgraded to Node 22", "supersedes": ["node-20"]}),
+        );
+        let read = call_in(&mut session, "memory", json!({"slug": "node-20"}));
+        assert_eq!(
+            read["chain"],
+            json!(["node-18", "node-20", "node-22"]),
+            "{read}"
+        );
+    }
+
+    #[test]
+    fn settle_opens_lists_and_closes_a_conflict_and_notes_a_narrowing() {
+        let mut session = conflict_store(&[
+            ("tabs", "project", "Indent with tabs"),
+            ("spaces", "project", "Indent with four spaces"),
+            ("small-commits", "global", "Keep commits small"),
+            (
+                "one-commit-per-pr",
+                "project",
+                "One commit per pull request in this project",
+            ),
+        ]);
+        let opened = call_in(
+            &mut session,
+            "settle",
+            json!({"slug": "spaces", "decision": "conflict", "other": "tabs"}),
+        );
+        assert_eq!(opened["open_conflicts"], 1, "{opened}");
+        let refused = call(
+            &mut session,
+            "settle",
+            &json!({"slug": "one-commit-per-pr", "decision": "conflict",
+                    "other": "small-commits", "project": "/p"}),
+        )
+        .unwrap_err();
+        assert!(refused.contains("narrows"), "{refused}");
+        let noted = call_in(
+            &mut session,
+            "settle",
+            json!({"slug": "one-commit-per-pr", "decision": "narrows", "other": "small-commits"}),
+        );
+        assert_eq!(
+            noted["note"],
+            "one-commit-per-pr narrows the global rule small-commits"
+        );
+
+        let listed = call_in(&mut session, "conflicts", json!({"k": 5}));
+        let open = listed["open"].as_array().unwrap();
+        assert_eq!(open.len(), 1, "{listed}");
+        assert_eq!(open[0]["a"]["slug"], "spaces");
+        assert_eq!(open[0]["b"]["slug"], "tabs");
+        assert_eq!(open[0]["b"]["summary"], "Indent with tabs");
+        assert!(
+            listed["settle_open"]
+                .as_str()
+                .unwrap()
+                .contains("supersedes")
+        );
+        assert_eq!(
+            listed["narrows"][0]["note"], "narrows the global rule small-commits",
+            "{listed}"
+        );
+        let read = call_in(&mut session, "memory", json!({"slug": "tabs"}));
+        assert_eq!(read["conflicts_with"][0]["slug"], "spaces", "{read}");
+        let found = call_in(
+            &mut session,
+            "memories",
+            json!({"text": "indent with tabs", "k": 3, "kind": ""}),
+        );
+        let tabs = found
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["slug"] == "tabs")
+            .unwrap();
+        assert_eq!(tabs["open_conflict_with"][0]["slug"], "spaces", "{found}");
+        let internal = call_in(&mut session, "open_conflicts", json!({}));
+        assert_eq!(internal["open"][0]["a"]["slug"], "spaces", "{internal}");
+        assert_eq!(internal["unchecked"], 0);
+
+        // The user decided: spaces holds.
+        let closed = call_in(
+            &mut session,
+            "settle",
+            json!({"slug": "spaces", "decision": "supersedes", "other": "tabs"}),
+        );
+        assert_eq!(closed["open_conflicts"], 0, "{closed}");
+        let listed = call_in(&mut session, "conflicts", json!({"k": 5}));
+        assert_eq!(listed["open"], json!([]), "{listed}");
+        let err = call(
+            &mut session,
+            "settle",
+            &json!({"slug": "spaces", "decision": "supersedes", "project": "/p"}),
+        )
+        .unwrap_err();
+        assert!(err.contains("needs the other memory"), "{err}");
+    }
+
+    #[test]
+    fn an_imported_memory_keeps_its_file_and_decision_time_and_waits_for_its_check() {
+        let mut session =
+            conflict_store(&[("use-npm", "project", "Install dependencies with npm")]);
+        let answer = remember_in(
+            &mut session,
+            json!({"slug": "use-yarn", "summary": "Install dependencies with yarn",
+                   "from_file": {"path": "/home/u/.claude/projects/p/memory/use-yarn.md",
+                                 "modified_at": "2026-10-01T08:00:00Z"}}),
+        );
+        assert_eq!(answer["unchecked"], true, "{answer}");
+        let read = call_in(&mut session, "memory", json!({"slug": "use-yarn"}));
+        assert_eq!(
+            read["source"],
+            "/home/u/.claude/projects/p/memory/use-yarn.md"
+        );
+        assert!(
+            read["updated_at"].to_string().contains("2026-10-01"),
+            "{read}"
+        );
+        assert!(read["imported_at"].is_string(), "{read}");
+        assert_eq!(read["unchecked"], true);
+
+        let listed = call_in(&mut session, "conflicts", json!({"k": 5}));
+        assert_eq!(listed["unchecked_total"], 1, "{listed}");
+        assert_eq!(listed["unchecked"][0]["slug"], "use-yarn");
+        assert_eq!(listed["unchecked"][0]["nearest"][0]["slug"], "use-npm");
+        assert!(listed["check"].is_string());
+
+        // The agent judges it a conflict: the file is named so the user can edit it.
+        let settled = call_in(
+            &mut session,
+            "settle",
+            json!({"slug": "use-yarn", "decision": "conflict", "other": "use-npm"}),
+        );
+        assert_eq!(settled["unchecked"], 0, "{settled}");
+        assert_eq!(
+            settled["edit_files"][0]["file"],
+            "/home/u/.claude/projects/p/memory/use-yarn.md"
+        );
+        let listed = call_in(&mut session, "conflicts", json!({"k": 5}));
+        assert_eq!(
+            listed["open"][0]["files"],
+            json!(["/home/u/.claude/projects/p/memory/use-yarn.md"]),
+            "{listed}"
+        );
+        let superseded = remember_in(
+            &mut session,
+            json!({"slug": "use-pnpm", "summary": "We use pnpm now", "supersedes": ["use-yarn"]}),
+        );
+        assert_eq!(
+            superseded["edit_files"][0]["file"], "/home/u/.claude/projects/p/memory/use-yarn.md",
+            "{superseded}"
+        );
+        let forgotten = call_in(&mut session, "forget", json!({"slug": "use-yarn"}));
+        assert_eq!(
+            forgotten["file"],
+            "/home/u/.claude/projects/p/memory/use-yarn.md"
+        );
+        // The agent rewriting an imported memory makes it its own.
+        remember_in(
+            &mut session,
+            json!({"slug": "use-npm2", "summary": "x", "from_file": {"path": "/f.md"}}),
+        );
+        remember_in(&mut session, json!({"slug": "use-npm2", "summary": "x"}));
+        let read = call_in(&mut session, "memory", json!({"slug": "use-npm2"}));
+        assert_eq!(read["source"], "remember", "{read}");
+        assert!(read.get("imported_at").is_none(), "{read}");
+    }
+
+    #[test]
+    fn merge_project_keeps_the_conflict_edges_with_their_time() {
+        let mut session = Session::new();
+        apply(&mut session).unwrap();
+        for slug in ["a", "b"] {
+            call(
+                &mut session,
+                "remember",
+                &json!({"slug": slug, "kind": "project", "summary": slug, "body": slug,
+                        "project": "/old"}),
+            )
+            .unwrap();
+        }
+        call(
+            &mut session,
+            "settle",
+            &json!({"slug": "b", "decision": "supersedes", "other": "a", "project": "/old"}),
+        )
+        .unwrap();
+        call(
+            &mut session,
+            "merge_project",
+            &json!({"from": "/old", "into": "/new"}),
+        )
+        .unwrap();
+        let read = call(
+            &mut session,
+            "memory",
+            &json!({"slug": "a", "project": "/new"}),
+        )
+        .unwrap();
+        assert_eq!(read["superseded_by"][0]["slug"], "b", "{read}");
+        assert!(
+            read["superseded_by"][0]["at"]
+                .as_str()
+                .unwrap()
+                .starts_with("20")
+        );
     }
 
     #[test]

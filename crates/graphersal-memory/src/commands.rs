@@ -322,72 +322,90 @@ pub fn run_cli(
             dry_run,
             yes,
         } => {
-            let request = match action {
-                Some(BenchAction::Questions {
-                    edit,
-                    questions,
-                    review,
-                    budget,
-                    project,
-                    claude_dir,
-                    dry_run,
-                    yes,
-                }) => {
-                    let (edit, edit_project) = match edit {
-                        None => (None, None),
-                        Some(QuestionsEdit::Add {
-                            question,
-                            answer,
-                            category,
-                            project,
-                        }) => (
-                            Some(bench::Edit::Add {
-                                question: question.clone(),
-                                answer: answer.clone(),
-                                category: category.map(|c| c.name().to_string()),
-                            }),
-                            project.clone(),
-                        ),
-                        Some(QuestionsEdit::Import { file, project }) => (
-                            Some(bench::Edit::Import {
-                                file: absolute(file),
-                            }),
-                            project.clone(),
-                        ),
-                        Some(QuestionsEdit::Remove { id, project }) => (
-                            Some(bench::Edit::Remove { id: id.clone() }),
-                            project.clone(),
-                        ),
-                    };
-                    BenchRequest {
-                        questions_only: true,
+            if let Some(BenchAction::RuleChanges {
+                repeats,
+                budget,
+                dry_run,
+                yes,
+            }) = action
+            {
+                run_rule_changes(
+                    cli,
+                    *repeats,
+                    *budget,
+                    *dry_run,
+                    *yes,
+                    &mut BufReader::new(stdin),
+                    &mut stdout,
+                )
+            } else {
+                let request = match action {
+                    Some(BenchAction::Questions {
                         edit,
-                        review: *review,
-                        arms: Vec::new(),
+                        questions,
+                        review,
+                        budget,
+                        project,
+                        claude_dir,
+                        dry_run,
+                        yes,
+                    }) => {
+                        let (edit, edit_project) = match edit {
+                            None => (None, None),
+                            Some(QuestionsEdit::Add {
+                                question,
+                                answer,
+                                category,
+                                project,
+                            }) => (
+                                Some(bench::Edit::Add {
+                                    question: question.clone(),
+                                    answer: answer.clone(),
+                                    category: category.map(|c| c.name().to_string()),
+                                }),
+                                project.clone(),
+                            ),
+                            Some(QuestionsEdit::Import { file, project }) => (
+                                Some(bench::Edit::Import {
+                                    file: absolute(file),
+                                }),
+                                project.clone(),
+                            ),
+                            Some(QuestionsEdit::Remove { id, project }) => (
+                                Some(bench::Edit::Remove { id: id.clone() }),
+                                project.clone(),
+                            ),
+                        };
+                        BenchRequest {
+                            questions_only: true,
+                            edit,
+                            review: *review,
+                            arms: Vec::new(),
+                            questions: *questions,
+                            repeats: 1,
+                            budget: *budget,
+                            project: edit_project.or_else(|| project.clone()),
+                            claude_dir: claude_dir.clone(),
+                            dry_run: *dry_run,
+                            yes: *yes,
+                        }
+                    }
+                    None | Some(BenchAction::RuleChanges { .. }) => BenchRequest {
+                        questions_only: false,
+                        edit: None,
+                        review: false,
+                        arms: arms.clone(),
                         questions: *questions,
-                        repeats: 1,
+                        repeats: *repeats,
                         budget: *budget,
-                        project: edit_project.or_else(|| project.clone()),
+                        project: project_flag.clone(),
                         claude_dir: claude_dir.clone(),
                         dry_run: *dry_run,
                         yes: *yes,
-                    }
-                }
-                None => BenchRequest {
-                    questions_only: false,
-                    edit: None,
-                    review: false,
-                    arms: arms.clone(),
-                    questions: *questions,
-                    repeats: *repeats,
-                    budget: *budget,
-                    project: project_flag.clone(),
-                    claude_dir: claude_dir.clone(),
-                    dry_run: *dry_run,
-                    yes: *yes,
-                },
-            };
-            run_bench(cli, &request, &mut BufReader::new(stdin), &mut stdout)
+                    },
+                };
+                run_bench(cli, &request, &mut BufReader::new(stdin), &mut stdout)
+            }
         }
         command @ (Command::Ui
         | Command::Export {
@@ -749,6 +767,9 @@ pub fn run_import(
     })?
     .ok_or("another import is running; try again later")??;
     let _ = writeln!(out, "{}", install::import_summary(&report));
+    for line in install::import_conflict_lines(&report) {
+        let _ = writeln!(out, "{line}");
+    }
     for warning in &report.warnings {
         let _ = writeln!(out, "  warning: {warning}");
     }
@@ -1081,7 +1102,9 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
     }
     let mut shared = install::shared_doctor(setup);
     if ipc::connect(&setup.run_dir).is_ok() {
-        shared.push(install::ok(start_context_line(&setup.run_dir)));
+        for line in start_context_lines(&setup.run_dir) {
+            shared.push(install::ok(line));
+        }
     }
     sections.push(("Memory and daemon".to_string(), shared));
     let _ = writeln!(
@@ -1332,6 +1355,37 @@ fn run_bench(
     }
 }
 
+/// `bench rule-changes`: the built-in rule changes through the harness command of the
+/// settings (`crate::bench::rule_changes`).
+fn run_rule_changes(
+    cli: &Cli,
+    repeats: u32,
+    budget: f64,
+    dry_run: bool,
+    yes: bool,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn Write,
+) -> Result<u8, String> {
+    let (data_dir, _) = dirs(cli)?;
+    let exe =
+        std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
+    let options = bench::rule_changes::Options {
+        harness_command: Config::load(&data_dir)?.summaries.harness_command,
+        data_dir,
+        exe: mcp::canonical(&exe),
+        repeats,
+        budget_usd: budget,
+        dry_run,
+        yes,
+    };
+    let mut harness: Box<dyn bench::Harness> = if dry_run {
+        Box::new(bench::DryRun::default())
+    } else {
+        Box::new(bench::Process)
+    };
+    bench::rule_changes::run(&options, harness.as_mut(), input, out)
+}
+
 /// The data directory (flag, environment, platform) and the run directory of `cli`.
 fn dirs(cli: &Cli) -> Result<(PathBuf, PathBuf), String> {
     let env = |name: &str| std::env::var(name).ok();
@@ -1557,16 +1611,21 @@ fn status(cli: &Cli, mut stdout: impl Write) -> Result<(), String> {
     Ok(())
 }
 
-/// The start context line of `status` and `doctor` for the project of the current directory,
-/// from the running daemon (none is started).
-fn start_context_line(run_dir: &Path) -> String {
+/// The start context lines of `status` and `doctor` for the project of the current directory,
+/// from the running daemon (none is started): the start context, then the open memory
+/// conflicts with their files and the imported memories not yet checked.
+fn start_context_lines(run_dir: &Path) -> Vec<String> {
     let project = std::env::current_dir()
         .map(|dir| mcp::project_key(None, &dir))
         .unwrap_or_default();
     match crate::start_context::request_running(run_dir, &project) {
-        Ok(Some(context)) => context.status_line(),
-        Ok(None) => "start context: the daemon is not running".to_string(),
-        Err(err) => format!("start context: {err}"),
+        Ok(Some(context)) => {
+            let mut lines = vec![context.status_line()];
+            lines.extend(context.conflict_lines());
+            lines
+        }
+        Ok(None) => vec!["start context: the daemon is not running".to_string()],
+        Err(err) => vec![format!("start context: {err}")],
     }
 }
 
@@ -1659,7 +1718,9 @@ pub fn status_text_with(
         Ok(setup) => {
             let mut memory = install::shared_status_lines(setup);
             if running.is_some() {
-                memory.push(format!("  {}", start_context_line(run_dir)));
+                for line in start_context_lines(run_dir) {
+                    memory.push(format!("  {line}"));
+                }
             }
             sections.push(memory);
             let kinds = setup.installed();

@@ -277,15 +277,74 @@ memory, of the session's project and the global ones. This replaces what Claude 
   connection opens. A Claude Code connection whose settings hold our SessionStart hook leaves it
   out of the instructions, so it is not sent twice; per harness: [Supported
   harnesses](harnesses.md#the-start-context-what-reaches-the-model-at-a-sessions-start).
+- **Superseded and conflicting memories**: a superseded memory never starts a session; open
+  conflicts follow the groups with both versions ([Conflicts](#conflicts-between-memories)).
 - **Seeing it**: `graphersal-memory start-context [--project DIR]` prints the text; `status` and
   `doctor` show "start context: N memories, X of Y characters (Z not shown)" for the current
-  directory's project (when the daemon runs).
+  directory's project (when the daemon runs), then the open memory conflicts with their files and
+  the imported memories not yet checked.
+
+## Conflicts between memories
+
+graphersal-memory merges memories from several places (what an agent remembers, the imported
+memory files, project and global scope) and keeps every decision over time, so rules can
+contradict each other and an old decision can be replaced by a new one. The memory finds the
+candidates; the agent's own model decides (no model call of graphersal-memory's, no cost).
+
+- **Check on write.** `remember` answers, besides what it stored, the five nearest existing
+  memories (`nearest`: slug, scope, kind, summary, source = `remember` or the file it was
+  imported from, `updated_at`), found with the same hybrid scoring as `recall` on the new
+  memory's slug and summary, over the project's and the global memories, without the memory
+  itself and without memories already superseded, and a `check` text: for each nearest memory
+  the agent picks **compatible** (the default), **replaces** (the same rule in other words: keep
+  one), **supersedes** (a later decision: `remember` again with `supersedes: [old slug]`) or
+  **contradicts** (record it with `settle(new, "conflict", old)` and ask the user). Both are
+  left out when nothing is near (about 150 tokens otherwise).
+- **Scope.** A project memory that narrows a global one is compatible, not a conflict (a
+  conflict exists only within one scope): `settle(project slug, "narrows", global slug)` records
+  the note "narrows the global rule <slug>"; `settle` refuses a conflict across scopes.
+- **History, not deletion.** `supersedes` (newer -> older, with the time it was recorded) keeps
+  both memories. Every search (`memories`, `recall`) and `memory(slug)` mark the old one: its
+  summary starts with "SUPERSEDED by <slug> on <date>:", and `memory(slug)` shows the whole
+  `chain` from the oldest to the newest decision. A superseded memory is never hidden, because
+  it leads the agent to its successor; it never appears in the [start context](#the-start-context).
+  Superseding a memory ends its open conflicts.
+- **Open conflicts** are `conflicts_with` edges until the user decides. `conflicts()` lists them
+  with both versions and their files, the imported memories not yet checked (with their nearest
+  memories and the check), the narrowing notes and the files that still hold a superseded rule;
+  `settle(slug, decision, other)` records a decision (`compatible`, `narrows`, `supersedes`,
+  `conflict`; `settle(slug, "compatible")` alone ends the check of an imported memory). A search
+  hit with an open conflict names the other memory; `memory(slug)` lists both sides.
+- **Imported memories.** The import passes each file to `remember`: the memory's `source` is the
+  file, `imported_at` the time of the import, and `updated_at` the file's last change (when the
+  rule was decided, not when it was imported). An imported memory with similar memories is
+  marked `unchecked` until an agent settles it. The import's report, `status`, `doctor` and the
+  start context name the file of every open conflict, and every answer that supersedes, settles
+  or forgets an imported memory tells the agent to have the user edit or delete that file: a
+  file the harness loads into the context still holds the old rule. An unchanged file never
+  brings a superseded or forgotten memory back: the import state records the file text's own
+  fingerprint and that its memory was forgotten, so a moved `MEMORY.md` line alone imports
+  nothing, and an import never removes a `supersedes` edge.
+- **At session start** the start context lists the open conflicts (both versions, which of them
+  is always loaded, their files; at most five, then "N more") and the number of imported
+  memories waiting for their check, both naming `conflicts()`; Claude Code's start line adds the
+  same counts.
+- **Measured** (M12 experiment, 2026-11-12, before this was built): on 64 hand-labelled pairs
+  (contradictions, superseded decisions, near duplicates, similar but compatible, unrelated)
+  among 232 unrelated memories, the nearest five held the conflicting or superseded memory in
+  94 % of the cases (one project and the global memories; 91 % over everything), and Claude
+  Haiku with this answer format found 100 % of them with no compatible pair flagged (22 pairs);
+  in 18 follow-up sessions after a rule change, 18 followed the newer rule with the
+  SUPERSEDED mark, 17 without it, 16 with the old memory hidden and 13 with the old rule still
+  in a loaded file. Caveats: one labeller, a synthetic corpus apart from one real case, single
+  turns rather than a live tool loop, small samples. `graphersal-memory bench rule-changes`
+  repeats the last measurement (arms plain / marked / file) through your `claude -p`.
 
 ## Profiles: the two MCP servers
 
 | Server | Default | Tools | Enforcement |
 |---|---|---|---|
-| `use` | on | search and read memories, remember, forget, search and read past sessions | the engine's access policy allows only what these tools write |
+| `use` | on | search and read memories, remember, forget, pin, list and settle conflicts, search and read past sessions | the engine's access policy allows only what these tools write |
 | `develop` | off | the above plus schema, saved queries, indexes, health, benchmark | for improving the memory's structure; enable it when you need it, disable it so it costs no context |
 
 The daemon chooses the profile per connection, from the handshake. A client cannot raise its own

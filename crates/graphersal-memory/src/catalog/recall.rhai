@@ -46,7 +46,21 @@ fn recall(text, k, label, project) {
         }
         if best < 0 { break; }
         taken.push(best);
-        top.push(rows[best]);
+        let row = rows[best];
+        // A superseded memory is marked (it leads to its successor), an open conflict named.
+        if row.label == "memory" {
+            let sup = g.v(row.id).in_e("supersedes").filter(__.out_v().has_label("memory").filter(visible))
+                .project("slug", "at").by(__.out_v().values("name"))
+                .by(__.coalesce(__.values("at").as_string(), __.out_v().values("updated_at").as_string(), __.constant(""))).to_list();
+            if sup.len() > 0 {
+                let at = if sup[0].at.len() >= 10 { sup[0].at.sub_string(0, 10) } else { sup[0].at };
+                row.summary = "SUPERSEDED by " + sup[0].slug + " on " + at + ": " + row.summary;
+                row.superseded_by = sup[0].slug;
+            }
+            let c = g.v(row.id).both("conflicts_with").has_label("memory").filter(visible).values("name").to_list();
+            if c.len() > 0 { row.open_conflict_with = c; }
+        }
+        top.push(row);
     }
     top
 }

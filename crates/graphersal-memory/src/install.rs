@@ -2632,6 +2632,7 @@ pub fn install(
             Some(result) => {
                 let result = result?;
                 report.push(import_summary(&result));
+                report.extend(import_conflict_lines(&result));
                 for problem in &result.problems {
                     report.push(format!("import failed: {problem}"));
                 }
@@ -3025,10 +3026,45 @@ pub fn import_summary(report: &import::ImportReport) -> String {
             report.kind_defaulted
         ));
     }
+    if report.kept_forgotten > 0 {
+        line.push_str(&format!(
+            "; {} forgotten in the memory and unchanged in its file, kept forgotten",
+            report.kept_forgotten
+        ));
+    }
+    if report.unchecked > 0 {
+        line.push_str(&format!(
+            "; {} {} similar memories to check for conflicts (your agent: conflicts())",
+            report.unchecked,
+            if report.unchecked == 1 { "has" } else { "have" }
+        ));
+    }
     if report.timed_out {
         line.push_str("; stopped early (time limit), the rest follows next time");
     }
     line
+}
+
+/// The lines after an import's summary: its projects' open memory conflicts and the files
+/// that still hold a superseded memory, each named with its file (empty when there are none).
+pub fn import_conflict_lines(report: &import::ImportReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !report.conflicts.is_empty() {
+        lines.push(format!(
+            "open memory conflicts: {} (ask your agent to settle them: conflicts(); the file of \
+             the memory that loses must change too)",
+            report.conflicts.len()
+        ));
+        lines.extend(report.conflicts.iter().map(|line| format!("  {line}")));
+    }
+    if !report.stale_files.is_empty() {
+        lines.push(format!(
+            "files that still hold a superseded memory: {} (edit or delete them)",
+            report.stale_files.len()
+        ));
+        lines.extend(report.stale_files.iter().map(|line| format!("  {line}")));
+    }
+    lines
 }
 
 /// The structural removal of our parts from one file's current text: the new text, or `None`

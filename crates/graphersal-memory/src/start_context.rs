@@ -13,6 +13,10 @@
 //!   `memories(text)`. A budget in characters (`memory.start_context_chars` of `config.json`,
 //!   default [`DEFAULT_CHARS`], `0` = off): over it, the memories are kept in the order above
 //!   and the text ends with "N more not shown: memories(kind: ...)".
+//! - **Conflicts** (M12): a superseded memory never appears (the catalog function leaves it
+//!   out); the open conflicts between the project's and the global memories follow the groups,
+//!   both versions with their files (`open_conflicts`, at most [`MAX_CONFLICTS`]), and a line
+//!   counts the imported memories waiting for their conflict check, both naming `conflicts()`.
 //! - **Delivery**: the session-start hooks print it (Claude Code: `additionalContext`; Codex:
 //!   the same JSON; Cursor: `additional_context`), and the `use` server's instructions of a
 //!   connection carry it, unless the connection says its harness's hook delivers it
@@ -72,6 +76,76 @@ pub fn entries(value: &Value) -> Vec<Entry> {
         .collect()
 }
 
+/// The most open conflicts the text shows (the rest: "N more").
+pub const MAX_CONFLICTS: usize = 5;
+
+/// The longest hook or summary of a memory in a conflict line, in characters.
+const MAX_CONFLICT_HOOK_CHARS: usize = 160;
+
+/// One memory of an open conflict, as the catalog function `open_conflicts` returns it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Side {
+    /// The memory's slug.
+    pub slug: String,
+    /// `project` or `global`.
+    pub scope: String,
+    /// Its title (the slug when it has none).
+    pub title: String,
+    /// Its hook (the summary when it has none).
+    pub hook: String,
+    /// Whether it is always loaded (pinned, feedback or user).
+    pub always: bool,
+    /// The file it was imported from (empty: written through `remember`).
+    pub file: String,
+}
+
+/// An open conflict between two memories.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Conflict {
+    /// One memory.
+    pub a: Side,
+    /// The memory it contradicts.
+    pub b: Side,
+}
+
+impl Conflict {
+    /// The `status` line: both slugs with their sources.
+    pub fn status_line(&self) -> String {
+        let source = |side: &Side| {
+            if side.file.is_empty() {
+                format!("{} (remember)", side.slug)
+            } else {
+                format!("{} (file {})", side.slug, side.file)
+            }
+        };
+        format!("{} vs {}", source(&self.a), source(&self.b))
+    }
+}
+
+/// The open conflicts and the unchecked count of the catalog function `open_conflicts`.
+pub fn conflicts(value: &Value) -> (Vec<Conflict>, usize) {
+    let side = |row: &Value| Side {
+        slug: row["slug"].as_str().unwrap_or_default().to_string(),
+        scope: row["scope"].as_str().unwrap_or_default().to_string(),
+        title: row["title"].as_str().unwrap_or_default().to_string(),
+        hook: row["hook"].as_str().unwrap_or_default().to_string(),
+        always: row["always"] == Value::Bool(true),
+        file: row["file"].as_str().unwrap_or_default().to_string(),
+    };
+    let open = value["open"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row["a"]["slug"].is_string() && row["b"]["slug"].is_string())
+        .map(|row| Conflict {
+            a: side(&row["a"]),
+            b: side(&row["b"]),
+        })
+        .collect();
+    let unchecked = value["unchecked"].as_u64().unwrap_or(0) as usize;
+    (open, unchecked)
+}
+
 /// The group of a memory in the selection order: pinned 0, feedback 1, user 2, the rest 3.
 fn rank(entry: &Entry) -> u8 {
     if entry.pinned {
@@ -113,6 +187,10 @@ pub struct StartContext {
     pub total: usize,
     /// The budget it was cut to, in characters.
     pub budget: usize,
+    /// The open conflicts, one line each naming both memories and their files.
+    pub conflicts: Vec<String>,
+    /// How many imported memories wait for their conflict check.
+    pub unchecked: usize,
 }
 
 impl StartContext {
@@ -149,10 +227,56 @@ impl StartContext {
         )
     }
 
+    /// The `status`/`doctor` lines about conflicts (none when there is nothing to settle).
+    pub fn conflict_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if !self.conflicts.is_empty() {
+            lines.push(format!(
+                "memory conflicts: {} open; ask your agent to list and settle them (conflicts())",
+                self.conflicts.len()
+            ));
+            lines.extend(self.conflicts.iter().map(|line| format!("  {line}")));
+        }
+        if self.unchecked > 0 {
+            lines.push(format!(
+                "memory conflicts: {} imported memor{} not yet checked against the others \
+                 (your agent: conflicts())",
+                self.unchecked,
+                if self.unchecked == 1 { "y" } else { "ies" }
+            ));
+        }
+        lines
+    }
+
+    /// The sentence the session-start line adds about conflicts (empty when there are none).
+    pub fn start_note(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.conflicts.is_empty() {
+            parts.push(format!(
+                "{} open memory conflict{} (ask the user which memory holds, then settle it)",
+                self.conflicts.len(),
+                if self.conflicts.len() == 1 { "" } else { "s" }
+            ));
+        }
+        if self.unchecked > 0 {
+            parts.push(format!(
+                "{} imported memor{} to check",
+                self.unchecked,
+                if self.unchecked == 1 { "y" } else { "ies" }
+            ));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" {}: conflicts().", parts.join("; "))
+        }
+    }
+
     /// The control-line answer of the daemon (`start_context`).
     pub fn to_json(&self) -> Value {
         serde_json::json!({"ok": true, "text": self.text, "shown": self.shown,
-                           "total": self.total, "chars": self.chars(), "budget": self.budget})
+                           "total": self.total, "chars": self.chars(), "budget": self.budget,
+                           "conflicts": self.conflicts, "unchecked": self.unchecked})
     }
 
     /// The daemon's answer read back (`None` when it is not one).
@@ -163,6 +287,18 @@ impl StartContext {
             shown: count("shown")?,
             total: count("total")?,
             budget: count("budget")?,
+            // An older daemon's answer has neither.
+            conflicts: value["conflicts"]
+                .as_array()
+                .map(|lines| {
+                    lines
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            unchecked: count("unchecked").unwrap_or(0),
         })
     }
 }
@@ -211,8 +347,78 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The text of `shown` (in selection order) with the "more" line for `hidden`.
-fn text_of(shown: &[&Entry], hidden: &[&Entry]) -> String {
+/// The heading of the open conflicts.
+const CONFLICTS_HEADING: &str = "## Open conflicts (two memories contradict: ask the user which \
+                                 holds, then settle it; conflicts() lists them)";
+
+/// One memory of a conflict line.
+fn side_text(side: &Side) -> String {
+    let title = one_line(if side.title.is_empty() {
+        &side.slug
+    } else {
+        &side.title
+    });
+    let hook = one_line(&side.hook);
+    let hook: String = if hook.chars().count() > MAX_CONFLICT_HOOK_CHARS {
+        let cut: String = hook.chars().take(MAX_CONFLICT_HOOK_CHARS - 1).collect();
+        format!("{}…", cut.trim_end())
+    } else {
+        hook
+    };
+    let mut source = format!("memory: {}", side.slug);
+    if side.scope == "global" {
+        source.push_str(", global");
+    }
+    if side.always {
+        source.push_str(", always loaded");
+    }
+    if !side.file.is_empty() {
+        source.push_str(&format!(", file: {}", side.file));
+    }
+    if hook.is_empty() {
+        format!("{title} ({source})")
+    } else {
+        format!("{title} — {hook} ({source})")
+    }
+}
+
+/// The conflict part of the text: the open conflicts (both versions) and the unchecked count;
+/// empty when there is neither.
+fn conflicts_text(conflicts: &[Conflict], unchecked: usize) -> String {
+    let mut out = String::new();
+    if !conflicts.is_empty() {
+        out.push_str(CONFLICTS_HEADING);
+        for conflict in conflicts.iter().take(MAX_CONFLICTS) {
+            out.push_str(&format!(
+                "\n- {}\n  CONFLICTS WITH {}",
+                side_text(&conflict.a),
+                side_text(&conflict.b)
+            ));
+        }
+        if conflicts.len() > MAX_CONFLICTS {
+            out.push_str(&format!(
+                "\n{} more: conflicts().",
+                conflicts.len() - MAX_CONFLICTS
+            ));
+        }
+    }
+    if unchecked > 0 {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "{unchecked} imported memor{} not yet checked for conflicts with the others: \
+             conflicts() lists {}.",
+            if unchecked == 1 { "y is" } else { "ies are" },
+            if unchecked == 1 { "it" } else { "them" }
+        ));
+    }
+    out
+}
+
+/// The text of `shown` (in selection order) with the "more" line for `hidden` and the
+/// conflict part `conflicts` (may be empty).
+fn text_of(shown: &[&Entry], hidden: &[&Entry], conflicts: &str) -> String {
     let mut out = String::from(HEADLINE);
     for (heading, belongs) in GROUPS {
         let lines: Vec<String> = shown
@@ -229,6 +435,10 @@ fn text_of(shown: &[&Entry], hidden: &[&Entry]) -> String {
             out.push('\n');
             out.push_str(&line);
         }
+    }
+    if !conflicts.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(conflicts);
     }
     out.push_str("\n\n");
     out.push_str(FOOTER);
@@ -260,22 +470,42 @@ fn text_of(shown: &[&Entry], hidden: &[&Entry]) -> String {
 /// The start context of `entries` within `budget` characters: the memories in selection order
 /// ([`sort`]) as long as the whole text fits, the rest named by the "more" line. Empty when
 /// there is no entry or the budget is 0.
-pub fn render(mut entries: Vec<Entry>, budget: usize) -> StartContext {
+pub fn render(entries: Vec<Entry>, budget: usize) -> StartContext {
+    render_with(entries, Vec::new(), 0, budget)
+}
+
+/// [`render`] with the open `conflicts` and the `unchecked` count after the groups (the text
+/// is empty only when there is neither and no entry, or the budget is 0).
+pub fn render_with(
+    mut entries: Vec<Entry>,
+    conflicts: Vec<Conflict>,
+    unchecked: usize,
+    budget: usize,
+) -> StartContext {
     sort(&mut entries);
     let total = entries.len();
-    if total == 0 || budget == 0 {
+    let lines: Vec<String> = conflicts.iter().map(Conflict::status_line).collect();
+    if (total == 0 && conflicts.is_empty() && unchecked == 0) || budget == 0 {
         return StartContext {
             text: String::new(),
             shown: 0,
             total,
             budget,
+            conflicts: lines,
+            unchecked,
         };
     }
+    let conflict_text = conflicts_text(&conflicts, unchecked);
     let all: Vec<&Entry> = entries.iter().collect();
     // The longest prefix whose text fits (the text grows with the prefix, so a binary search
     // finds it; the "more" line shrinks by at most a few characters as the prefix grows, which
     // the final check covers).
-    let fits = |n: usize| text_of(&all[..n], &all[n..]).chars().count() <= budget;
+    let fits = |n: usize| {
+        text_of(&all[..n], &all[n..], &conflict_text)
+            .chars()
+            .count()
+            <= budget
+    };
     let (mut low, mut high) = (0, total);
     while low < high {
         let mid = (low + high).div_ceil(2);
@@ -290,10 +520,12 @@ pub fn render(mut entries: Vec<Entry>, budget: usize) -> StartContext {
         shown -= 1;
     }
     StartContext {
-        text: text_of(&all[..shown], &all[shown..]),
+        text: text_of(&all[..shown], &all[shown..], &conflict_text),
         shown,
         total,
         budget,
+        conflicts: lines,
+        unchecked,
     }
 }
 
@@ -484,6 +716,92 @@ mod tests {
         let text = line(&long);
         assert!(text.contains('…'));
         assert!(text.chars().count() < MAX_HOOK_CHARS + 60, "{text}");
+    }
+
+    fn side(slug: &str, always: bool, file: &str) -> Side {
+        Side {
+            slug: slug.into(),
+            scope: "project".into(),
+            title: format!("Title {slug}"),
+            hook: format!("hook of {slug}"),
+            always,
+            file: file.into(),
+        }
+    }
+
+    #[test]
+    fn open_conflicts_follow_the_groups_with_both_versions_and_their_files() {
+        let conflicts = vec![Conflict {
+            a: side("spaces", true, ""),
+            b: side("tabs", false, "/home/u/.claude/projects/p/memory/tabs.md"),
+        }];
+        let context = render_with(
+            vec![entry("spaces", "feedback", false, None, "2026")],
+            conflicts,
+            2,
+            DEFAULT_CHARS,
+        );
+        assert_eq!(
+            context.text,
+            format!(
+                "{HEADLINE}\n\n## How to work\n- Title spaces — hook of spaces (memory: spaces)\n\n\
+                 {CONFLICTS_HEADING}\n- Title spaces — hook of spaces (memory: spaces, always \
+                 loaded)\n  CONFLICTS WITH Title tabs — hook of tabs (memory: tabs, file: \
+                 /home/u/.claude/projects/p/memory/tabs.md)\n2 imported memories are not yet \
+                 checked for conflicts with the others: conflicts() lists them.\n\n{FOOTER}"
+            )
+        );
+        assert_eq!(
+            context.conflicts,
+            ["spaces (remember) vs tabs (file /home/u/.claude/projects/p/memory/tabs.md)"]
+        );
+        assert_eq!(
+            context.start_note(),
+            " 1 open memory conflict (ask the user which memory holds, then settle it); 2 \
+             imported memories to check: conflicts()."
+        );
+        assert_eq!(context.conflict_lines().len(), 3);
+    }
+
+    #[test]
+    fn conflicts_alone_give_a_text_and_more_than_five_are_counted() {
+        let unchecked = render_with(Vec::new(), Vec::new(), 1, DEFAULT_CHARS);
+        assert!(
+            unchecked
+                .text
+                .contains("1 imported memory is not yet checked"),
+            "{}",
+            unchecked.text
+        );
+        let many: Vec<Conflict> = (0..7)
+            .map(|i| Conflict {
+                a: side(&format!("a{i}"), false, ""),
+                b: side(&format!("b{i}"), false, ""),
+            })
+            .collect();
+        let context = render_with(Vec::new(), many, 0, DEFAULT_CHARS);
+        assert_eq!(
+            context.text.matches("CONFLICTS WITH").count(),
+            MAX_CONFLICTS
+        );
+        assert!(
+            context.text.contains("\n2 more: conflicts()."),
+            "{}",
+            context.text
+        );
+        assert_eq!(context.conflicts.len(), 7);
+        assert!(
+            render_with(Vec::new(), Vec::new(), 0, DEFAULT_CHARS)
+                .text
+                .is_empty()
+        );
+        let (parsed, count) = conflicts(&serde_json::json!({
+            "open": [{"a": {"slug": "x", "scope": "global", "title": "X", "hook": "h",
+                            "always": true, "file": ""},
+                      "b": {"slug": "y"}}, {"a": {}}],
+            "unchecked": 4}));
+        assert_eq!((parsed.len(), count), (1, 4));
+        assert!(parsed[0].a.always);
     }
 
     #[test]

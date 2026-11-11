@@ -426,15 +426,21 @@ impl StoreRuntime {
         self.serve_with(kind, project, identity, connection, read, write)
     }
 
-    /// The start context of `project` (its stable id) within `budget` characters.
+    /// The start context of `project` (its stable id) within `budget` characters, with its open
+    /// memory conflicts.
     pub fn start_context(
         &self,
         project: &str,
         budget: usize,
     ) -> Result<crate::start_context::StartContext, String> {
         let rows = self.call("start_context", json!({"project": project}))?;
-        Ok(crate::start_context::render(
+        let (conflicts, unchecked) = crate::start_context::conflicts(
+            &self.call("open_conflicts", json!({"project": project}))?,
+        );
+        Ok(crate::start_context::render_with(
             crate::start_context::entries(&rows),
+            conflicts,
+            unchecked,
             budget,
         ))
     }

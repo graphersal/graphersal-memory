@@ -32,7 +32,7 @@
           },
           "source": {
             "type": "string",
-            "description": "where it came from: 'user', 'derived', a file or a URL"
+            "description": "where it came from: 'user' (remember), 'derived', or the file it was imported from"
           },
           "visibility": {
             "type": "string",
@@ -45,7 +45,8 @@
           "updated_at": {
             "type": "string",
             "format": "date-time",
-            "defaultFunction": "now"
+            "defaultFunction": "now",
+            "description": "when it was decided: written through remember, or its file's last change (imported)"
           },
           "embed_text": {
             "type": "string",
@@ -96,6 +97,15 @@
           "order": {
             "type": "integer",
             "description": "priority within its group of the start context and the memory list (lower first; absent = after the ordered ones, newest first)"
+          },
+          "imported_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "when it was imported from its file (source); absent when written through remember"
+          },
+          "unchecked": {
+            "type": "boolean",
+            "description": "imported and not yet checked against its nearest memories for conflicts (conflicts(), settle)"
           }
         },
         "required": [
@@ -424,7 +434,7 @@
       ],
       "schema": {
         "type": "object",
-        "description": "a newer memory or fact -> the one it replaces",
+        "description": "a newer memory or fact -> the one it replaces (a later decision); the old one stays, marked SUPERSEDED in searches",
         "properties": {
           "origin": {
             "type": "string"
@@ -439,6 +449,11 @@
               "private"
             ],
             "default": "private"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "when it was recorded"
           }
         }
       }
@@ -523,6 +538,72 @@
               "private"
             ],
             "default": "private"
+          }
+        }
+      }
+    },
+    "conflicts_with": {
+      "connections": [
+        {
+          "from": "memory",
+          "to": "memory"
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "description": "memory -> a memory of the same scope it contradicts: an open conflict until the user decides (settle)",
+        "properties": {
+          "origin": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "when it was recorded"
+          }
+        }
+      }
+    },
+    "narrows": {
+      "connections": [
+        {
+          "from": "memory",
+          "to": "memory"
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "description": "project memory -> the global memory it narrows for that project (compatible, not a conflict)",
+        "properties": {
+          "origin": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "when it was recorded"
           }
         }
       }

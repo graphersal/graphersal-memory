@@ -25,6 +25,7 @@
 pub mod arms;
 pub mod questions;
 pub mod report;
+pub mod rule_changes;
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
