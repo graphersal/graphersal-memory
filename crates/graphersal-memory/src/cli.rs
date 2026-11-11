@@ -103,6 +103,9 @@ pub enum Command {
         /// cost model usage; off by default, also with --yes).
         #[arg(long)]
         summaries: bool,
+        /// What to do about other memory tools found beside graphersal-memory.
+        #[command(flatten)]
+        other: OtherMemoryArgs,
     },
     /// Remove exactly what `install` added; your own settings stay untouched.
     Uninstall {
@@ -207,6 +210,13 @@ pub enum Command {
         /// only when switched on).
         #[arg(long)]
         sessions: bool,
+        /// Stop importing a memory file or directory (one another program keeps writing, or one
+        /// that keeps bringing back what was changed in the graph); nothing else is done.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["sessions", "unignore", "dry_run"])]
+        ignore: Option<PathBuf>,
+        /// Import an ignored memory file or directory again (from the next import on).
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["sessions", "ignore", "dry_run"])]
+        unignore: Option<PathBuf>,
     },
     /// Session summaries through your own harness: estimate, status, enable, disable.
     Summaries {
@@ -403,6 +413,29 @@ pub enum QuestionsEdit {
     },
 }
 
+/// `install`'s flags about other memory tools (MCP servers of mem0, Basic Memory, the
+/// reference memory server, ... found in a harness's configuration). Each takes the server's
+/// name and may be repeated.
+#[derive(Debug, Clone, Default, PartialEq, Eq, clap::Args)]
+pub struct OtherMemoryArgs {
+    /// Name this other memory tool read-only in the rule block: graphersal-memory is the main
+    /// memory (the default for a known memory tool).
+    #[arg(long, value_name = "NAME")]
+    pub other_read_only: Vec<String>,
+    /// Keep this other memory tool as it is, not named in the rule block (the default for a
+    /// server recognised only by its name or tools).
+    #[arg(long, value_name = "NAME")]
+    pub keep_other: Vec<String>,
+    /// Switch this other memory tool's MCP entry off in the harness's configuration (backed
+    /// up; uninstall switches it on again). Never done without this flag or a yes in the
+    /// wizard; --yes alone does not.
+    #[arg(long, value_name = "NAME")]
+    pub disable_other: Vec<String>,
+    /// Switch on again an other memory tool's MCP entry that install switched off.
+    #[arg(long, value_name = "NAME")]
+    pub enable_other: Vec<String>,
+}
+
 /// The category of a question of your own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum QuestionCategory {
@@ -572,7 +605,8 @@ mod tests {
                 no_import: false,
                 keep_auto_memory: false,
                 enable_develop: false,
-                summaries: false
+                summaries: false,
+                other: OtherMemoryArgs::default()
             }
         );
         assert_eq!(
@@ -716,7 +750,8 @@ mod tests {
                 no_import: false,
                 keep_auto_memory: false,
                 enable_develop: true,
-                summaries: false
+                summaries: false,
+                other: OtherMemoryArgs::default()
             }
         );
         assert_eq!(
@@ -753,7 +788,9 @@ mod tests {
             parse(&["import", "--sessions"]).unwrap().command,
             Command::Import {
                 dry_run: false,
-                sessions: true
+                sessions: true,
+                ignore: None,
+                unignore: None
             }
         );
         assert_eq!(

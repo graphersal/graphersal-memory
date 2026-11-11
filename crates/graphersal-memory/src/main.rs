@@ -14,6 +14,9 @@ mod catalog;
 mod cli;
 mod client;
 mod codex;
+mod coexist;
+#[cfg(test)]
+mod coexist_tests;
 mod commands;
 mod config;
 mod cursor;

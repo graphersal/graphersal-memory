@@ -185,6 +185,69 @@ Claude Code:
   auto-memory (~/.claude/settings.json): off (autoMemoryEnabled: false, set by install; uninstall exports every memory back and switches it on again)
 ```
 
+### Other memory on the machine
+
+When another memory is found (see [harnesses.md](harnesses.md#other-memory-beside-graphersal-memory)),
+the wizard gets a step "Other memory", the plan a section of the same name, and `status` and
+`doctor` an "Other memory" section. A machine with Claude Code's auto-memory on, the reference
+memory server registered as `memory`, and a `CLAUDE.md` line saying to keep memory there:
+
+```
+Step 5 of 8 · Other memory
+  graphersal-memory found other memory on this machine. Two memories split the facts:
+  an agent saves into one and later searches the other.
+  - memory (Claude Code, ~/.claude.json): the reference memory server
+  (@modelcontextprotocol/server-memory)
+  - ~/.claude/CLAUDE.md:4 says "- Keep all memory in the knowledge graph of the memory
+  MCP server (create_entities)." (never edited; `graphersal-memory doctor` suggests an
+  edit)
+
+  memory:
+  1) graphersal-memory is the main memory  memory stays, named read-only in the rule block  (default)
+                                           (search it when needed, never write there)
+  2) Switch memory off                     in ~/.claude.json; backed up, uninstall switches it on again
+  3) Keep both as they are                 the rule block does not name it
+Choose [1]:
+  Import:
+  1) Yes  import 2 memories of memory now (global memories; the files are only read)  (default)
+  2) No   not now (`graphersal-memory install` offers it again)
+```
+
+The plan (`--dry-run`, or `d` in the last step):
+
+```
+Other memory
+  8. Other memory tools
+     - memory (Claude Code, ~/.claude.json): the reference memory server (@modelcontextprotocol/server-memory); stays, named read-only in the rule block (graphersal-memory is the main memory)
+  9. Import the other memory tools' memories
+     - memory (the reference memory server (@modelcontextprotocol/server-memory)): 2 memories in ~/kg/memory.jsonl, 2 new or changed: imported as global memories (the file is only read)
+  10. Instruction files that keep memory elsewhere (never changed by graphersal-memory)
+     - ~/.claude/CLAUDE.md:4: "- Keep all memory in the knowledge graph of the memory MCP server (create_entities)." (contradicts the rule block; `graphersal-memory doctor` suggests an edit)
+```
+
+`status` and `doctor` afterwards:
+
+```
+Other memory:
+  Claude Code's auto-memory: off; 2 memory files in 1 project (~/.claude/projects)
+  memory (Claude Code, ~/.claude.json): the reference memory server (@modelcontextprotocol/server-memory); named read-only in the rule block (graphersal-memory is the main memory)
+  ~/.claude/CLAUDE.md:4 says: "- Keep all memory in the knowledge graph of the memory MCP server (create_entities)." (never edited; `graphersal-memory doctor` suggests an edit)
+```
+
+```
+Other memory:
+  ok      Claude Code's auto-memory: off; 2 memory files in 1 project (~/.claude/projects)
+  ok      memory (Claude Code, ~/.claude.json): the reference memory server (@modelcontextprotocol/server-memory); named read-only in the rule block (graphersal-memory is the main memory)
+  note    ~/.claude/CLAUDE.md:4 says: "- Keep all memory in the knowledge graph of the memory MCP server (create_entities)."
+          it contradicts graphersal-memory's rule block, so the agent gets two answers. graphersal-memory never edits your instruction files: delete the line, or change it to "Memory lives in graphersal-memory (the MCP server `graphersal-memory`)."
+```
+
+These are notes, never problems or ACTION NEEDED lines: nothing here breaks graphersal-memory,
+and what to do is your choice. The flags: `--other-read-only NAME`, `--keep-other NAME`,
+`--disable-other NAME` (the only way to switch another tool off without the wizard; `--yes` alone
+never does), `--enable-other NAME`. `graphersal-memory import --ignore PATH` stops importing a
+memory file or directory another program keeps writing (`--unignore PATH` undoes it).
+
 ### `graphersal-memory uninstall`
 
 Answers: Enter (export), Enter (uninstall). Both memory files said the same as the graph, so the

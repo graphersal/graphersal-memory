@@ -98,6 +98,21 @@ pub fn find_block(
     )
 }
 
+/// [`find_block`] with the read-only line naming `read_only` in the current block
+/// (`crate::coexist::rule_with`).
+pub fn find_block_with(
+    text: &str,
+    language: Language,
+    read_only: &[String],
+) -> Result<Option<crate::install::FoundBlock>, String> {
+    find_block_in(
+        text,
+        &crate::coexist::rule_with(rule_block(language), read_only),
+        &[RULE_BLOCK, RULE_BLOCK_ANY],
+        PREVIOUS_BLOCK_FINGERPRINTS,
+    )
+}
+
 /// The text a configuration file install creates starts from.
 fn new_config() -> String {
     format!(
@@ -190,7 +205,12 @@ pub struct Plan {
 }
 
 /// Plans opencode's part of the install.
-pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, String> {
+pub fn plan(
+    setup: &Setup,
+    language: Language,
+    read_only: &[String],
+    develop: bool,
+) -> Result<Plan, String> {
     let state = State::load_of(setup, Kind::OpenCode)?;
     let mut conflicts = Vec::new();
     let mut steps = Vec::new();
@@ -327,9 +347,9 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
     let path = &paths.rules_file;
     let before = read_text(path)?;
     let current = before.clone().unwrap_or_default();
-    let block = wrap_block(rule_block(language));
+    let block = wrap_block(&crate::coexist::rule_with(rule_block(language), read_only));
     let mut separator = None;
-    let (after, line) = match find_block(&current, language) {
+    let (after, line) = match find_block_with(&current, language, read_only) {
         Err(err) => {
             conflicts.push(format!("{}: {err}; kept as it is.", path.display()));
             (None, "CONFLICT (see the report)".to_string())
@@ -786,18 +806,20 @@ pub fn inspect(setup: &Setup) -> Inspection {
         .map(|c| c.language())
         .unwrap_or_default();
     let block = match read_text(&paths.rules_file) {
-        Ok(Some(text)) => match find_block(&text, language) {
-            Ok(None) => PartState::Missing,
-            Ok(Some(found)) if found.current => PartState::Installed,
-            Ok(Some(found)) if found.known => {
-                PartState::Outdated("written by an earlier version".to_string())
+        Ok(Some(text)) => {
+            match find_block_with(&text, language, &crate::coexist::read_only_names(setup)) {
+                Ok(None) => PartState::Missing,
+                Ok(Some(found)) if found.current => PartState::Installed,
+                Ok(Some(found)) if found.known => {
+                    PartState::Outdated("written by an earlier version".to_string())
+                }
+                Ok(Some(found)) if found.intact => {
+                    PartState::Outdated("written by another version".to_string())
+                }
+                Ok(Some(_)) => PartState::Conflict("edited by hand".to_string()),
+                Err(err) => PartState::Conflict(err),
             }
-            Ok(Some(found)) if found.intact => {
-                PartState::Outdated("written by another version".to_string())
-            }
-            Ok(Some(_)) => PartState::Conflict("edited by hand".to_string()),
-            Err(err) => PartState::Conflict(err),
-        },
+        }
         Ok(None) => PartState::Missing,
         Err(err) => {
             errors.push(err);

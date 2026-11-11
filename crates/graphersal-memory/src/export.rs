@@ -328,6 +328,9 @@ pub struct Report {
     pub appended: Vec<(PathBuf, usize)>,
     /// Projects whose directory is not known (their memories were not written).
     pub problems: Vec<String>,
+    /// Global memories imported from another memory tool (M15), left out: that tool still
+    /// has them, and the global file is loaded into every session.
+    pub from_other_tools: usize,
 }
 
 impl Report {
@@ -369,6 +372,28 @@ impl Report {
         }
         for problem in &self.problems {
             lines.push(format!("  not exported: {problem}"));
+        }
+        if self.from_other_tools > 0 {
+            lines.push(format!(
+                "  left out {} memor{} imported from another memory tool (that tool still has \
+                 {}; the graph keeps {} too)",
+                self.from_other_tools,
+                if self.from_other_tools == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+                if self.from_other_tools == 1 {
+                    "it"
+                } else {
+                    "them"
+                },
+                if self.from_other_tools == 1 {
+                    "it"
+                } else {
+                    "them"
+                }
+            ));
         }
         lines
     }
@@ -574,12 +599,24 @@ pub fn write(agent: &dyn Agent, data_dir: &Path, rows: &[Row]) -> Result<Report,
             .push(row);
     }
     let imported = crate::import::ImportState::load(data_dir).unwrap_or_default();
+    let other_tools = crate::coexist::other_import::State::load(data_dir).slugs();
     for (project, rows) in &by_project {
-        report.memories += rows.len();
         if project.is_empty() {
-            put(&agent.global_memory_file(), &global_text(rows), &mut report)?;
+            // Memories imported from another memory tool stay out of the global file, which
+            // every session loads: that tool still has them (M15).
+            let own: Vec<&Row> = rows
+                .iter()
+                .copied()
+                .filter(|row| !other_tools.contains(&row.slug))
+                .collect();
+            report.from_other_tools += rows.len() - own.len();
+            report.memories += own.len();
+            if !own.is_empty() {
+                put(&agent.global_memory_file(), &global_text(&own), &mut report)?;
+            }
             continue;
         }
+        report.memories += rows.len();
         report.projects += 1;
         let root = project_root(data_dir, project);
         if !root.is_absolute() {
