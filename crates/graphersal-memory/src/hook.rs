@@ -225,12 +225,57 @@ pub fn run(
 
 /// [`run`], then `enqueue` the indexing of finished sessions (within the same time limit).
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn run_with(
     event: HookEvent,
     paths: Result<ClaudePaths, String>,
     data_dir: PathBuf,
     connect: import::SendConnect,
     enqueue: Option<Enqueue>,
+    stdin: impl Read + Send + 'static,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
+    run_with_context(
+        event, paths, data_dir, connect, enqueue, None, stdin, stdout, stderr,
+    )
+}
+
+/// Reads the start context of the session started in a directory (`None`: no directory
+/// known: the global memories only) at most `max_chars` characters long.
+pub type StartFetch = Box<
+    dyn FnOnce(Option<&Path>, usize) -> Result<crate::start_context::StartContext, String> + Send,
+>;
+
+/// Claude Code's cap of a hook's `additionalContext` (code.claude.com/docs/en/hooks: 10,000
+/// characters; more is saved to a file and only a preview reaches the model).
+pub const CLAUDE_CODE_CONTEXT_CHARS: usize = 10_000;
+
+/// Claude Code's SessionStart answer: `line` and the start context `context` (when not empty)
+/// as `hookSpecificOutput.additionalContext`, the whole stdout one JSON object (plain text
+/// around it would make Claude Code read everything as text). Without a start context: the
+/// plain line (Claude Code adds a SessionStart hook's plain stdout to the context as well).
+pub fn claude_start_output(line: &str, context: &str) -> String {
+    if context.is_empty() {
+        return line.to_string();
+    }
+    serde_json::json!({"hookSpecificOutput": {
+        "hookEventName": "SessionStart",
+        "additionalContext": format!("{line}\n\n{context}"),
+    }})
+    .to_string()
+}
+
+/// [`run_with`] with the start context from `fetch` (session start only) in the answer
+/// ([`claude_start_output`]).
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_context(
+    event: HookEvent,
+    paths: Result<ClaudePaths, String>,
+    data_dir: PathBuf,
+    connect: import::SendConnect,
+    enqueue: Option<Enqueue>,
+    fetch: Option<StartFetch>,
     stdin: impl Read + Send + 'static,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -255,6 +300,19 @@ pub fn run_with(
                         &mut *connect,
                         deadline,
                     );
+                    // After the import, so memories it just brought in are part of it.
+                    if let (Some(fetch), Some(line)) = (fetch, outcome.line.clone()) {
+                        let room =
+                            CLAUDE_CODE_CONTEXT_CHARS.saturating_sub(line.chars().count() + 2);
+                        match fetch(dir.as_deref(), room) {
+                            Ok(context) => {
+                                outcome.line = Some(claude_start_output(&line, &context.text));
+                            }
+                            Err(err) => outcome
+                                .notes
+                                .push(format!("cannot read the start context: {err}")),
+                        }
+                    }
                     if let Some(enqueue) = enqueue {
                         let request = index_request(event, &paths, transcript_path(&input));
                         if let Err(err) = enqueue(request) {
@@ -478,6 +536,7 @@ pub fn cursor_request(
 /// transcript, queues the indexing within the time limit, answers the start with
 /// `{"additional_context": ...}`; never fails (exit code 0). Cursor keeps no memory files, so
 /// nothing is imported.
+#[cfg(test)]
 pub fn run_cursor(
     event: HookEvent,
     registry: PathBuf,
@@ -487,11 +546,60 @@ pub fn run_cursor(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> u8 {
-    let start = serde_json::json!({ "additional_context": CURSOR_START_LINE }).to_string();
-    run_queued_with(
+    run_cursor_with_context(
+        event,
+        registry,
+        project_dir,
+        enqueue,
+        None,
+        stdin,
+        stdout,
+        stderr,
+    )
+}
+
+/// Cursor's sessionStart answer: the start line and the start context (when not empty) as
+/// `additional_context` (cursor.com/docs/hooks: "Additional context to add to the
+/// conversation's initial system context").
+pub fn cursor_start_output(context: &str) -> String {
+    let text = if context.is_empty() {
+        CURSOR_START_LINE.to_string()
+    } else {
+        format!("{CURSOR_START_LINE}\n\n{context}")
+    };
+    serde_json::json!({ "additional_context": text }).to_string()
+}
+
+/// [`run_cursor`] with the start context of the workspace from `fetch` in the start answer.
+#[allow(clippy::too_many_arguments)]
+pub fn run_cursor_with_context(
+    event: HookEvent,
+    registry: PathBuf,
+    project_dir: Option<String>,
+    enqueue: Option<Enqueue>,
+    fetch: Option<StartFetch>,
+    stdin: impl Read + Send + 'static,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
+    let workspace_from = project_dir.clone();
+    run_queued_inner(
         event,
         move |value: &Value| cursor_request(event, &registry, value, project_dir.as_deref()),
-        &start,
+        move |value: &Value, notes: &mut Vec<String>| {
+            let mut context = String::new();
+            if let Some(fetch) = fetch {
+                let workspace =
+                    cursor_workspace(value, workspace_from.as_deref()).map(PathBuf::from);
+                // No documented cap of `additional_context`: the budget of config.json alone.
+                match fetch(workspace.as_deref(), usize::MAX) {
+                    Ok(found) => context = found.text,
+                    Err(err) => notes.push(format!("cannot read the start context: {err}")),
+                }
+            }
+            cursor_start_output(&context)
+        },
+        cursor_start_output(""),
         enqueue,
         stdin,
         stdout,
@@ -530,6 +638,32 @@ fn run_queued_with(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> u8 {
+    let line = start_line.to_string();
+    run_queued_inner(
+        event,
+        request,
+        move |_: &Value, _: &mut Vec<String>| line,
+        start_line.to_string(),
+        enqueue,
+        stdin,
+        stdout,
+        stderr,
+    )
+}
+
+/// [`run_queued_with`] with the start answer made from the input by `start` (after the
+/// indexing was queued), `fallback` when the hook runs out of time.
+#[allow(clippy::too_many_arguments)]
+fn run_queued_inner(
+    event: HookEvent,
+    request: impl FnOnce(&Value) -> (crate::sessions::Request, Vec<String>) + Send + 'static,
+    start: impl FnOnce(&Value, &mut Vec<String>) -> String + Send + 'static,
+    fallback: String,
+    enqueue: Option<Enqueue>,
+    stdin: impl Read + Send + 'static,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
     let (done, result) = mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("hook".into())
@@ -543,19 +677,27 @@ fn run_queued_with(
             {
                 notes.push(format!("cannot queue the session indexing: {err}"));
             }
-            let _ = done.send(notes);
+            let answer = if event == HookEvent::SessionStart {
+                start(&value, &mut notes)
+            } else {
+                String::new()
+            };
+            let _ = done.send((notes, answer));
         });
-    let notes = match spawned {
+    let (notes, answer) = match spawned {
         Ok(_) => result.recv_timeout(BUDGET).unwrap_or_else(|_| {
-            vec![format!(
-                "the hook stopped after {}s; the memory daemon may still be starting",
-                BUDGET.as_secs()
-            )]
+            (
+                vec![format!(
+                    "the hook stopped after {}s; the memory daemon may still be starting",
+                    BUDGET.as_secs()
+                )],
+                fallback,
+            )
         }),
-        Err(err) => vec![format!("cannot start the hook: {err}")],
+        Err(err) => (vec![format!("cannot start the hook: {err}")], fallback),
     };
     if event == HookEvent::SessionStart {
-        let _ = writeln!(stdout, "{start_line}");
+        let _ = writeln!(stdout, "{answer}");
         let _ = stdout.flush();
     }
     for note in &notes {
@@ -863,5 +1005,115 @@ mod tests {
         // No rollout named (or not a rollout): every rollout is queued, none marked.
         let request = codex_request(HookEvent::SessionEnd, &sessions, Some("/etc/passwd"));
         assert!(request.ended.is_empty() && request.active.is_empty());
+    }
+
+    fn context_of(text: &str) -> crate::start_context::StartContext {
+        crate::start_context::StartContext {
+            text: text.to_string(),
+            shown: 1,
+            total: 1,
+            budget: 8000,
+        }
+    }
+
+    #[test]
+    fn the_claude_code_start_answer_is_one_json_object_with_additional_context() {
+        // code.claude.com/docs/en/hooks: the whole stdout one JSON object; SessionStart's
+        // `hookSpecificOutput.additionalContext` reaches Claude, and nothing is shown to the user.
+        let home = crate::mcp_tests::TempDir::new("hookctx");
+        let paths = ClaudePaths::resolve(&|name| {
+            (name == "HOME").then(|| home.path().display().to_string())
+        })
+        .unwrap();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let keep = asked.clone();
+        let fetch: StartFetch = Box::new(move |dir, max| {
+            *keep.lock().unwrap() = Some((dir.map(Path::to_path_buf), max));
+            Ok(context_of("## How to work\n- Rule — hook (memory: rule)"))
+        });
+        let mut out = Vec::new();
+        let code = run_with_context(
+            HookEvent::SessionStart,
+            Ok(paths.clone()),
+            home.path().to_path_buf(),
+            Box::new(|_| Err("not called".to_string())),
+            None,
+            Some(fetch),
+            std::io::Cursor::new(br#"{"cwd": "/w/app"}"#.to_vec()),
+            &mut out,
+            &mut Vec::new(),
+        );
+        assert_eq!(code, 0);
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(out.lines().count(), 1, "{out}");
+        let answer: Value = serde_json::from_str(&out).unwrap();
+        let specific = &answer["hookSpecificOutput"];
+        assert_eq!(specific["hookEventName"], "SessionStart");
+        let context = specific["additionalContext"].as_str().unwrap();
+        assert!(
+            context.starts_with("graphersal-memory: your memory is served"),
+            "{context}"
+        );
+        assert!(context.ends_with("(memory: rule)"), "{context}");
+        assert!(answer.get("systemMessage").is_none());
+        let (dir, max) = asked.lock().unwrap().clone().unwrap();
+        assert_eq!(dir, Some(PathBuf::from("/w/app")));
+        assert!(max < CLAUDE_CODE_CONTEXT_CHARS && max > 9000, "{max}");
+        // An empty start context keeps the plain line; a failing one is a note.
+        assert_eq!(claude_start_output("line", ""), "line");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run_with_context(
+            HookEvent::SessionStart,
+            Ok(paths),
+            home.path().to_path_buf(),
+            Box::new(|_| Err("not called".to_string())),
+            None,
+            Some(Box::new(|_, _| Err("the daemon is away".to_string()))),
+            std::io::empty(),
+            &mut out,
+            &mut err,
+        );
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .starts_with("graphersal-memory:")
+        );
+        assert!(
+            String::from_utf8(err)
+                .unwrap()
+                .contains("cannot read the start context")
+        );
+    }
+
+    #[test]
+    fn the_cursor_start_answer_carries_the_start_context_of_its_workspace() {
+        let tmp = crate::mcp_tests::TempDir::new("cursor-ctx");
+        let registry = tmp.path().join("cursor-transcripts.json");
+        let input = serde_json::json!({"cursor_version": "2.6.0", "workspace_roots": ["/w/app"],
+                                       "conversation_id": "c1"})
+        .to_string();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let keep = asked.clone();
+        let fetch: StartFetch = Box::new(move |dir, _| {
+            *keep.lock().unwrap() = dir.map(Path::to_path_buf);
+            Ok(context_of("## About you\n- Me (memory: me)"))
+        });
+        let mut out = Vec::new();
+        run_cursor_with_context(
+            HookEvent::SessionStart,
+            registry,
+            None,
+            None,
+            Some(fetch),
+            std::io::Cursor::new(input.into_bytes()),
+            &mut out,
+            &mut Vec::new(),
+        );
+        let answer: Value = serde_json::from_slice(&out).unwrap();
+        let context = answer["additional_context"].as_str().unwrap();
+        assert!(context.starts_with(CURSOR_START_LINE), "{context}");
+        assert!(context.ends_with("(memory: me)"), "{context}");
+        assert_eq!(*asked.lock().unwrap(), Some(PathBuf::from("/w/app")));
     }
 }

@@ -48,6 +48,7 @@ mod registry;
 mod session_sync;
 mod sessions;
 mod shim;
+mod start_context;
 mod store;
 mod summaries;
 mod tomledit;

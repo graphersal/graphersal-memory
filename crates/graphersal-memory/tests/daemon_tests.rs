@@ -821,3 +821,149 @@ fn a_large_control_answer_is_read_whole() {
     assert!(global.contains("long-note-59"), "{text}");
     close_ok(shim);
 }
+
+// ---- M14: the start context end to end ----
+
+/// A shim of `project` started with the extra environment `env_vars`; its `initialize`
+/// instructions and the shim.
+fn shim_instructions(env: &Env, project: &Path, env_vars: &[(&str, &str)]) -> (String, Shim) {
+    let mut command = env.command();
+    command
+        .arg("mcp")
+        .arg("--project")
+        .arg(project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env_vars {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (lines, from) = channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut shim = Shim {
+        to: child.stdin.take(),
+        from,
+        child,
+        next_id: 1,
+    };
+    let init = shim.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {},
+               "clientInfo": {"name": "test", "version": "1"}}),
+    );
+    shim.notify("notifications/initialized");
+    let instructions = init["result"]["instructions"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    (instructions, shim)
+}
+
+#[test]
+fn the_start_context_reaches_the_instructions_the_cli_and_status() {
+    let env = Env::new("10m");
+    let project = env.root.join("w");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let mut shim = env.shim(&project.display().to_string());
+    shim.ok(
+        "remember",
+        json!({"slug": "ask-before-tests", "kind": "feedback", "summary": "Ask before changing tests",
+               "body": "Changing an existing test needs approval.",
+               "title": "Existing tests need approval", "hook": "ask first"}),
+    );
+    shim.ok(
+        "remember",
+        json!({"slug": "release-fridays", "kind": "project", "summary": "Releases on Fridays",
+               "body": "Fridays.", "scope": "global"}),
+    );
+    shim.ok("pin", json!({"slug": "release-fridays"}));
+    close_ok(shim);
+
+    // A harness we cannot tell: the whole start context in the instructions.
+    let (full, shim) = shim_instructions(&env, &project, &[]);
+    close_ok(shim);
+    assert!(
+        full.contains(
+            "## How to work\n- Existing tests need approval — ask first (memory: ask-before-tests)"
+        ),
+        "{full}"
+    );
+    assert!(
+        full.contains(
+            "## Pinned\n- release-fridays — Releases on Fridays (memory: release-fridays)"
+        ),
+        "{full}"
+    );
+
+    // Claude Code without our hook: cut to its limit; with our hook: left to the hook.
+    let (short, shim) = shim_instructions(&env, &project, &[("CLAUDECODE", "1")]);
+    close_ok(shim);
+    assert!(short.chars().count() <= 4096, "{}", short.len());
+    assert!(short.contains("(memory: ask-before-tests)"), "{short}");
+    let claude = env.root.join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    std::fs::write(
+        claude.join("settings.json"),
+        json!({"hooks": {"SessionStart": [{"hooks": [{"type": "command",
+            "command": "/opt/bin/graphersal-memory hook session-start"}]}]}})
+        .to_string(),
+    )
+    .unwrap();
+    let (hooked, shim) = shim_instructions(&env, &project, &[("CLAUDECODE", "1")]);
+    close_ok(shim);
+    assert!(!hooked.contains("## How to work"), "{hooked}");
+    assert!(hooked.starts_with("graphersal-memory:"), "{hooked}");
+
+    // The command prints exactly the text the agent gets (from a directory in the project).
+    std::fs::create_dir_all(project.join("sub")).unwrap();
+    let output = env
+        .command()
+        .arg("start-context")
+        .arg("--project")
+        .arg(project.join("sub"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(full.ends_with(text.trim_end()), "{text}\n---\n{full}");
+    assert!(
+        text.starts_with("graphersal-memory: the memories that always apply"),
+        "{text}"
+    );
+
+    // status from inside the project.
+    let output = env
+        .command()
+        .arg("status")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    let status = String::from_utf8(output.stdout).unwrap();
+    let line = status
+        .lines()
+        .find(|line| line.trim_start().starts_with("start context:"))
+        .unwrap_or_else(|| panic!("{status}"));
+    assert!(line.contains("start context: 2 memories,"), "{line}");
+    assert!(line.contains(" of 8000 characters"), "{line}");
+    let output = env
+        .command()
+        .arg("doctor")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    let doctor = String::from_utf8(output.stdout).unwrap();
+    assert!(doctor.contains("start context: 2 memories,"), "{doctor}");
+}

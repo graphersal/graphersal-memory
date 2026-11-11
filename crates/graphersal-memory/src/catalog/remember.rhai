@@ -1,4 +1,4 @@
-fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, links, about, scope, project) {
+fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, order, links, about, scope, project) {
     // A project memory needs a project; without one (no project known) it is global.
     let scoped = scope == "project" && project != "";
     let id = if scoped { "memory:" + slug + "@" + project } else { "memory:" + slug };
@@ -17,6 +17,10 @@ fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, links, ab
     if how_to_apply != "" { p.how_to_apply = how_to_apply; }
     if title != "" { p.title = title; }
     if hook != "" { p.hook = hook; }
+    // pinned: true/false sets it; null keeps what the memory has (pinned and order survive a replace).
+    if type_of(pinned) == "bool" { p.pinned = pinned; }
+    // order: a number sets the priority within its group; null keeps what the memory has.
+    if type_of(order) == "i64" { p.order = order; }
     let created = g.v(id).count().next() == 0;
     if created {
         let mx = g.v().has_label("memory").values("index_order").max().to_list();
@@ -42,6 +46,7 @@ fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, links, ab
         } else { missing.push(a); }
     }
     let out = #{slug: slug, scope: if scoped { "project" } else { "global" }, created: created, missing_targets: missing};
+    if type_of(pinned) == "bool" { out.pinned = pinned; }
     if other != "" && g.v(other).count().next() > 0 { out.also_in = if scoped { "global" } else { "project" }; }
     out
 }

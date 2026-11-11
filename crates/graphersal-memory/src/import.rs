@@ -7,7 +7,13 @@
 //!   is `description`; its body is the text below the front matter (a trailing `**Why:**` /
 //!   `**How to apply:**` section is passed as `why` / `how_to_apply`, which `remember` appends
 //!   back); its title and hook come from its `MEMORY.md` line (`- [Title](file.md) — hook`),
-//!   which also gives the order; `[[slug]]` in the body become links.
+//!   which also gives the order; `[[slug]]` in the body become links. A memory listed under a
+//!   `## Pinned` heading of `MEMORY.md` is pinned (loaded into the start of every session,
+//!   `crate::start_context`); moved out of it, it is unpinned at its next import (only when this
+//!   import pinned it: a pin set in the graph stays). The line's position becomes the
+//!   memory's `order`, so the start context and `memories()` keep the `MEMORY.md` order; a
+//!   position the import set before is not sent again, so an order set in the graph stays
+//!   until the line moves.
 //! - The project is the directory the harness ran in: the `cwd` recorded in the project's
 //!   transcripts, else the directory name decoded against the file system (Claude Code names it
 //!   after the path with every other character turned into `-`). The memories get the project
@@ -71,16 +77,23 @@ pub struct MemoryFile {
     pub hook: String,
     /// Its position in `MEMORY.md` (files not listed there come after, by name).
     pub order: usize,
+    /// Whether `MEMORY.md` lists it (then `order` becomes the memory's `order`).
+    pub listed: bool,
     /// The slugs it links to.
     pub links: Vec<String>,
+    /// Whether `MEMORY.md` lists it under `## Pinned`.
+    pub pinned: bool,
     /// The fingerprint of what is imported (the file and its index line).
     pub fingerprint: String,
 }
 
 impl MemoryFile {
-    /// The arguments of `remember` for this memory.
-    pub fn remember_args(&self) -> Value {
+    /// The arguments of `remember` for this memory; `pinned` is `true`, `false` or `null`
+    /// (keep the graph's), `order` a number or `null` (keep the graph's).
+    pub fn remember_args(&self, pinned: Value, order: Value) -> Value {
         json!({
+            "pinned": pinned,
+            "order": order,
             "slug": self.slug,
             "kind": self.kind,
             "summary": self.summary,
@@ -176,9 +189,9 @@ pub fn read_dir(dir: &Path, project: Option<String>) -> MemoryDir {
         files: Vec::new(),
         problems: Vec::new(),
     };
-    let index = std::fs::read_to_string(dir.join("MEMORY.md"))
-        .map(|text| index_lines(&text))
-        .unwrap_or_default();
+    let index_text = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap_or_default();
+    let index = index_lines(&index_text);
+    let pinned = pinned_stems(&index_text);
     let mut paths: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .filter_map(Result::ok)
@@ -212,7 +225,22 @@ pub fn read_dir(dir: &Path, project: Option<String>) -> MemoryDir {
         };
         let entry = index.get(&stem);
         match parse_file(&path, &stem, &text, entry, index.len()) {
-            Ok(file) => {
+            Ok(mut file) => {
+                if entry.is_some() {
+                    // The position is the memory's `order`: a moved line is a change.
+                    file.listed = true;
+                    file.fingerprint = fsutil::fingerprint(
+                        format!("{}\n\u{0}order={}", file.fingerprint, file.order).as_bytes(),
+                    );
+                }
+                if pinned.contains(&stem) {
+                    // Only a pinned file's fingerprint changes: the others keep theirs, so an
+                    // upgrade does not send every file again.
+                    file.pinned = true;
+                    file.fingerprint = fsutil::fingerprint(
+                        format!("{}\n\u{0}pinned", file.fingerprint).as_bytes(),
+                    );
+                }
                 if !seen.insert(file.slug.clone()) {
                     out.problems.push(format!(
                         "{}: another file has the slug {} already; skipped",
@@ -269,6 +297,25 @@ fn index_lines(text: &str) -> BTreeMap<String, IndexEntry> {
             hook,
             position,
         });
+    }
+    out
+}
+
+/// The file stems listed under a `## Pinned` heading of a `MEMORY.md` (up to the next
+/// heading of any level).
+fn pinned_stems(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            let heading = trimmed.trim_start_matches('#').trim();
+            inside = trimmed.starts_with("## ") && heading.eq_ignore_ascii_case("pinned");
+            continue;
+        }
+        if inside {
+            out.extend(index_lines(line).into_keys());
+        }
     }
     out
 }
@@ -332,6 +379,8 @@ fn parse_file(
         hook,
         order,
         links,
+        listed: false,
+        pinned: false,
         fingerprint,
     })
 }
@@ -576,11 +625,47 @@ impl ImportState {
     }
 
     fn record(&mut self, file: &MemoryFile, project: &str) {
-        self.files.insert(
-            file.path.display().to_string(),
-            json!({"fingerprint": file.fingerprint, "slug": file.slug, "project": project,
-                   "imported_at": crate::daemon::now_utc()}),
-        );
+        let mut entry = json!({"fingerprint": file.fingerprint, "slug": file.slug,
+                               "project": project, "imported_at": crate::daemon::now_utc()});
+        if file.pinned {
+            entry["pinned"] = Value::Bool(true);
+        }
+        if file.listed {
+            entry["order"] = Value::from(file.order as u64);
+        }
+        self.files.insert(file.path.display().to_string(), entry);
+    }
+
+    /// The `order` argument of `remember` for `file`: its `MEMORY.md` position when it is
+    /// listed and the line moved since this import last set it (or it never did), else `null`
+    /// (an order set in the graph, by `pin`, stays while the line stays where it was).
+    fn order_arg(&self, file: &MemoryFile) -> Value {
+        if !file.listed {
+            return Value::Null;
+        }
+        let recorded = self
+            .files
+            .get(&file.path.display().to_string())
+            .and_then(|entry| entry["order"].as_u64());
+        if recorded == Some(file.order as u64) {
+            Value::Null
+        } else {
+            Value::from(file.order as u64)
+        }
+    }
+
+    /// The `pinned` argument of `remember` for `file`: `true` under `## Pinned`, `false` when
+    /// this import pinned it before and it moved out, else `null` (the graph's pin stays).
+    fn pinned_arg(&self, file: &MemoryFile) -> Value {
+        let was = self
+            .files
+            .get(&file.path.display().to_string())
+            .is_some_and(|entry| entry["pinned"] == Value::Bool(true));
+        match (file.pinned, was) {
+            (true, _) => Value::Bool(true),
+            (false, true) => Value::Bool(false),
+            (false, false) => Value::Null,
+        }
     }
 
     /// How many files the state lists.
@@ -724,7 +809,12 @@ pub fn apply(
                 report.timed_out = true;
                 break;
             }
-            match caller.call("remember", file.remember_args()) {
+            let pinned = state.pinned_arg(file);
+            let order = state.order_arg(file);
+            match caller.call(
+                "remember",
+                file.remember_args(pinned.clone(), order.clone()),
+            ) {
                 Ok(answer) => {
                     if answer["created"] == Value::Bool(true) {
                         report.created += 1;
@@ -740,7 +830,7 @@ pub fn apply(
                         .map(|m| m.iter().filter_map(Value::as_str).collect())
                         .unwrap_or_default();
                     if missing.iter().any(|slug| written.contains(slug)) {
-                        again.push(*file);
+                        again.push((*file, pinned, order));
                     }
                 }
                 Err(err) => report
@@ -749,12 +839,12 @@ pub fn apply(
             }
         }
         // Links to memories created later in this import resolve on the second call.
-        for file in again {
+        for (file, pinned, order) in again {
             if deadline.is_some_and(|d| Instant::now() >= d) {
                 report.timed_out = true;
                 break;
             }
-            if let Err(err) = caller.call("remember", file.remember_args()) {
+            if let Err(err) = caller.call("remember", file.remember_args(pinned, order)) {
                 report
                     .problems
                     .push(format!("{}: {err}", file.path.display()));
@@ -830,6 +920,51 @@ mod tests {
         assert_eq!(index["no-hook"].hook, "");
         assert_eq!(index["sub"].hook, "dash hook");
         assert_eq!(index["sub"].position, 2);
+    }
+
+    #[test]
+    fn the_pinned_section_lists_its_files_up_to_the_next_heading() {
+        let text = "# Index\n## How to work\n- [A](a.md) — x\n## Pinned\n- [B](b.md) — y\n\
+                    - [C](dir/c.md)\n### Sub heading\n- [D](d.md)\n## pinned\n- [E](e.md)\n";
+        let pinned: Vec<String> = pinned_stems(text).into_iter().collect();
+        assert_eq!(pinned, ["b", "c", "e"]);
+        assert!(pinned_stems("- [A](a.md)\n").is_empty());
+    }
+
+    #[test]
+    fn a_pinned_file_gets_its_own_fingerprint_and_the_others_keep_theirs() {
+        let dir = crate::mcp_tests::TempDir::new("pinned-import");
+        let memory = dir.path().join("memory");
+        std::fs::create_dir_all(&memory).unwrap();
+        std::fs::write(
+            memory.join("a.md"),
+            "---\ndescription: A\ntype: feedback\n---\nA.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            memory.join("b.md"),
+            "---\ndescription: B\ntype: project\n---\nB.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            memory.join("MEMORY.md"),
+            "- [A](a.md) — a\n- [B](b.md) — b\n",
+        )
+        .unwrap();
+        let before = read_dir(&memory, Some("/p".into()));
+        std::fs::write(
+            memory.join("MEMORY.md"),
+            "- [A](a.md) — a\n## Pinned\n- [B](b.md) — b\n",
+        )
+        .unwrap();
+        let after = read_dir(&memory, Some("/p".into()));
+        assert_eq!(before.files[0].fingerprint, after.files[0].fingerprint);
+        assert!(!after.files[0].pinned && after.files[1].pinned);
+        assert_ne!(before.files[1].fingerprint, after.files[1].fingerprint);
+        assert_eq!(
+            after.files[1].remember_args(Value::Bool(true), Value::Null)["pinned"],
+            true
+        );
     }
 
     #[test]

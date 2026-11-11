@@ -10,6 +10,8 @@ directly.
   preferences and rules that hold in every project. Search with memories(text) first, so you
   replace a memory instead of duplicating it. forget(slug) removes one. Write memories here,
   not into the harness's own memory files (such as MEMORY.md).
+- pin(slug) when the user wants a memory always in mind: pinned, feedback and user memories
+  are loaded into the start of every session (shown below when there are any).
 - kinds: user (who the user is), feedback (how the user wants you to work, with the why),
   project (facts and decisions of the work, with the why), reference (where things are).
 - past sessions: sessions(text, k) returns the matching facts (decision with why, user

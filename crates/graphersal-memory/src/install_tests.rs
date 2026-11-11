@@ -3587,3 +3587,454 @@ fn install_refuses_when_no_agent_program_is_found() {
     assert_eq!(setup.installed(), vec![Kind::ClaudeCode]);
     memory.close();
 }
+
+// ---- M14: the start context: pinned import, auto-memory default, hook delivery ----
+
+/// The fixture's `MEMORY.md` with a `## Pinned` section holding the release plan.
+const PINNED_INDEX: &str = "# Index\n\n## How to work\n- [Graph first](graph-first.md) — study the graph first\n\n\
+    ## Pinned\n- [Release plan](release-plan.md) — Fridays only\n";
+
+#[test]
+fn a_pinned_section_is_imported_at_install_and_the_start_context_has_it_at_once() {
+    let home = TempDir::new("pin-home");
+    let data = TempDir::new("pin-data");
+    let work = TempDir::new("pin-work");
+    let project_dir = mcp::canonical(work.path());
+    let memory_dir = memory_fixture(home.path(), &project_dir);
+    std::fs::write(memory_dir.join("MEMORY.md"), PINNED_INDEX).unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let project = project_dir.display().to_string();
+
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    // Claude Code's auto-memory is off: the start context carries the rules instead.
+    assert_eq!(settings_json(&setup)["autoMemoryEnabled"], false);
+    assert!(
+        out.contains("graphersal-memory's start context: 2 memories"),
+        "{out}"
+    );
+    let release = memory.call(&project, "memory", json!({"slug": "release-plan"}));
+    assert_eq!(release["title"], "Release plan");
+    assert_eq!(release["hook"], "Fridays only");
+    // Right after install, without a session in between.
+    let context = memory
+        .runtime
+        .start_context(&project, crate::start_context::DEFAULT_CHARS)
+        .unwrap();
+    assert_eq!(context.total, 2, "{}", context.text);
+    assert!(
+        context
+            .text
+            .contains("## Pinned\n- Release plan — Fridays only (memory: release-plan)"),
+        "{}",
+        context.text
+    );
+    assert!(
+        context.text.contains("(memory: graph-first)"),
+        "{}",
+        context.text
+    );
+
+    // Re-import: an unchanged directory sends nothing.
+    let mut connect = memory.connector();
+    let mut out = Vec::new();
+    crate::commands::run_import(&setup, false, &mut connect, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("0 new, 0 changed, 3 unchanged"), "{out}");
+
+    // A pin set in the graph survives a changed file that MEMORY.md does not pin.
+    memory.call(&project, "pin", json!({"slug": "odd-name"}));
+    std::fs::write(
+        memory_dir.join("Odd_Name.md"),
+        "---\ndescription: still no type\n---\nSomething else.\n",
+    )
+    .unwrap();
+    // The release plan moves out of the Pinned section: it is unpinned.
+    std::fs::write(
+        memory_dir.join("MEMORY.md"),
+        "# Index\n\n## How to work\n- [Graph first](graph-first.md) — study the graph first\n\
+         - [Release plan](release-plan.md) — Fridays only\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    crate::commands::run_import(&setup, false, &mut connect, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("(0 new, 2 updated)"), "{out}");
+    let context = memory
+        .runtime
+        .start_context(&project, crate::start_context::DEFAULT_CHARS)
+        .unwrap();
+    assert!(
+        !context.text.contains("(memory: release-plan)"),
+        "{}",
+        context.text
+    );
+    assert!(
+        context.text.contains("(memory: odd-name)"),
+        "{}",
+        context.text
+    );
+    // And again: nothing.
+    let mut out = Vec::new();
+    crate::commands::run_import(&setup, false, &mut connect, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("0 new, 0 changed, 3 unchanged"), "{out}");
+    drop(connect);
+    memory.close();
+}
+
+#[test]
+fn the_auto_memory_question_says_the_start_context_carries_the_rules() {
+    let home = TempDir::new("am-home");
+    let data = TempDir::new("am-data");
+    let work = TempDir::new("am-work");
+    let project_dir = mcp::canonical(work.path());
+    let memory_dir = memory_fixture(home.path(), &project_dir);
+    std::fs::write(memory_dir.join("MEMORY.md"), PINNED_INDEX).unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            dry_run: true,
+            ..InstallOptions::default()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("autoMemoryEnabled: false"), "{out}");
+    assert!(
+        out.contains(
+            "Your rules and pinned memories still reach every session through \
+             graphersal-memory's start context: 2 memories,"
+        ),
+        "{out}"
+    );
+    memory.close();
+}
+
+#[test]
+fn without_a_start_context_the_auto_memory_stays_on_by_default_with_the_reason() {
+    let home = TempDir::new("am0-home");
+    let data = TempDir::new("am0-data");
+    let setup = setup_in(home.path(), data.path());
+    std::fs::write(
+        data.path().join("config.json"),
+        "{\"version\": 1, \"memory\": {\"start_context_chars\": 0}}\n",
+    )
+    .unwrap();
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            dry_run: true,
+            ..InstallOptions::default()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("kept as it is (auto-memory on)"), "{out}");
+    assert!(
+        out.contains("The default is to keep it on: memory.start_context_chars is 0"),
+        "{out}"
+    );
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert_ne!(settings_json(&setup)["autoMemoryEnabled"], false);
+    memory.close();
+}
+
+#[test]
+fn the_session_start_hook_puts_the_freshly_imported_memories_into_additional_context() {
+    let home = TempDir::new("hctx-home");
+    let data = TempDir::new("hctx-data");
+    let work = TempDir::new("hctx-work");
+    let project_dir = mcp::canonical(work.path());
+    let memory_dir = memory_fixture(home.path(), &project_dir);
+    std::fs::write(memory_dir.join("MEMORY.md"), PINNED_INDEX).unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let runtime = memory.runtime.clone();
+    let fetch: hook::StartFetch =
+        Box::new(move |dir, max| runtime.start_context(&mcp::project_key(None, dir.unwrap()), max));
+    let mut stdout = Vec::new();
+    let code = hook::run_with_context(
+        hook::HookEvent::SessionStart,
+        Ok(setup.paths.clone()),
+        data.path().to_path_buf(),
+        Box::new(memory.connector()),
+        None,
+        Some(fetch),
+        std::io::Cursor::new(
+            json!({"cwd": project_dir.display().to_string()})
+                .to_string()
+                .into_bytes(),
+        ),
+        &mut stdout,
+        &mut Vec::new(),
+    );
+    assert_eq!(code, 0);
+    let answer: Value = serde_json::from_slice(&stdout).unwrap();
+    let context = answer["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        context.contains("Imported 3 new or changed memory files"),
+        "{context}"
+    );
+    assert!(context.contains("(memory: release-plan)"), "{context}");
+    assert!(context.contains("(memory: graph-first)"), "{context}");
+    memory.close();
+}
+
+#[test]
+fn the_start_hook_is_found_in_claude_codes_settings() {
+    let home = TempDir::new("sh-home");
+    let data = TempDir::new("sh-data");
+    let setup = setup_in(home.path(), data.path());
+    assert!(!install::claude_start_hook_installed(&setup.paths));
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(install::claude_start_hook_installed(&setup.paths));
+    memory.close();
+}
+
+#[test]
+fn the_wizard_defaults_the_auto_memory_by_whether_the_start_context_carries_the_rules() {
+    for (budget, off) in [(None, true), (Some(0), false)] {
+        let home = TempDir::new("wam-home");
+        let data = TempDir::new("wam-data");
+        let work = TempDir::new("wam-work");
+        let project_dir = mcp::canonical(work.path());
+        let memory_dir = memory_fixture(home.path(), &project_dir);
+        std::fs::write(memory_dir.join("MEMORY.md"), PINNED_INDEX).unwrap();
+        if let Some(chars) = budget {
+            std::fs::write(
+                data.path().join("config.json"),
+                format!("{{\"version\": 1, \"memory\": {{\"start_context_chars\": {chars}}}}}\n"),
+            )
+            .unwrap();
+        }
+        let setup = setup_in(home.path(), data.path());
+        let memory = Memory::open(data.path());
+        // Language, model, import, auto-memory: Enter (the default); summaries: 2 (no);
+        // develop: 2 (no); Enter applies.
+        let (code, out) = run_wizard(&setup, &memory, "\n3\n\n\n2\n2\n\n");
+        assert_eq!(code, 0, "{out}");
+        let step = out
+            .split("Claude Code's auto-memory")
+            .nth(1)
+            .and_then(|rest| rest.split("Session summaries").next())
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let recap = out
+            .split("Ready to install")
+            .nth(1)
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if off {
+            assert!(
+                step.contains("still reach every session through graphersal-memory's start context: 2 memories"),
+                "{step}"
+            );
+            assert!(recap.contains("Auto-memory"), "{recap}");
+            assert!(recap.contains("switched off. Your rules"), "{recap}");
+            assert_eq!(settings_json(&setup)["autoMemoryEnabled"], false);
+        } else {
+            assert!(
+                step.contains("The default is to keep it on: memory.start_context_chars is 0"),
+                "{step}"
+            );
+            assert!(
+                recap.contains("kept on: memory.start_context_chars is 0"),
+                "{recap}"
+            );
+            assert_ne!(settings_json(&setup)["autoMemoryEnabled"], false);
+        }
+        memory.close();
+    }
+}
+
+#[test]
+fn a_pin_survives_the_round_trip_files_graph_files() {
+    let home = TempDir::new("prt-home");
+    let data = TempDir::new("prt-data");
+    let work = TempDir::new("prt-work");
+    let project_dir = mcp::canonical(work.path());
+    let memory_dir = memory_fixture(home.path(), &project_dir);
+    std::fs::write(memory_dir.join("MEMORY.md"), PINNED_INDEX).unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let project = project_dir.display().to_string();
+    run_install(&setup, &memory, yes());
+    // A pin set in the graph goes out too.
+    memory.call(&project, "pin", json!({"slug": "odd-name"}));
+    let other = TempDir::new("prt-home2");
+    let elsewhere = setup_in(other.path(), data.path());
+    let rows = InProcess(&memory).memories_all();
+    crate::export::write(&elsewhere.agent(), data.path(), &rows).unwrap();
+    let exported_dir = crate::agents::Agent::memory_dir(&elsewhere.agent(), &project_dir);
+    let index = std::fs::read_to_string(exported_dir.join("MEMORY.md")).unwrap();
+    assert!(
+        index.contains("- [Graph first](graph-first.md) — study the graph first\n\n## Pinned\n"),
+        "{index}"
+    );
+    assert!(
+        index.contains("- [Release plan](release-plan.md) — Fridays only\n"),
+        "{index}"
+    );
+    // Read back: the same pins, titles and hooks.
+    let back = import::read_dir(&exported_dir, Some(project.clone()));
+    let pins: Vec<(&str, bool, &str, &str)> = back
+        .files
+        .iter()
+        .map(|f| (f.slug.as_str(), f.pinned, f.title.as_str(), f.hook.as_str()))
+        .collect();
+    assert!(
+        pins.contains(&("release-plan", true, "Release plan", "Fridays only")),
+        "{pins:?}"
+    );
+    assert!(pins.iter().any(|p| p.0 == "odd-name" && p.1), "{pins:?}");
+    assert!(
+        pins.contains(&("graph-first", false, "Graph first", "study the graph first")),
+        "{pins:?}"
+    );
+    // Into a fresh store: pinned there too.
+    let data2 = TempDir::new("prt-data2");
+    let fresh = Memory::open(data2.path());
+    let mut connect = fresh.connector();
+    let mut state = ImportState::default();
+    let plans = import::plan(vec![back], &state);
+    let report = import::apply(&plans, &mut connect, &mut state, data2.path(), None);
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    let context = fresh
+        .runtime
+        .start_context(&project, crate::start_context::DEFAULT_CHARS)
+        .unwrap();
+    for slug in ["release-plan", "odd-name", "graph-first"] {
+        assert!(
+            context.text.contains(&format!("(memory: {slug})")),
+            "{slug}: {}",
+            context.text
+        );
+    }
+    // A MEMORY.md that differs keeps its bytes; a missing pinned line goes under its own
+    // heading, a missing unpinned one never into a Pinned section the file ends with.
+    std::fs::write(
+        exported_dir.join("MEMORY.md"),
+        "# Mine\n## Pinned\n- [Graph first](graph-first.md) — x\n",
+    )
+    .unwrap();
+    crate::export::write(&elsewhere.agent(), data.path(), &rows).unwrap();
+    let kept = std::fs::read_to_string(exported_dir.join("MEMORY.md")).unwrap();
+    assert!(
+        kept.starts_with("# Mine\n## Pinned\n- [Graph first](graph-first.md) — x\n"),
+        "{kept}"
+    );
+    let reread = import::read_dir(&exported_dir, Some(project.clone()));
+    let pinned_of = |slug: &str| reread.files.iter().find(|f| f.slug == slug).unwrap().pinned;
+    assert!(pinned_of("release-plan") && pinned_of("odd-name"), "{kept}");
+    drop(connect);
+    fresh.close();
+    memory.close();
+}
+
+#[test]
+fn an_import_keeps_the_memory_md_order_and_a_graph_order_until_the_line_moves() {
+    let home = TempDir::new("ord-home");
+    let data = TempDir::new("ord-data");
+    let work = TempDir::new("ord-work");
+    let project_dir = mcp::canonical(work.path());
+    let memory_dir = memory_fixture(home.path(), &project_dir);
+    for slug in ["rule-a", "rule-b", "rule-c"] {
+        std::fs::write(
+            memory_dir.join(format!("{slug}.md")),
+            format!(
+                "---\nname: {slug}\ndescription: {slug} summary\ntype: feedback\n---\n\n{slug}.\n"
+            ),
+        )
+        .unwrap();
+    }
+    let index = |order: [&str; 3]| {
+        order
+            .iter()
+            .map(|slug| format!("- [{slug}]({slug}.md) — hook {slug}\n"))
+            .collect::<String>()
+    };
+    std::fs::write(
+        memory_dir.join("MEMORY.md"),
+        index(["rule-a", "rule-b", "rule-c"]),
+    )
+    .unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let project = project_dir.display().to_string();
+    let order_of = |memory: &Memory| -> Vec<String> {
+        let context = memory
+            .runtime
+            .start_context(&project, crate::start_context::DEFAULT_CHARS)
+            .unwrap();
+        let in_context: Vec<String> = context
+            .text
+            .lines()
+            .filter_map(|line| line.split("(memory: ").nth(1))
+            .map(|rest| rest.trim_end_matches(')').to_string())
+            .filter(|slug| slug.starts_with("rule-"))
+            .collect();
+        let listed: Vec<String> = memory
+            .call(&project, "memories", json!({}))
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["slug"].as_str())
+            .filter(|slug| slug.starts_with("rule-"))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(in_context, listed, "start context and memories() agree");
+        listed
+    };
+    let import_now = |memory: &Memory| -> String {
+        let mut connect = memory.connector();
+        let mut out = Vec::new();
+        crate::commands::run_import(&setup, false, &mut connect, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let out = import_now(&memory);
+    assert!(out.contains("6 new"), "{out}");
+    // The MEMORY.md order, not reversed by the import's timestamps.
+    assert_eq!(order_of(&memory), ["rule-a", "rule-b", "rule-c"]);
+    let out = import_now(&memory);
+    assert!(out.contains("0 new, 0 changed, 6 unchanged"), "{out}");
+    // An order set in the graph stays through a re-import of a changed file whose line stayed.
+    memory.call(
+        &project,
+        "pin",
+        json!({"slug": "rule-c", "pinned": false, "order": -1}),
+    );
+    assert_eq!(order_of(&memory), ["rule-c", "rule-a", "rule-b"]);
+    std::fs::write(
+        memory_dir.join("rule-c.md"),
+        "---\nname: rule-c\ndescription: rule-c changed\ntype: feedback\n---\n\nChanged.\n",
+    )
+    .unwrap();
+    let out = import_now(&memory);
+    assert!(out.contains("(0 new, 1 updated)"), "{out}");
+    assert_eq!(order_of(&memory), ["rule-c", "rule-a", "rule-b"]);
+    // Lines moved: the new MEMORY.md order wins.
+    std::fs::write(
+        memory_dir.join("MEMORY.md"),
+        index(["rule-b", "rule-c", "rule-a"]),
+    )
+    .unwrap();
+    import_now(&memory);
+    assert_eq!(order_of(&memory), ["rule-b", "rule-c", "rule-a"]);
+    let out = import_now(&memory);
+    assert!(out.contains("0 new, 0 changed, 6 unchanged"), "{out}");
+    memory.close();
+}

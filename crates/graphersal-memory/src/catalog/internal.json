@@ -106,5 +106,18 @@
         "default": ""
       }
     ]
+  },
+  {
+    "name": "start_context",
+    "description": "Internal (session start): the memories loaded into the start of every session (pinned, feedback, user) of a project and the global ones.",
+    "params": [
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
   }
 ]

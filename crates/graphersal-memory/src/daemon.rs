@@ -779,6 +779,29 @@ impl Daemon {
         Ok(json!({"ok": true, "merged": moved}))
     }
 
+    /// `start_context`: the start context of a project root (`crate::start_context`), within
+    /// `memory.start_context_chars` and the request's `max_chars` (the hooks: what their
+    /// harness takes whole).
+    fn start_context(&self, line: &[u8]) -> Result<serde_json::Value, String> {
+        let request: serde_json::Value =
+            serde_json::from_slice(line).map_err(|err| err.to_string())?;
+        let root = request["project"].as_str().unwrap_or_default();
+        let project = if root.is_empty() {
+            String::new()
+        } else {
+            self.resolve_project(root)
+        };
+        let mut budget = Config::load(&self.options.data_dir)?.start_context_chars();
+        if let Some(max) = request["max_chars"].as_u64() {
+            budget = budget.min(usize::try_from(max).unwrap_or(usize::MAX));
+        }
+        let store = self.store_for(&project)?;
+        let context = store
+            .start_context(&project, budget)
+            .inspect_err(|_| self.check_alive(&store))?;
+        Ok(context.to_json())
+    }
+
     /// `export_memories`: every memory (or one project's and the global ones) with what the
     /// file memory format keeps (`uninstall`, `export --to-files`).
     fn export_memories(&self, line: &[u8]) -> Result<serde_json::Value, String> {
@@ -1040,14 +1063,17 @@ impl Daemon {
             handshake.harness,
             store.name()
         ));
-        let language = Config::load(&self.options.data_dir)
-            .map(|config| config.language())
-            .unwrap_or_default();
+        let config = Config::load(&self.options.data_dir).unwrap_or_default();
+        let connection = mcp::Connection {
+            language: config.language(),
+            start: handshake.start_context,
+            start_chars: config.start_context_chars(),
+        };
         let served = store.serve_with(
             handshake.profile,
             &project,
             Some(&handshake.harness),
-            language,
+            connection,
             &mut reader,
             &mut writer,
         );
@@ -1118,13 +1144,18 @@ impl Daemon {
                 Ok(done) => done.to_string(),
                 Err(err) => protocol::refusal(Refusal::Store, &self.with_log(&err)),
             },
+            "start_context" => match self.start_context(line) {
+                Ok(done) => done.to_string(),
+                Err(err) => protocol::refusal(Refusal::Store, &self.with_log(&err)),
+            },
             // Answered first; `handle` then shuts the daemon down.
             "stop" => json!({"ok": true, "daemon_version": self.options.version}).to_string(),
             other => protocol::refusal(
                 Refusal::BadHandshake,
                 &format!(
                     "unknown control request '{other}' (expected status, stop, index_sessions, \
-                     sessions_status, apply_settings, export_memories or merge_projects)"
+                     sessions_status, apply_settings, export_memories, merge_projects or \
+                     start_context)"
                 ),
             ),
         }

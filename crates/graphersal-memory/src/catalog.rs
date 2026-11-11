@@ -28,29 +28,30 @@ const QUERIES: &str = include_str!("catalog/queries.json");
 const INTERNAL: &str = include_str!("catalog/internal.json");
 
 /// The internal functions, in the order of `catalog/internal.json`.
-pub const INTERNAL_FUNCTIONS: [&str; 6] = [
+pub const INTERNAL_FUNCTIONS: [&str; 7] = [
     "indexed_sessions",
     "index_session",
     "index_turns",
     "set_summary",
     "merge_project",
     "export_memories",
+    "start_context",
 ];
 
 /// The folder of the product's saved queries.
 pub const FOLDER: &str = "memory";
 
 /// The memory functions, in the order of the `use` profile's tool list.
-pub const FUNCTIONS: [&str; 7] = [
-    "memories", "memory", "remember", "forget", "sessions", "session", "recall",
+pub const FUNCTIONS: [&str; 8] = [
+    "memories", "memory", "remember", "forget", "pin", "sessions", "session", "recall",
 ];
 
 /// The functions that declare the `project` parameter, which each MCP connection binds to its
 /// project (`graphersal_mcp::Profile::with_bound_params` binds it for every saved query that
 /// declares it; a test keeps this list and the declarations in step).
 #[cfg(test)]
-pub const PROJECT_BOUND: [&str; 7] = [
-    "memories", "memory", "remember", "forget", "sessions", "session", "recall",
+pub const PROJECT_BOUND: [&str; 8] = [
+    "memories", "memory", "remember", "forget", "pin", "sessions", "session", "recall",
 ];
 
 /// The name of the parameter bound to the connection's project (`crate::mcp`).
@@ -63,6 +64,7 @@ fn body(name: &str) -> Option<&'static str> {
         "memory" => include_str!("catalog/memory.rhai"),
         "remember" => include_str!("catalog/remember.rhai"),
         "forget" => include_str!("catalog/forget.rhai"),
+        "pin" => include_str!("catalog/pin.rhai"),
         "sessions" => include_str!("catalog/sessions.rhai"),
         "session" => include_str!("catalog/session.rhai"),
         "recall" => include_str!("catalog/recall.rhai"),
@@ -72,6 +74,7 @@ fn body(name: &str) -> Option<&'static str> {
         "set_summary" => include_str!("catalog/set_summary.rhai"),
         "merge_project" => include_str!("catalog/merge_project.rhai"),
         "export_memories" => include_str!("catalog/export_memories.rhai"),
+        "start_context" => include_str!("catalog/start_context.rhai"),
         _ => return None,
     })
 }
