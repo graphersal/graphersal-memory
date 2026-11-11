@@ -51,6 +51,11 @@ pub const BATCH_CHARS: usize = 200_000;
 /// change.
 const SUMMARY_ATTEMPTS: u64 = 2;
 
+/// How often one version of a session file is tried before it is skipped: once, then once
+/// more in a later run. A new version of the file, or a new version of this binary (which may
+/// fix the cause), tries again.
+const INDEX_ATTEMPTS: u64 = 2;
+
 /// The state file's format version.
 const FORMAT: u64 = 1;
 
@@ -211,6 +216,8 @@ pub struct Report {
     pub summaries_pending: usize,
     /// Whether the monthly budget stopped the summaries.
     pub budget_reached: bool,
+    /// Session files skipped because this version of them failed [`INDEX_ATTEMPTS`] times.
+    pub failed: usize,
     /// What failed, one line each.
     pub problems: Vec<String>,
 }
@@ -224,7 +231,7 @@ impl Report {
             "unchanged": self.unchanged, "empty": self.empty, "turns": self.turns,
             "summarized": self.summarized, "facts": self.facts,
             "summaries_pending": self.summaries_pending, "budget_reached": self.budget_reached,
-            "problems": self.problems,
+            "failed": self.failed, "problems": self.problems,
         })
     }
 }
@@ -362,6 +369,15 @@ impl State {
         self.files
             .values()
             .filter(|e| e["fingerprint"].is_string() && e["empty"] != true)
+            .count()
+    }
+
+    /// How many session files are skipped because their current version failed to index
+    /// (as recorded; a changed file is tried again).
+    pub fn failed(&self) -> usize {
+        self.files
+            .values()
+            .filter(|e| e["failed"]["attempts"].as_u64().unwrap_or(0) >= INDEX_ATTEMPTS)
             .count()
     }
 
@@ -748,9 +764,22 @@ pub fn run(
             }
             continue;
         }
-        match index_one(
-            &file, size, modified, data_dir, writer, &mut cache, &mut state,
-        ) {
+        let failures = failures_of(&entry, size, modified);
+        if failures >= INDEX_ATTEMPTS {
+            report.failed += 1;
+            continue;
+        }
+        // A panic while indexing one file (a bug) is caught here: the file is recorded as
+        // failed and the run goes on with the next one.
+        let indexed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _doing = crate::daemon::doing(format!("indexing {}", file.display()));
+            crate::daemon::injected_panic("index", &file.display().to_string());
+            index_one(
+                &file, size, modified, data_dir, writer, &mut cache, &mut state,
+            )
+        }))
+        .unwrap_or_else(|_| Err("indexing it panicked (a bug, logged)".to_string()));
+        match indexed {
             Ok(Indexed::Empty) => report.empty += 1,
             Ok(Indexed::Unchanged { summarized }) => {
                 report.unchanged += 1;
@@ -763,7 +792,19 @@ pub fn run(
                 report.turns += turns;
                 to_summarize.push(file.clone());
             }
-            Err(err) => report.problems.push(err),
+            Err(err) => {
+                record_failure(&mut state, &file, size, modified, failures + 1);
+                let shown = file.display().to_string();
+                let err = if err.starts_with(&shown) {
+                    err
+                } else {
+                    format!("{shown}: {err}")
+                };
+                report.problems.push(format!(
+                    "{err} (attempt {} of {INDEX_ATTEMPTS})",
+                    failures + 1
+                ));
+            }
         }
         if let Err(err) = state.save(data_dir) {
             report.problems.push(err);
@@ -781,7 +822,17 @@ pub fn run(
                 break;
             }
             report.done += 1;
-            match summarize_one(&file, data_dir, writer, summarizer, &mut state) {
+            let summarized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _doing = crate::daemon::doing(format!("summarizing {}", file.display()));
+                summarize_one(&file, data_dir, writer, summarizer, &mut state)
+            }))
+            .unwrap_or_else(|_| {
+                Err(Refused::Failed(format!(
+                    "{}: summarizing it panicked (a bug, logged)",
+                    file.display()
+                )))
+            });
+            match summarized {
                 Ok(Summarized::Done { facts }) => {
                     report.summarized += 1;
                     report.facts += facts;
@@ -808,6 +859,33 @@ pub fn run(
     report.phase = "done".into();
     progress(&report);
     report
+}
+
+/// How often the current version (`size`, `modified`) of a session file failed under this
+/// binary's version.
+fn failures_of(entry: &Value, size: u64, modified: u64) -> u64 {
+    let failed = &entry["failed"];
+    if failed["size"].as_u64() == Some(size)
+        && failed["mtime"].as_u64() == Some(modified)
+        && failed["version"].as_str() == Some(crate::protocol::VERSION)
+    {
+        failed["attempts"].as_u64().unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+/// Records a failed attempt at a session file's current version (the entry's other fields,
+/// from an earlier version that was indexed, stay; a later success replaces the entry).
+fn record_failure(state: &mut State, file: &Path, size: u64, modified: u64, attempts: u64) {
+    let slot = state.entry_mut(file);
+    if !slot.is_object() {
+        *slot = json!({});
+    }
+    slot["failed"] = json!({
+        "size": size, "mtime": modified, "version": crate::protocol::VERSION,
+        "attempts": attempts, "at": crate::daemon::now_utc(),
+    });
 }
 
 enum Indexed {
@@ -1242,6 +1320,158 @@ mod tests {
         let report = index(&request(&projects), data.path(), &mut store);
         assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
         assert!(report.problems[0].contains("project directory is not known"));
+    }
+
+    /// Text that broke the engine (graphersal-session 0.6.0 cut a script inside a multi-byte
+    /// character before its last `(`): Cyrillic, an emoji and a no-break space each right
+    /// before an unbalanced parenthesis inside a string.
+    const AWKWARD: &str = "Готово: релиз проверен 🎉, see (draft — е(1 and \u{a0}(x 🎉(";
+
+    /// [`AWKWARD`] as the content of a JSON string (no quotes).
+    fn awkward_json() -> String {
+        let quoted = serde_json::to_string(AWKWARD).unwrap();
+        quoted[1..quoted.len() - 1].to_string()
+    }
+
+    /// Claude Code's fixture with non-ASCII turns and title is indexed whole. Passes only with
+    /// the engine fix of graphersal main 2b2a148c (graphersal 0.6.1).
+    #[test]
+    fn non_ascii_claude_code_turns_are_indexed_whole() {
+        let tmp = crate::mcp_tests::TempDir::new("sess-utf8");
+        let data = crate::mcp_tests::TempDir::new("sess-utf8-data");
+        let (projects, _, file) = setup(tmp.path());
+        let text = std::fs::read_to_string(&file)
+            .unwrap()
+            .replace("Add a cache to the parser.", &awkward_json());
+        std::fs::write(&file, text).unwrap();
+        let mut store = Direct::new();
+        let report = index(&request(&projects), data.path(), &mut store);
+        assert_eq!(report.problems, Vec::<String>::new());
+        assert_eq!(report.indexed, 1);
+        let user = store.query("g.v(\"turn:abc:0\").values(\"user\").next()");
+        assert!(
+            user[0].as_str().unwrap_or_default().starts_with(AWKWARD),
+            "{user}"
+        );
+    }
+
+    /// opencode's fixture database with non-ASCII parts and title is indexed whole. Passes only
+    /// with the engine fix of graphersal main 2b2a148c (graphersal 0.6.1).
+    #[test]
+    fn non_ascii_opencode_turns_are_indexed_whole() {
+        let tmp = crate::mcp_tests::TempDir::new("oc-utf8");
+        let data = crate::mcp_tests::TempDir::new("oc-utf8-data");
+        let (db, _) = opencode_setup(tmp.path());
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute(
+            "UPDATE part SET data = replace(data, 'Add a cache to the parser.', ?1)",
+            [awkward_json()],
+        )
+        .unwrap();
+        c.execute(
+            "UPDATE session SET title = ?1 WHERE id = 'ses_abc'",
+            [format!("Кэш е({AWKWARD}")],
+        )
+        .unwrap();
+        drop(c);
+        let mut store = Direct::new();
+        let report = index(&opencode_request(&db), data.path(), &mut store);
+        assert_eq!(report.problems, Vec::<String>::new());
+        assert_eq!(report.indexed, 1);
+        assert_eq!(
+            store.query("g.v(\"session:ses_abc\").values(\"name\").next()"),
+            json!([format!("Кэш е({AWKWARD}")])
+        );
+        let user = store.query("g.v(\"turn:ses_abc:0\").values(\"user\").next()");
+        assert!(
+            user[0].as_str().unwrap_or_default().contains(AWKWARD),
+            "{user}"
+        );
+    }
+
+    /// A writer that panics on the session `poisoned` (a bug in a store call).
+    struct Panicking {
+        inner: Direct,
+        poisoned: String,
+    }
+
+    impl Writer for Panicking {
+        fn call(&mut self, project: &str, name: &str, args: Value) -> Result<Value, String> {
+            if args.to_string().contains(&self.poisoned) {
+                panic!("a bug while writing");
+            }
+            self.inner.call(project, name, args)
+        }
+    }
+
+    /// A panic while indexing one file is recorded; the run goes on with the next file; the
+    /// file is tried once more in a later run and then skipped until it changes.
+    #[test]
+    fn a_failing_session_file_is_skipped_after_one_retry_and_the_rest_is_indexed() {
+        let tmp = crate::mcp_tests::TempDir::new("sess-fail");
+        let data = crate::mcp_tests::TempDir::new("sess-fail-data");
+        let (projects, _, file) = setup(tmp.path());
+        let bad = file.with_file_name("bad.jsonl");
+        std::fs::copy(&file, &bad).unwrap();
+        let mut writer = Panicking {
+            inner: Direct::new(),
+            poisoned: "session:bad".to_string(),
+        };
+        let run_once = |writer: &mut Panicking| {
+            run(
+                &request(&projects),
+                data.path(),
+                writer,
+                None,
+                &mut |_| {},
+                &|| false,
+            )
+        };
+        let first = run_once(&mut writer);
+        assert_eq!(first.indexed, 1, "{:?}", first.problems);
+        assert_eq!(first.problems.len(), 1, "{:?}", first.problems);
+        assert!(
+            first.problems[0].contains("bad.jsonl"),
+            "{:?}",
+            first.problems
+        );
+        assert!(
+            first.problems[0].contains("panicked"),
+            "{:?}",
+            first.problems
+        );
+        assert!(
+            first.problems[0].contains("attempt 1 of 2"),
+            "{:?}",
+            first.problems
+        );
+        let second = run_once(&mut writer);
+        assert!(
+            second.problems[0].contains("attempt 2 of 2"),
+            "{:?}",
+            second.problems
+        );
+        let third = run_once(&mut writer);
+        assert_eq!(
+            (third.problems.len(), third.failed),
+            (0, 1),
+            "{:?}",
+            third.problems
+        );
+        let state = State::load_for(data.path(), Kind::ClaudeCode).unwrap();
+        assert_eq!((state.indexed(), state.failed()), (1, 1));
+        // A new version of the file is tried again (and indexed once the bug is gone).
+        writer.poisoned = "no-such-session".to_string();
+        std::fs::write(
+            &bad,
+            format!("{}\n", std::fs::read_to_string(&file).unwrap()),
+        )
+        .unwrap();
+        let fourth = run_once(&mut writer);
+        assert_eq!(fourth.problems, Vec::<String>::new());
+        assert_eq!(fourth.indexed, 1);
+        let state = State::load_for(data.path(), Kind::ClaudeCode).unwrap();
+        assert_eq!((state.indexed(), state.failed()), (2, 0));
     }
 
     /// A fake `claude`: records its arguments and prompt, answers a canned summary with a cost.

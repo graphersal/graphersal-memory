@@ -258,7 +258,7 @@ fn install_downloads_the_model_and_a_failed_download_keeps_the_builtin_embedder(
     let (code, out) = install_with_model(&setup, "acme/tiny");
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("downloaded acme/tiny"), "{out}");
-    assert!(out.contains("licence mit"), "{out}");
+    assert!(out.contains("licence MIT"), "{out}");
     assert_eq!(
         crate::config::Config::load(data.path())
             .unwrap()
@@ -266,7 +266,12 @@ fn install_downloads_the_model_and_a_failed_download_keeps_the_builtin_embedder(
             .as_deref(),
         Some("acme/tiny")
     );
-    let status = install::status_lines(&setup).join("\n");
+    let status = [
+        install::status_lines(&setup),
+        install::shared_status_lines(&setup),
+    ]
+    .concat()
+    .join("\n");
     assert!(status.contains("embedding model: acme/tiny ("), "{status}");
     let doctor = install::doctor(&setup);
     assert!(

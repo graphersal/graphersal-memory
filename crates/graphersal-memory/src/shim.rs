@@ -225,12 +225,19 @@ fn keep_std_handles_from_children() {
     }
 }
 
-/// Sends one line and reads the one-line answer as JSON.
+/// The longest one-line answer read from the daemon: a control answer can be large (the
+/// `export_memories` answer carries every memory), so it is not held to the handshake's 64 KiB.
+pub const MAX_ANSWER_BYTES: usize = 256 * 1024 * 1024;
+
+/// Sends one line and reads the one-line answer as JSON. An answer that is missing, cut off or
+/// not JSON means the daemon failed: the error names its `log`.
 fn exchange(
     stream: &Stream,
     line: &str,
     timeout: Duration,
+    log: &Path,
 ) -> Result<(Value, BufReader<Stream>), String> {
+    let failed = |what: &str| format!("the daemon failed: {what}; see {}", log.display());
     let mut writer = stream
         .try_clone()
         .map_err(|err| format!("cannot use the daemon's socket: {err}"))?;
@@ -238,25 +245,31 @@ fn exchange(
         .write_all(line.as_bytes())
         .and_then(|()| writer.write_all(b"\n"))
         .and_then(|()| writer.flush())
-        .map_err(|err| format!("cannot talk to the daemon: {err}"))?;
+        .map_err(|err| failed(&format!("cannot send it the request ({err})")))?;
     let reader = stream
         .try_clone()
         .map_err(|err| format!("cannot use the daemon's socket: {err}"))?;
     let _ = reader.set_read_timeout(Some(timeout));
     let mut reader = BufReader::new(reader);
     let mut answer = Vec::new();
-    let limit = u64::try_from(protocol::MAX_HANDSHAKE_BYTES).unwrap_or(u64::MAX);
+    let limit = u64::try_from(MAX_ANSWER_BYTES).unwrap_or(u64::MAX);
     (&mut reader)
         .take(limit)
         .read_until(b'\n', &mut answer)
-        .map_err(|err| format!("the daemon did not answer: {err}"))?;
+        .map_err(|err| {
+            failed(&format!(
+                "it did not answer within {}s ({err})",
+                timeout.as_secs()
+            ))
+        })?;
     let _ = reader.get_ref().set_read_timeout(None);
     if answer.is_empty() {
-        return Err("the daemon closed the connection without an answer".to_string());
+        return Err(failed("it closed the connection without an answer"));
     }
-    let value = serde_json::from_slice(&answer).map_err(|_| {
-        "the daemon's answer is not JSON (another program on the socket?)".to_string()
-    })?;
+    if answer.last() != Some(&b'\n') {
+        return Err(failed("its answer ended before the end of the line"));
+    }
+    let value = serde_json::from_slice(&answer).map_err(|_| failed("its answer is not JSON"))?;
     Ok((value, reader))
 }
 
@@ -264,7 +277,12 @@ fn exchange(
 /// is started when none runs; its one-line answer.
 pub fn request(location: &DaemonLocation, line: &Value) -> Result<Value, String> {
     let stream = connect_or_start(location)?;
-    let (answer, _) = exchange(&stream, &line.to_string(), location.start_timeout)?;
+    let (answer, _) = exchange(
+        &stream,
+        &line.to_string(),
+        location.start_timeout,
+        &location.log_file(),
+    )?;
     Ok(answer)
 }
 
@@ -273,7 +291,12 @@ pub fn request_running(run_dir: &Path, line: &Value) -> Result<Option<Value>, St
     let Ok(stream) = ipc::connect(run_dir) else {
         return Ok(None);
     };
-    let (answer, _) = exchange(&stream, &line.to_string(), START_TIMEOUT)?;
+    let (answer, _) = exchange(
+        &stream,
+        &line.to_string(),
+        START_TIMEOUT,
+        &run_dir.join(ipc::LOG_FILE),
+    )?;
     Ok(Some(answer))
 }
 
@@ -282,7 +305,12 @@ pub fn control(run_dir: &Path, request: &str) -> Result<Option<Value>, String> {
     let Ok(stream) = ipc::connect(run_dir) else {
         return Ok(None);
     };
-    let (answer, _) = exchange(&stream, &protocol::control_line(request), START_TIMEOUT)?;
+    let (answer, _) = exchange(
+        &stream,
+        &protocol::control_line(request),
+        START_TIMEOUT,
+        &run_dir.join(ipc::LOG_FILE),
+    )?;
     Ok(Some(answer))
 }
 
@@ -314,7 +342,12 @@ pub fn open(options: &ShimOptions) -> Result<(Stream, BufReader<Stream>), String
     loop {
         attempt += 1;
         let stream = connect_or_start(&options.location)?;
-        let (answer, reader) = exchange(&stream, &handshake, options.location.start_timeout)?;
+        let (answer, reader) = exchange(
+            &stream,
+            &handshake,
+            options.location.start_timeout,
+            &options.location.log_file(),
+        )?;
         if answer["ok"] == Value::Bool(true) {
             return Ok((stream, reader));
         }

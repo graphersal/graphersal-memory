@@ -43,6 +43,18 @@ pub(crate) fn setup_in(home: &Path, data: &Path) -> Setup {
     }
 }
 
+/// `setup` with fake programs `names` on its search path (empty files: found, never run), as
+/// on a machine where those harnesses are installed.
+pub(crate) fn with_programs(mut setup: Setup, names: &[&str]) -> Setup {
+    let bin = setup.run_dir.with_extension("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in names {
+        std::fs::write(bin.join(name), "").unwrap();
+    }
+    setup.search_path = Some(bin.into_os_string());
+    setup
+}
+
 /// A run directory short enough for a socket path (never created by these tests unless a
 /// daemon would start, which they do not).
 fn short_run_dir() -> PathBuf {
@@ -235,7 +247,7 @@ fn install_then_uninstall_leaves_existing_files_byte_identical() {
         rules.starts_with("# My rules\n\nBe brief.\n\n<!-- graphersal-memory:begin"),
         "{rules}"
     );
-    assert!(out.contains("backup:"), "{out}");
+    assert!(out.contains("(backed up)"), "{out}");
     assert!(crate::config::path(data.path()).exists());
 
     let (code, out) = run_uninstall(&setup, uninstall_yes());
@@ -975,7 +987,7 @@ fn the_wizard_asks_each_step_and_its_answers_change_what_install_does() {
         "Step 4 of 7 \u{b7} Claude Code's auto-memory",
         "Step 5 of 7 \u{b7} Session summaries",
         "Step 6 of 7 \u{b7} The develop server",
-        "Step 7 of 7 \u{b7} Summary",
+        "Step 7 of 7 \u{b7} Ready to install",
     ] {
         assert!(out.contains(step), "{step}\n{out}");
     }
@@ -984,7 +996,9 @@ fn the_wizard_asks_each_step_and_its_answers_change_what_install_does() {
     assert!(out.contains("100+ languages, ~530 MB, MIT"), "{out}");
     assert!(out.contains("not meaning; weaker search"), "{out}");
     assert!(out.contains("Please type a number from 1 to 2"), "{out}");
-    assert!(out.matches(install::NOTHING_IS_LOST).count() >= 2, "{out}");
+    // Asked in step 4 (wrapped there) and repeated in the recap of the last step.
+    let recap = out.split("Ready to install").nth(1).unwrap_or_default();
+    assert!(recap.contains(install::NOTHING_IS_LOST), "{out}");
     // The answers took effect.
     let config = crate::config::Config::load(data.path()).unwrap();
     assert_eq!(config.language, Some(crate::language::Language::Any));
@@ -999,7 +1013,12 @@ fn the_wizard_asks_each_step_and_its_answers_change_what_install_does() {
     let rules = read(&setup.paths.instructions);
     assert!(rules.contains(install::RULE_BLOCK_ANY), "{rules}");
     assert!(out.contains("imported 3 memories"), "{out}");
-    let status = install::status_lines(&setup).join("\n");
+    let status = [
+        install::status_lines(&setup),
+        install::shared_status_lines(&setup),
+    ]
+    .concat()
+    .join("\n");
     assert!(status.contains("memory language: any language"), "{status}");
     assert!(
         status.contains("rule block") && status.contains(": installed"),
@@ -1762,7 +1781,7 @@ fn both_harnesses_share_one_store_and_the_wizard_asks_which_agents() {
     existing_home(home.path());
     existing_opencode_home(home.path());
     let before = snapshot(home.path());
-    let setup = setup_in(home.path(), data.path());
+    let setup = with_programs(setup_in(home.path(), data.path()), &["claude", "opencode"]);
     assert_eq!(setup.detected(), vec![Kind::ClaudeCode, Kind::OpenCode]);
     let memory = Memory::open(data.path());
     // Steps: agents, language, model, auto-memory, summaries, develop, summary.
@@ -1774,7 +1793,7 @@ fn both_harnesses_share_one_store_and_the_wizard_asks_which_agents() {
         "{out}"
     );
     assert!(
-        out.contains("graphersal-memory install (Claude Code, opencode)"),
+        out.contains("graphersal-memory install (Claude Code and opencode)"),
         "{out}"
     );
     assert_eq!(setup.installed(), vec![Kind::ClaudeCode, Kind::OpenCode]);
@@ -1789,15 +1808,15 @@ fn both_harnesses_share_one_store_and_the_wizard_asks_which_agents() {
     );
     let status = crate::commands::status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
     assert!(
-        status.contains("Claude Code (user configuration"),
+        status.contains("Claude Code:\n  user configuration:"),
         "{status}"
     );
-    assert!(status.contains("opencode (configuration"), "{status}");
+    assert!(status.contains("opencode:\n  configuration:"), "{status}");
     // Uninstall without --harness removes both.
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 0, "{out}");
     assert!(
-        out.contains("graphersal-memory uninstall (Claude Code, opencode)"),
+        out.contains("graphersal-memory uninstall (Claude Code and opencode)"),
         "{out}"
     );
     assert_eq!(snapshot(home.path()), before, "{out}");
@@ -1805,13 +1824,13 @@ fn both_harnesses_share_one_store_and_the_wizard_asks_which_agents() {
 
     // Only opencode chosen in the wizard: no Claude Code question, nothing written there.
     let data = TempDir::new("both2-data");
-    let setup = setup_in(home.path(), data.path());
+    let setup = with_programs(setup_in(home.path(), data.path()), &["claude", "opencode"]);
     let memory = Memory::open(data.path());
     // Steps: agents (3 = opencode only), language, model, auto-memory (still asked: Claude
     // Code was possible), summaries, develop, summary.
     let (code, out) = run_wizard(&setup, &memory, "3\n\n3\n\n2\n2\n\n");
     assert_eq!(code, 0, "{out}");
-    assert!(out.contains("This is what install will do"), "{out}");
+    assert!(out.contains("Ready to install"), "{out}");
     assert!(
         !setup.paths.settings.exists()
             || read(&setup.paths.settings) == read_before(&before, ".claude/settings.json")
@@ -1865,7 +1884,13 @@ fn opencode_uninstall_exports_every_memory_as_markdown_and_deletes_nothing() {
         .path()
         .join("graphersal-memory-export")
         .join("opencode");
-    assert!(out.contains(&export.display().to_string()), "{out}");
+    assert!(
+        out.contains(&crate::install::tilde(
+            &export.display().to_string(),
+            home.path()
+        )),
+        "{out}"
+    );
     assert!(out.contains("opencode has no file memory"), "{out}");
     let dir = export.join(crate::import::claude_slug(&project));
     assert!(read(&dir.join("use-pnpm.md")).contains("use-pnpm body"));
@@ -2227,6 +2252,15 @@ fn codex_is_detected_by_its_home_and_exported_as_markdown() {
     let setup = setup_in(home.path(), data.path());
     assert!(!setup.detected().contains(&Kind::Codex));
     std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+    // Its home alone is a leftover, not offered; its program makes it found.
+    assert!(!setup.detected().contains(&Kind::Codex));
+    assert!(
+        setup
+            .leftovers()
+            .iter()
+            .any(|(kind, _)| *kind == Kind::Codex)
+    );
+    let setup = with_programs(setup, &["codex"]);
     assert!(setup.detected().contains(&Kind::Codex));
     let agent = setup.agent_of(Kind::Codex);
     assert!(!crate::agents::Agent::has_file_memory(agent.as_ref()));
@@ -2590,6 +2624,15 @@ fn cursor_is_detected_by_its_home_status_and_doctor_name_its_parts() {
     let setup = setup_in(home.path(), data.path());
     assert!(!setup.detected().contains(&Kind::Cursor));
     std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    // Its home alone is a leftover, not offered; its program makes it found.
+    assert!(!setup.detected().contains(&Kind::Cursor));
+    assert!(
+        setup
+            .leftovers()
+            .iter()
+            .any(|(kind, _)| *kind == Kind::Cursor)
+    );
+    let setup = with_programs(setup, &["cursor"]);
     assert!(setup.detected().contains(&Kind::Cursor));
     let lines = crate::cursor::install::status_lines(&setup).join("\n");
     assert!(lines.contains("Not installed: run `graphersal-memory install --harness cursor`"));
@@ -2668,7 +2711,13 @@ fn cursor_uninstall_exports_every_memory_as_markdown() {
     );
     assert_eq!(code, 0, "{out}");
     let export = home.path().join("graphersal-memory-export").join("cursor");
-    assert!(out.contains(&export.display().to_string()), "{out}");
+    assert!(
+        out.contains(&crate::install::tilde(
+            &export.display().to_string(),
+            home.path()
+        )),
+        "{out}"
+    );
     assert!(out.contains("Cursor has no file memory"), "{out}");
     assert!(out.contains("~/.cursor/rules"), "{out}");
     let dir = export.join(crate::import::claude_slug(&project));
@@ -2686,7 +2735,7 @@ fn the_wizard_lists_cursor_among_the_detected_agents() {
     let data = TempDir::new("cu-wiz-data");
     std::fs::create_dir_all(home.path().join(".claude")).unwrap();
     std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
-    let setup = setup_in(home.path(), data.path());
+    let setup = with_programs(setup_in(home.path(), data.path()), &["claude", "cursor"]);
     assert_eq!(setup.detected(), vec![Kind::ClaudeCode, Kind::Cursor]);
     let memory = Memory::open(data.path());
     // Which agents: 3 (Cursor only); language: Enter; model: 3 (built-in); auto-memory (asked
@@ -2701,7 +2750,7 @@ fn the_wizard_lists_cursor_among_the_detected_agents() {
         out.contains("Step 5 of 6 \u{b7} The develop server"),
         "{out}"
     );
-    assert!(out.contains("Step 6 of 6 \u{b7} Summary"), "{out}");
+    assert!(out.contains("Step 6 of 6 \u{b7} Ready to install"), "{out}");
     assert!(out.contains("Cursor only"), "{out}");
     assert!(
         out.contains("Cursor's own CLI is not used for summaries"),
@@ -3069,4 +3118,404 @@ fn the_shim_and_the_hook_import_the_same_files_once() {
     assert!(!String::from_utf8(stdout).unwrap().contains("Imported"));
     drop(connect);
     memory.close();
+}
+
+// ---- M13: detection by program, the plan in sections, the recap, the report, status ----
+
+/// A harness whose configuration is here but whose program is not is reported, never offered
+/// or preselected (here: Codex's home left over, Claude Code installed).
+#[test]
+fn a_harness_with_only_leftover_configuration_is_not_offered() {
+    let home = TempDir::new("m13-left-home");
+    let data = TempDir::new("m13-left-data");
+    existing_home(home.path());
+    existing_codex_home(home.path());
+    let setup = with_programs(setup_in(home.path(), data.path()), &["claude"]);
+    assert_eq!(setup.detected(), vec![Kind::ClaudeCode]);
+    assert_eq!(
+        setup.leftovers(),
+        vec![(Kind::Codex, home.path().join(".codex"))]
+    );
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            dry_run: true,
+            ..InstallOptions::default()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with("graphersal-memory install (Claude Code)\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "note: Codex: configuration found (~/.codex), but the program `codex` is not \
+             installed: not offered (`--harness codex` installs anyway)"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("\nCodex\n"), "{out}");
+    // The wizard does not ask which agents: one is found.
+    let (code, out) = run_wizard(&setup, &memory, "\n\n3\n\n\n2\n2\nn\n");
+    assert_eq!(code, 1, "{out}");
+    assert!(!out.contains("Which agents"), "{out}");
+    assert!(out.contains("not offered"), "{out}");
+    memory.close();
+}
+
+/// A program outside `PATH` in its known install location counts: opencode's
+/// `~/.opencode/bin/opencode`, Claude Code's `~/.local/bin/claude` and `~/.claude/local/claude`.
+#[test]
+fn a_program_in_its_known_location_outside_path_is_offered() {
+    let home = TempDir::new("m13-known-home");
+    let data = TempDir::new("m13-known-data");
+    let setup = setup_in(home.path(), data.path());
+    assert_eq!(setup.detected(), Vec::<Kind>::new());
+    std::fs::create_dir_all(home.path().join(".opencode/bin")).unwrap();
+    std::fs::write(home.path().join(".opencode/bin/opencode"), "").unwrap();
+    assert_eq!(setup.detected(), vec![Kind::OpenCode]);
+    std::fs::create_dir_all(home.path().join(".local/bin")).unwrap();
+    std::fs::write(home.path().join(".local/bin/claude"), "").unwrap();
+    assert_eq!(setup.detected(), vec![Kind::ClaudeCode, Kind::OpenCode]);
+    std::fs::remove_file(home.path().join(".local/bin/claude")).unwrap();
+    std::fs::create_dir_all(home.path().join(".claude/local")).unwrap();
+    std::fs::write(home.path().join(".claude/local/claude"), "").unwrap();
+    assert_eq!(
+        setup.program(Kind::ClaudeCode),
+        Some(home.path().join(".claude/local/claude"))
+    );
+    std::fs::create_dir_all(home.path().join("Applications/Cursor.app")).unwrap();
+    assert!(setup.detected().contains(&Kind::Cursor));
+}
+
+/// `--harness codex` installs although Codex's program is missing, after a warning; uninstall
+/// then removes it again (the program is not needed to clean up), and status shows it.
+#[test]
+fn harness_override_warns_and_uninstall_works_without_the_program() {
+    let home = TempDir::new("m13-over-home");
+    let data = TempDir::new("m13-over-data");
+    existing_codex_home(home.path());
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), data.path());
+    assert!(setup.program(Kind::Codex).is_none());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, codex_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains(
+            "warning: Codex's program `codex` is not found (not on PATH, not in its usual \
+             places); installing anyway because --harness names it"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("note: Codex: configuration found"), "{out}");
+    assert_eq!(setup.installed(), vec![Kind::Codex]);
+    let status = crate::commands::status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
+    assert!(
+        status.contains("\nCodex:\n  configuration: ~/.codex/config.toml"),
+        "{status}"
+    );
+    // Uninstall without --harness: the installed harness, whether its program exists or not.
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with("graphersal-memory uninstall (Codex)\n"),
+        "{out}"
+    );
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    memory.close();
+}
+
+/// The plan of a dry run: one parenthesis per line, names joined with "and", the CLAUDE.md
+/// sentence, the steps in sections (shared, one per agent, then import and indexing).
+#[test]
+fn the_plan_is_grouped_by_agent_with_plain_wording() {
+    let home = TempDir::new("m13-plan-home");
+    let data = TempDir::new("m13-plan-data");
+    existing_home(home.path());
+    existing_opencode_home(home.path());
+    existing_codex_home(home.path());
+    let setup = with_programs(
+        setup_in(home.path(), data.path()),
+        &["claude", "opencode", "codex"],
+    );
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            dry_run: true,
+            ..InstallOptions::default()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with("graphersal-memory install (Claude Code, opencode and Codex)\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("- Claude Code, opencode and Codex (one store"),
+        "{out}"
+    );
+    assert!(!out.contains(" and opencode and "), "{out}");
+    assert!(
+        out.contains(
+            "- English only (stored and searched in English); written into the MCP \
+             instructions, the rule block and memory.language in config.json\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("CLAUDE.md keeps working as before (Claude Code still loads it)"),
+        "{out}"
+    );
+    let headings: Vec<&str> = out
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with(' '))
+        .collect();
+    assert_eq!(
+        headings[1..],
+        [
+            "Dry run: this is what install would do (nothing is changed).",
+            "Shared by every agent",
+            "Claude Code",
+            "opencode",
+            "Codex",
+            "Then, after the files are written",
+        ],
+        "{out}"
+    );
+    // Each section is set off by a blank line, the numbers run on across them.
+    for heading in &headings[2..] {
+        assert!(
+            out.contains(&format!("\n\n{heading}\n")),
+            "{heading}\n{out}"
+        );
+    }
+    assert!(
+        out.contains("\n\nClaude Code\n  5. Register the MCP servers"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Import Claude Code's existing file memory"),
+        "{out}"
+    );
+    let then = out
+        .split("Then, after the files are written")
+        .nth(1)
+        .unwrap();
+    assert!(
+        then.contains("Import Claude Code's existing file memory"),
+        "{out}"
+    );
+    assert!(then.contains("Index past sessions"), "{out}");
+    // The home directory is `~`.
+    assert!(out.contains("~/.claude.json"), "{out}");
+    assert!(!out.contains(&home.path().display().to_string()), "{out}");
+    memory.close();
+}
+
+/// The wizard's last step is a short recap with what must not be skipped; `d` shows every
+/// change, Enter installs.
+#[test]
+fn the_wizard_ends_with_a_short_recap_and_d_shows_every_change() {
+    let home = TempDir::new("m13-recap-home");
+    let data = TempDir::new("m13-recap-data");
+    existing_home(home.path());
+    existing_codex_home(home.path());
+    let setup = with_programs(setup_in(home.path(), data.path()), &["claude", "codex"]);
+    let memory = Memory::open(data.path());
+    // Agents: Enter (all); language: Enter; model: 3 (built-in); auto-memory: Enter (off);
+    // summaries: 2; develop: 2; then d (every change), then Enter (install).
+    let (code, out) = run_wizard(&setup, &memory, "\n\n3\n\n2\n2\nd\n\n");
+    assert_eq!(code, 0, "{out}");
+    let recap = out.split("Ready to install").nth(1).unwrap();
+    let recap = recap
+        .split("Install? [Y/n, d = show every change]")
+        .next()
+        .unwrap();
+    for line in [
+        "  Agents: Claude Code and Codex\n",
+        "  Memory language: English only (stored and searched in English)\n",
+        "  Embedding model: the built-in hash-ngram/1 (no download)\n",
+        "  File memory: nothing new to import\n",
+        "  Summaries: off\n",
+    ] {
+        assert!(recap.contains(line), "{line}\n{recap}");
+    }
+    assert!(recap.contains(install::NOTHING_IS_LOST), "{recap}");
+    assert!(
+        recap.contains("ACTION NEEDED: Codex needs your approval"),
+        "{recap}"
+    );
+    // The recap is short: no plan step in it.
+    assert!(!recap.contains("Register the MCP servers"), "{recap}");
+    let details = out.split("Every change install makes:").nth(1).unwrap();
+    assert!(details.contains("Register the MCP servers"), "{out}");
+    assert_eq!(
+        out.matches("Install? [Y/n, d = show every change]").count(),
+        2
+    );
+    assert_eq!(setup.installed(), vec![Kind::ClaudeCode, Kind::Codex]);
+    memory.close();
+}
+
+/// The report after install: backups named once, a section per agent, then "Next steps" after
+/// a separator, numbered, ACTION NEEDED among them; no colour without a terminal.
+#[test]
+fn the_install_report_ends_with_numbered_next_steps() {
+    let home = TempDir::new("m13-report-home");
+    let data = TempDir::new("m13-report-data");
+    existing_home(home.path());
+    existing_codex_home(home.path());
+    let setup = with_programs(setup_in(home.path(), data.path()), &["claude", "codex"]);
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    let report = out.split("\nReport:\n").nth(1).unwrap();
+    assert_eq!(
+        report.matches("Backups of the files changed:").count(),
+        1,
+        "{report}"
+    );
+    // The backup directory once: its path is not repeated per file.
+    assert_eq!(report.matches("backups").count(), 1, "{report}");
+    assert!(
+        report.contains("changed ~/.claude.json (backed up)"),
+        "{report}"
+    );
+    assert!(report.contains("\n\nClaude Code:\n"), "{report}");
+    assert!(report.contains("\n\nCodex:\n"), "{report}");
+    let next = report.split(crate::prompt::SEPARATOR).nth(1).unwrap();
+    assert!(next.starts_with("\nNext steps\n"), "{next}");
+    assert!(
+        next.contains(
+            "  1. Restart running Claude Code and Codex sessions to load the MCP server and \
+             hooks.\n"
+        ),
+        "{next}"
+    );
+    assert!(
+        next.contains("  2. ACTION NEEDED: Codex needs your approval"),
+        "{next}"
+    );
+    assert!(!out.contains('\x1b'), "no colour without a terminal");
+    memory.close();
+}
+
+/// `status`: a headline, every section after a blank line, Memory before the agents, `~` for
+/// the home directory, ACTION NEEDED repeated as the last line.
+#[test]
+fn status_has_sections_memory_first_and_repeats_the_action_needed_last() {
+    let home = TempDir::new("m13-status-home");
+    let data = TempDir::new("m13-status-data");
+    existing_home(home.path());
+    existing_codex_home(home.path());
+    let setup = with_programs(setup_in(home.path(), data.path()), &["claude", "codex"]);
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, yes()).0, 0);
+    let status = crate::commands::status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
+    assert!(
+        status.starts_with("graphersal-memory status\n  daemon: "),
+        "{status}"
+    );
+    assert!(
+        status.contains("\n  settings: config.json (daemon idle time"),
+        "{status}"
+    );
+    let memory_at = status.find("\n\nMemory:\n").unwrap();
+    let claude_at = status.find("\n\nClaude Code:\n").unwrap();
+    let codex_at = status.find("\n\nCodex:\n").unwrap();
+    assert!(memory_at < claude_at && claude_at < codex_at, "{status}");
+    assert!(
+        status.contains("  user configuration: ~/.claude.json\n"),
+        "{status}"
+    );
+    assert!(
+        !status.contains(&home.path().display().to_string()),
+        "{status}"
+    );
+    let last = status.lines().last().unwrap();
+    assert!(
+        last.starts_with("ACTION NEEDED: Codex needs your approval"),
+        "{status}"
+    );
+    assert_eq!(status.matches("ACTION NEEDED").count(), 2, "{status}");
+    let coloured =
+        crate::commands::status_text_with(data.path(), &setup.run_dir, Ok(&setup), true).unwrap();
+    assert!(coloured.contains("\x1b[1;33mACTION NEEDED"), "{coloured}");
+    memory.close();
+}
+
+/// Uninstall of every harness names only those it changes; without a terminal it says why it
+/// does not ask; the prompt is `[Y/n]` like install's.
+#[test]
+fn uninstall_names_only_what_it_changes_and_explains_a_missing_terminal() {
+    let home = TempDir::new("m13-un-home");
+    let data = TempDir::new("m13-un-data");
+    existing_home(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, yes()).0, 0);
+    // Without an answer (no terminal): the plan, then why nothing happened.
+    let (code, out) = run_uninstall(
+        &setup,
+        UninstallOptions {
+            no_export: true,
+            ..UninstallOptions::default()
+        },
+    );
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.starts_with("graphersal-memory uninstall (Claude Code)\n"),
+        "{out}"
+    );
+    assert!(out.contains("Uninstall? [Y/n]"), "{out}");
+    assert!(
+        out.contains(
+            "No answer, nothing was changed: there is no terminal to ask in; run it in a \
+             terminal, or add --yes."
+        ),
+        "{out}"
+    );
+    // Every harness named: only the installed one is in the title and changed.
+    let (code, out) = run_uninstall(
+        &setup,
+        UninstallOptions {
+            yes: true,
+            no_export: true,
+            harnesses: Some(Kind::ALL.to_vec()),
+            ..UninstallOptions::default()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with("graphersal-memory uninstall (Claude Code)\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("\n\nClaude Code:\n  - ~/.claude.json"),
+        "{out}"
+    );
+    memory.close();
+}
+
+#[test]
+fn names_are_joined_with_and_and_the_home_is_a_tilde() {
+    assert_eq!(install::join_and(&[]), "");
+    assert_eq!(install::join_and(&["a"]), "a");
+    assert_eq!(install::join_and(&["a", "b"]), "a and b");
+    assert_eq!(install::join_and(&["a", "b", "c"]), "a, b and c");
+    let home = Path::new("/Users/me");
+    assert_eq!(
+        install::tilde("created /Users/me/.claude.json (in /Users/me)", home),
+        "created ~/.claude.json (in ~)"
+    );
+    assert_eq!(
+        install::tilde("/Users/meg/x and /Users/me", home),
+        "/Users/meg/x and ~"
+    );
 }

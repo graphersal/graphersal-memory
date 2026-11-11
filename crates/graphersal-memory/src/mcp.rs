@@ -387,10 +387,26 @@ impl StoreRuntime {
     /// Runs the catalog function `name` (an internal one: the session indexing) with `args` on
     /// the store's session thread.
     pub fn call(&self, name: &str, args: Value) -> Result<Value, String> {
-        let name = name.to_string();
+        let function = name.to_string();
         self.using
-            .call(move |session| catalog::call(session, &name, &args))
-            .map_err(|err| format!("the memory store {}: {err}", self.name))?
+            .call(move |session| {
+                let _doing =
+                    crate::daemon::doing(format!("running the catalog function {function}"));
+                crate::daemon::injected_panic("job", &function);
+                catalog::call(session, &function, &args)
+            })
+            .map_err(|err| match err {
+                graphersal_serve::ServeError::Session(_) => format!(
+                    "the daemon failed while running {name} on the memory store {} (a bug)",
+                    self.name
+                ),
+                other => format!("the memory store {}: {other}", self.name),
+            })?
+    }
+
+    /// Whether the store's session thread still runs jobs.
+    pub fn alive(&self) -> bool {
+        self.using.call(|_| ()).is_ok()
     }
 
     /// The embedder the store's memory schema names (a model identity or `hash-ngram/1`).

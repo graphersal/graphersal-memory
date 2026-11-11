@@ -112,8 +112,11 @@ graphersal-memory install
 ### What `install` asks, changes, and how `uninstall` reverts it
 
 `install` sets up every agent harness it finds: Claude Code, opencode, OpenAI Codex CLI and
-Cursor (`--harness claude-code|opencode|codex|cursor|all` chooses). With more than one found, the wizard's first
-step asks which; every chosen agent gets the same memory (one store, one daemon). For opencode
+Cursor (`--harness claude-code|opencode|codex|cursor|all` chooses). A harness counts as found
+when its program is (on `PATH`, or where its installer puts it: `~/.local/bin/claude`,
+`~/.claude/local/claude`, `~/.opencode/bin/opencode`, Cursor's app); a configuration directory
+left behind without the program is reported, not offered (`--harness` installs there anyway,
+with a warning). With more than one found, the wizard's first step asks which; every chosen agent gets the same memory (one store, one daemon). For opencode
 (1.x and 2.x; install asks `opencode --version` which one it is) it registers the MCP servers in
 `~/.config/opencode/opencode.json`, a rules file listed in `instructions` and a small session
 plugin; for Codex, the MCP servers in `~/.codex/config.toml`, the rule block in
@@ -231,35 +234,18 @@ Step 6 of 7 · The develop server
   2) No   not now (`graphersal-memory install --enable-develop` later)
 Choose 1-2: 2
 
-Step 7 of 7 · Summary
-  This is what install will do:
+Step 7 of 7 · Ready to install
 
-  1. Memory language
-     - English only (stored and searched in English) (in the MCP instructions and the rule block; config.json memory.language)
-  2. Embedding model
-     - download minishlab/potion-retrieval-32M (~130 MB, MIT) from https://huggingface.co into /tmp/gmw/d/models (the one network access of install; if it fails, the built-in embedder stays and install goes on)
-     - the daemon imports it into the store and re-embeds every memory, session, turn and fact with it in the background (calls wait while it runs)
-  3. Register the MCP servers at user scope in /tmp/gmw/h/.claude.json (key mcpServers)
-     - graphersal-memory (use profile): add
-     - graphersal-memory-develop: not registered (off; `graphersal-memory install --enable-develop` registers it)
-  4. Add the SessionStart and SessionEnd hooks in /tmp/gmw/h/.claude/settings.json
-     - SessionStart: add `"/private/tmp/gmw/bin/graphersal-memory" hook session-start --data-dir "/tmp/gmw/d" --run-dir "/tmp/gmw/r"`
-     - SessionEnd: add `"/private/tmp/gmw/bin/graphersal-memory" hook session-end --data-dir "/tmp/gmw/d" --run-dir "/tmp/gmw/r"`
-     - autoMemoryEnabled: false (switch Claude Code's auto-memory off). Nothing is lost: if you uninstall graphersal-memory later, every memory, including new ones, is written back to Claude Code's memory files and its auto-memory is switched back on.
-  5. Import the existing file memory (MEMORY.md and the memory files)
-     - 1 memory directory under /tmp/gmw/h/.claude/projects: 2 new and 0 changed memory files to import, 0 unchanged
-     - The files are read, not changed; every memory stays in its project. CLAUDE.md rules are not imported in this version.
-  6. Write the managed rule block into /tmp/gmw/h/.claude/CLAUDE.md
-     - create the file with the block (your own text stays as it is)
-  7. Index past sessions (raw turns, locally, in the background)
-     - 1 session transcript under /tmp/gmw/h/.claude/projects: 0 to index, 1 still being written (indexed later)
-     - summaries: off (raw turns only; `graphersal-memory summaries enable` later)
-  8. Settings file /tmp/gmw/d/config.json
-     - write the defaults (daemon idle time 2h) and the answers
+  Agents: Claude Code
+  Memory language: English only (stored and searched in English)
+  Embedding model: minishlab/potion-retrieval-32M (~130 MB download, MIT)
+  File memory: 2 memory files imported now
+  Past sessions: 0 to index locally in the background (raw turns)
+  Summaries: off
 
   Nothing is lost: if you uninstall graphersal-memory later, every memory, including new ones, is written back to Claude Code's memory files and its auto-memory is switched back on.
 
-Apply these changes? [Enter = apply, n = cancel]: 
+Install? [Y/n, d = show every change]: 
 
 Embedding model:
   Downloading minishlab/potion-retrieval-32M from https://huggingface.co
@@ -269,18 +255,26 @@ Embedding model:
     README.md: 16.7 KiB / 16.7 KiB (100%)
 
 Report:
-  created /tmp/gmw/h/.claude.json
-  changed /tmp/gmw/h/.claude/settings.json (backup: /tmp/gmw/d/install/backups/2026-11-10T072304Z/settings.json)
-  created /tmp/gmw/h/.claude/CLAUDE.md
+  Backups of the files changed: /tmp/gmw/d/install/backups/2026-11-10T072304Z/
+
+Claude Code:
+  created ~/.claude.json
+  changed ~/.claude/settings.json (backed up)
+  created ~/.claude/CLAUDE.md
   Claude Code's auto-memory: off (uninstall writes every memory back to its memory files and switches it on again)
+
+Memory:
   created /tmp/gmw/d/config.json
-  embedding model: downloaded minishlab/potion-retrieval-32M (124.6 MiB, licence mit, model2vec/minishlab/potion-retrieval-32M@c7f8727ce247) into /tmp/gmw/d/models/minishlab/potion-retrieval-32M
+  embedding model: downloaded minishlab/potion-retrieval-32M (124.6 MiB, licence MIT, model2vec/minishlab/potion-retrieval-32M@c7f8727ce247) into /tmp/gmw/d/models/minishlab/potion-retrieval-32M
   embedding model: minishlab/potion-retrieval-32M (the daemon re-embeds the memory with it in the background)
   imported 2 memories (2 new, 0 updated) into 1 project; 0 unchanged
   summaries: off (raw turns are indexed; `graphersal-memory summaries enable` switches them on)
   past sessions: indexing in the background (`graphersal-memory import --sessions` shows the progress)
 
-Restart running Claude Code sessions to load the MCP server and the hooks. `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` removes it.
+----------------------------------------
+Next steps
+  1. Restart running Claude Code sessions to load the MCP server and hooks.
+  `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` removes it.
 ```
 
 </details>
@@ -288,8 +282,9 @@ Restart running Claude Code sessions to load the MCP server and the hooks. `grap
 Every question has a flag for scripts: `--language english|any`, `--model <repo>|builtin`,
 `--no-import`, `--keep-auto-memory`, `--summaries`, `--enable-develop`. With `--yes`, or without a
 terminal, every question takes its default (summaries and the develop server stay off unless
-their flag is given); without `--yes` it still asks once before applying. `--dry-run` prints the
-plan and changes nothing. Running `install` again shows your current answers as the defaults and
+their flag is given); without `--yes` it still asks once before applying (and, with nothing to
+answer, such as a pipe, says so and changes nothing). The wizard's last step is a short recap;
+`d` there, or `--dry-run`, shows every change, grouped by agent. `--dry-run` changes nothing. Running `install` again shows your current answers as the defaults and
 changes only what differs.
 
 The JSON files are edited in place: only our entries are inserted, the rest of each file keeps its

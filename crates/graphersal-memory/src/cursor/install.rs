@@ -668,10 +668,10 @@ fn transcripts(setup: &Setup) -> (usize, usize) {
 pub fn status_lines(setup: &Setup) -> Vec<String> {
     let inspection = inspect(setup);
     let paths = &setup.cursor;
-    let mut lines = vec![format!(
-        "Cursor (configuration {}):",
-        paths.cursor_dir.display()
-    )];
+    let mut lines = vec![
+        "Cursor:".to_string(),
+        format!("  configuration: {}", paths.cursor_dir.display()),
+    ];
     if let Some(program) = crate::cursor::find_program(setup.search_path.as_deref()) {
         lines.push(format!("  program: {}", program.display()));
     }

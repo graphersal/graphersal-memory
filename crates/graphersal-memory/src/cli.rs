@@ -69,9 +69,9 @@ pub enum Command {
             The embedding model download (Hugging Face, once, into the data directory) is the \
             one network access of install; if it fails, the built-in embedder stays.")]
     Install {
-        /// The harness(es) to set up: claude-code, opencode, codex or all (default: the wizard asks,
-        /// offering every harness found on this machine; without questions: every harness
-        /// found).
+        /// The harness(es) to set up: claude-code, opencode, codex, cursor or all (default: the
+        /// wizard asks, offering every harness whose program is found on this machine; without
+        /// questions, and with all: every harness found).
         #[arg(long, value_enum)]
         harness: Option<Harness>,
         /// Show what would change without changing anything (no questions).
@@ -106,8 +106,8 @@ pub enum Command {
     },
     /// Remove exactly what `install` added; your own settings stay untouched.
     Uninstall {
-        /// The harness(es) to remove graph memory from: claude-code, opencode, codex or all (default:
-        /// every harness it is installed in).
+        /// The harness(es) to remove graph memory from: claude-code, opencode, codex, cursor or all
+        /// (default and all: every harness it is installed in).
         #[arg(long, value_enum)]
         harness: Option<Harness>,
         /// Show what would change without changing anything.
@@ -469,12 +469,13 @@ pub enum Harness {
     ClaudeCode,
     /// opencode (1.x or 2.x: `opencode --version` says which).
     Opencode,
-    /// Every supported harness (install: those found on this machine).
-    All,
     /// OpenAI Codex CLI.
     Codex,
     /// Cursor (the editor's agent).
     Cursor,
+    /// Every supported harness (install: those whose program is found on this machine;
+    /// uninstall: those it is installed in).
+    All,
 }
 
 impl Harness {
@@ -959,6 +960,27 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_help_lists_the_four_harnesses_then_all() {
+        let help = Cli::command()
+            .find_subcommand_mut("uninstall")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(
+            help.contains("claude-code, opencode, codex, cursor or all"),
+            "{help}"
+        );
+        let at = |value: &str| help.find(&format!("- {value}:")).unwrap();
+        assert!(
+            at("claude-code") < at("opencode")
+                && at("opencode") < at("codex")
+                && at("codex") < at("cursor")
+                && at("cursor") < at("all"),
+            "{help}"
+        );
+    }
+
+    #[test]
     fn harness_choices_parse() {
         use crate::agents::Kind;
         for (arg, kinds) in [
@@ -993,7 +1015,7 @@ mod tests {
             .render_long_help()
             .to_string();
         assert!(
-            help.contains("claude-code, opencode, codex or all"),
+            help.contains("claude-code, opencode, codex, cursor or all"),
             "{help}"
         );
     }

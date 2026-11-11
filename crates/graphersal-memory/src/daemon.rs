@@ -113,6 +113,112 @@ pub fn log(message: &str) {
     let _ = stderr.flush();
 }
 
+std::thread_local! {
+    /// What this thread is doing, for the panic hook's log line (`doing`).
+    static ACTIVITY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Restores the thread's previous activity when dropped (also while a panic unwinds).
+pub(crate) struct Doing(Option<String>);
+
+impl Drop for Doing {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        ACTIVITY.with(|activity| {
+            if let Ok(mut activity) = activity.try_borrow_mut() {
+                *activity = previous;
+            }
+        });
+    }
+}
+
+/// Records what this thread does now (a control request, a catalog function, a session file;
+/// never memory contents) until the returned guard is dropped: a panic meanwhile is logged
+/// with it.
+pub(crate) fn doing(what: impl Into<String>) -> Doing {
+    let what = what.into();
+    Doing(ACTIVITY.with(|activity| {
+        activity
+            .try_borrow_mut()
+            .map(|mut activity| activity.replace(what))
+            .unwrap_or(None)
+    }))
+}
+
+/// The longest panic message the log keeps.
+const MAX_PANIC_TEXT: usize = 200;
+
+/// A panic's message as the log keeps it: cut at the first backtick or quote (std's slicing
+/// panics quote the text they were given, which may be memory contents), at most
+/// [`MAX_PANIC_TEXT`] characters.
+pub(crate) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "(no message)".to_string());
+    let cut = message
+        .find(['`', '"'])
+        .map_or(message.as_str(), |at| &message[..at]);
+    let cut = cut.trim_end();
+    if cut.chars().count() > MAX_PANIC_TEXT {
+        let short: String = cut.chars().take(MAX_PANIC_TEXT).collect();
+        format!("{short}...")
+    } else {
+        cut.to_string()
+    }
+}
+
+/// Logs every panic of the daemon's threads (also the engine's session thread, whose jobs the
+/// engine catches) as one line: thread, what it was doing, the shortened message and where.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        let activity = ACTIVITY
+            .with(|activity| activity.try_borrow().ok().and_then(|a| a.clone()))
+            .map(|what| format!(" while {what}"))
+            .unwrap_or_default();
+        let location = info
+            .location()
+            .map(|at| format!(" at {}:{}", at.file(), at.line()))
+            .unwrap_or_default();
+        log(&format!(
+            "PANIC (a bug, please report) in thread '{}'{activity}: {}{location}",
+            thread.name().unwrap_or("unnamed"),
+            panic_text(info.payload())
+        ));
+    }));
+}
+
+/// The test-only injected panic (debug builds only; the release build has no such hook):
+/// `GRAPHERSAL_MEMORY_TEST_PANIC=<site>:<name>` panics at `site` (`control`, `job`, `index`)
+/// when `name` is the control request, the catalog function, or a part of the session file's
+/// path.
+#[cfg(debug_assertions)]
+pub(crate) fn injected_panic(site: &str, name: &str) {
+    let Ok(spec) = std::env::var("GRAPHERSAL_MEMORY_TEST_PANIC") else {
+        return;
+    };
+    let Some((wanted_site, wanted)) = spec.split_once(':') else {
+        return;
+    };
+    let hit = wanted_site == site
+        && match site {
+            "index" => name.contains(wanted),
+            _ => name == wanted,
+        };
+    if hit {
+        #[allow(clippy::panic)]
+        {
+            panic!("injected test panic at {site}");
+        }
+    }
+}
+
+/// Release builds: no injected panics.
+#[cfg(not(debug_assertions))]
+pub(crate) fn injected_panic(_site: &str, _name: &str) {}
+
 /// The current time as `YYYY-MM-DDTHH:MM:SSZ`.
 pub(crate) fn now_utc() -> String {
     utc_timestamp(
@@ -197,6 +303,7 @@ pub fn run(options: DaemonOptions) -> Result<(), String> {
         )
     })?;
     ipc::create_run_dir(&options.run_dir)?;
+    install_panic_hook();
     let socket = ipc::socket_path(&options.run_dir)?;
     let mut pid_file = LockFile::open(&options.run_dir, ipc::PID_FILE)?;
     let deadline = Instant::now() + PID_LOCK_PATIENCE;
@@ -297,9 +404,19 @@ pub fn run(options: DaemonOptions) -> Result<(), String> {
         match stream {
             Ok(stream) => {
                 let daemon = daemon.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("connection".into())
-                    .spawn(move || daemon.handle(stream));
+                let spawned =
+                    std::thread::Builder::new()
+                        .name("connection".into())
+                        .spawn(move || {
+                            // A panic is logged by the hook; the connection ends, the daemon serves on.
+                            let served =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    daemon.handle(stream)
+                                }));
+                            if served.is_err() {
+                                log("a connection ended by a panic (logged above); serving on");
+                            }
+                        });
                 if let Err(err) = spawned {
                     log(&format!("cannot start a connection thread: {err}"));
                 }
@@ -423,14 +540,31 @@ impl Daemon {
                 ));
             }
             let mut writer = StoreWriter { daemon: self };
-            let report = sessions::run(
-                &request,
-                &self.options.data_dir,
-                &mut writer,
-                summarizer.as_mut(),
-                &mut |report| self.lock_indexer().report = report.to_json(),
-                &|| self.shutting_down.load(Ordering::SeqCst),
-            );
+            // `sessions::run` catches a panic per session file; one outside them (a bug in the
+            // scan) ends this run only: the indexer goes on with the next request.
+            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _doing = doing(format!(
+                    "indexing the {} sessions",
+                    request.harness.display_name()
+                ));
+                sessions::run(
+                    &request,
+                    &self.options.data_dir,
+                    &mut writer,
+                    summarizer.as_mut(),
+                    &mut |report| self.lock_indexer().report = report.to_json(),
+                    &|| self.shutting_down.load(Ordering::SeqCst),
+                )
+            }));
+            let report = ran.unwrap_or_else(|_| sessions::Report {
+                phase: "done".into(),
+                problems: vec![format!(
+                    "the {} session indexing failed (a bug, logged above); the next request \
+                     tries again",
+                    request.harness.display_name()
+                )],
+                ..sessions::Report::default()
+            });
             log(&format!(
                 "sessions: {} found, {} indexed ({} turns), {} unchanged, {} still running, {} \
                  summarized{}{}",
@@ -652,7 +786,9 @@ impl Daemon {
             serde_json::from_slice(line).map_err(|err| err.to_string())?;
         let project = request["project"].as_str().unwrap_or_default();
         let store = self.store_for(project)?;
-        let memories = store.call("export_memories", json!({"project": project}))?;
+        let memories = store
+            .call("export_memories", json!({"project": project}))
+            .inspect_err(|_| self.check_alive(&store))?;
         Ok(json!({"ok": true, "memories": memories}))
     }
 
@@ -833,39 +969,24 @@ impl Daemon {
                 return;
             }
             Ok(Opening::Control(control)) => {
-                match control.as_str() {
-                    "status" => answer(self.status().to_string()),
-                    sessions::CONTROL_INDEX => {
-                        let request = serde_json::from_slice(&line)
-                            .map_err(|err| err.to_string())
-                            .and_then(|value| sessions::Request::from_control(&value));
-                        match request.and_then(|request| self.queue_indexing(request)) {
-                            Ok(run) => answer(json!({"ok": true, "run": run}).to_string()),
-                            Err(err) => answer(protocol::refusal(Refusal::BadHandshake, &err)),
+                // A panic while answering is a bug: logged (the hook), answered as a refusal,
+                // and the daemon serves on.
+                let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _doing = doing(format!("answering the control request '{control}'"));
+                    self.control(&control, &line)
+                }));
+                match answered {
+                    Ok(text) => {
+                        answer(text);
+                        if control == "stop" {
+                            self.shutdown("stop requested");
                         }
                     }
-                    sessions::CONTROL_STATUS => answer(self.sessions_status().to_string()),
-                    "apply_settings" => answer(self.apply_settings().to_string()),
-                    "export_memories" => match self.export_memories(&line) {
-                        Ok(done) => answer(done.to_string()),
-                        Err(err) => answer(protocol::refusal(Refusal::Store, &err)),
-                    },
-                    "merge_projects" => match self.merge_projects(&line) {
-                        Ok(done) => answer(done.to_string()),
-                        Err(err) => answer(protocol::refusal(Refusal::Store, &err)),
-                    },
-                    "stop" => {
-                        answer(
-                            json!({"ok": true, "daemon_version": self.options.version}).to_string(),
-                        );
-                        self.shutdown("stop requested");
-                    }
-                    other => answer(protocol::refusal(
-                        Refusal::BadHandshake,
+                    Err(_) => answer(protocol::refusal(
+                        Refusal::Internal,
                         &format!(
-                            "unknown control request '{other}' (expected status, stop, \
-                             index_sessions, sessions_status, apply_settings, export_memories or \
-                             merge_projects)"
+                            "the daemon failed while answering '{control}' (a bug); see {}",
+                            self.log_file().display()
                         ),
                     )),
                 }
@@ -944,6 +1065,71 @@ impl Daemon {
         drop(writer);
     }
 
+    /// After a failed call: when the store's session thread no longer runs (it ended by a
+    /// panic outside a job, which the engine does not catch), the daemon exits cleanly, so
+    /// the next shim starts a new one with a fresh session (reopening the store in place
+    /// would race the connections that still hold the old one).
+    fn check_alive(&self, store: &StoreRuntime) {
+        if !store.alive() {
+            self.shutdown(&format!(
+                "the session thread of the store {} ended (a bug, logged above); the next \
+                 session starts a new daemon",
+                store.name()
+            ));
+        }
+    }
+
+    /// The daemon's log file (the shim appends the daemon's stderr to it).
+    fn log_file(&self) -> PathBuf {
+        self.options.run_dir.join(ipc::LOG_FILE)
+    }
+
+    /// `err` with the daemon's log named, when the daemon failed (a bug) rather than the
+    /// request.
+    fn with_log(&self, err: &str) -> String {
+        if err.starts_with("the daemon failed") {
+            format!("{err}; see {}", self.log_file().display())
+        } else {
+            err.to_string()
+        }
+    }
+
+    /// The answer line to the control request `control` (its whole first `line`).
+    fn control(self: &Arc<Self>, control: &str, line: &[u8]) -> String {
+        injected_panic("control", control);
+        match control {
+            "status" => self.status().to_string(),
+            sessions::CONTROL_INDEX => {
+                let request = serde_json::from_slice(line)
+                    .map_err(|err| err.to_string())
+                    .and_then(|value| sessions::Request::from_control(&value));
+                match request.and_then(|request| self.queue_indexing(request)) {
+                    Ok(run) => json!({"ok": true, "run": run}).to_string(),
+                    Err(err) => protocol::refusal(Refusal::BadHandshake, &err),
+                }
+            }
+            sessions::CONTROL_STATUS => self.sessions_status().to_string(),
+            "apply_settings" => self.apply_settings().to_string(),
+            "export_memories" => match self.export_memories(line) {
+                Ok(done) => done.to_string(),
+                Err(err) => protocol::refusal(Refusal::Store, &self.with_log(&err)),
+            },
+            "merge_projects" => match self.merge_projects(line) {
+                Ok(done) => done.to_string(),
+                Err(err) => protocol::refusal(Refusal::Store, &self.with_log(&err)),
+            },
+            // Answered first; `handle` then shuts the daemon down.
+            "stop" => json!({"ok": true, "daemon_version": self.options.version}).to_string(),
+            other => protocol::refusal(
+                Refusal::BadHandshake,
+                &format!(
+                    "unknown control request '{other}' (expected status, stop, index_sessions, \
+                     sessions_status, apply_settings, export_memories or merge_projects)"
+                ),
+            ),
+        }
+    }
+
     /// Counts a new connection, or refuses it: the daemon is stopping, or it is older than the
     /// shim (then it exits at once without other connections, else it drains).
     fn register(
@@ -1007,7 +1193,12 @@ impl sessions::Writer for StoreWriter<'_> {
         if self.daemon.shutting_down.load(Ordering::SeqCst) {
             return Err("the daemon is stopping".to_string());
         }
-        self.daemon.store_for(project)?.call(name, args)
+        let store = self.daemon.store_for(project)?;
+        let called = store.call(name, args);
+        if called.is_err() {
+            self.daemon.check_alive(&store);
+        }
+        called
     }
 }
 
@@ -1030,6 +1221,23 @@ mod tests {
         );
         assert!(parse_duration("h").is_err());
         assert!(parse_duration("-1s").is_err());
+    }
+
+    #[test]
+    fn panic_texts_are_cut_before_quoted_text_and_keep_characters_whole() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(
+            "byte index 5 is not a char boundary; it is inside 'е' (bytes 4..6) of `g.query(\"секрет\")`"
+                .to_string(),
+        );
+        assert_eq!(
+            panic_text(payload.as_ref()),
+            "byte index 5 is not a char boundary; it is inside 'е' (bytes 4..6) of"
+        );
+        let long: Box<dyn std::any::Any + Send> = Box::new("я".repeat(300));
+        let text = panic_text(long.as_ref());
+        assert_eq!(text, format!("{}...", "я".repeat(MAX_PANIC_TEXT)));
+        let other: Box<dyn std::any::Any + Send> = Box::new(7_u8);
+        assert_eq!(panic_text(other.as_ref()), "(no message)");
     }
 
     #[test]

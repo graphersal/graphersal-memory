@@ -919,10 +919,10 @@ pub fn inspect(setup: &Setup) -> Inspection {
 pub fn status_lines(setup: &Setup) -> Vec<String> {
     let inspection = inspect(setup);
     let paths = &setup.codex;
-    let mut lines = vec![format!(
-        "Codex (configuration {}):",
-        paths.config_file.display()
-    )];
+    let mut lines = vec![
+        "Codex:".to_string(),
+        format!("  configuration: {}", paths.config_file.display()),
+    ];
     if let Some(program) = crate::codex::find_program(setup.search_path.as_deref()) {
         lines.push(format!(
             "  program: {}{}",

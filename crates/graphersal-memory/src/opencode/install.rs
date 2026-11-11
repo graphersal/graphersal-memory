@@ -812,10 +812,10 @@ pub fn inspect(setup: &Setup) -> Inspection {
 pub fn status_lines(setup: &Setup) -> Vec<String> {
     let inspection = inspect(setup);
     let paths = &setup.opencode;
-    let mut lines = vec![format!(
-        "opencode (configuration {}):",
-        paths.config_file.display()
-    )];
+    let mut lines = vec![
+        "opencode:".to_string(),
+        format!("  configuration: {}", paths.config_file.display()),
+    ];
     lines.push(format!("  version: {}", paths.detected.describe()));
     lines.push(format!(
         "  MCP server {USE_SERVER} (use): {}",

@@ -38,7 +38,7 @@ use crate::agents::{Agent, ClaudeCode, Kind};
 use crate::config::Config;
 use crate::import::{self, Connect, DirPlan, ImportState};
 use crate::language::Language;
-use crate::prompt::{Choice, Console};
+use crate::prompt::{Choice, Console, paint};
 use crate::{download, export, fsutil, jsonedit, models};
 
 /// The name of the `use` server in Claude Code.
@@ -222,6 +222,11 @@ impl Setup {
         crate::cursor::Cursor::new(self.cursor.clone())
     }
 
+    /// `text` as output shows it: the home directory as `~` ([`tilde`]).
+    pub fn show(&self, text: &str) -> String {
+        tilde(text, &self.opencode.home)
+    }
+
     /// The agent of a harness.
     pub fn agent_of(&self, kind: Kind) -> Box<dyn Agent> {
         match kind {
@@ -232,46 +237,90 @@ impl Setup {
         }
     }
 
-    /// Whether `program` is on this setup's search path.
-    pub fn on_path(&self, program: &str) -> bool {
-        let path = match &self.search_path {
-            Some(path) => Some(path.clone()),
-            None => std::env::var_os("PATH"),
-        };
-        path.is_some_and(|dirs| {
-            std::env::split_paths(&dirs).any(|dir| {
-                dir.join(program).is_file() || dir.join(format!("{program}.exe")).is_file()
-            })
-        })
+    /// The program of a harness on this machine: on the search path, or in a known install
+    /// location that is not on it (`~/.local/bin/claude`, `~/.claude/local/claude`,
+    /// `~/.opencode/bin/opencode`, Cursor's app bundle). System-wide locations (`/Applications`)
+    /// are looked at only for this process's own `PATH` (tests pass their search path).
+    pub fn program(&self, kind: Kind) -> Option<PathBuf> {
+        let home = &self.opencode.home;
+        let search = self.search_path.as_deref();
+        let first_file = |candidates: Vec<PathBuf>| candidates.into_iter().find(|p| p.is_file());
+        match kind {
+            Kind::ClaudeCode => {
+                let path = match search {
+                    Some(path) => Some(path.to_os_string()),
+                    None => std::env::var_os("PATH"),
+                };
+                let mut candidates: Vec<PathBuf> = path
+                    .iter()
+                    .flat_map(std::env::split_paths)
+                    .flat_map(|dir| {
+                        ["claude", "claude.exe", "claude.cmd"].map(|name| dir.join(name))
+                    })
+                    .collect();
+                candidates.push(home.join(".local").join("bin").join("claude"));
+                candidates.push(home.join(".claude").join("local").join("claude"));
+                first_file(candidates)
+            }
+            Kind::OpenCode => crate::opencode::find_program(home, search),
+            Kind::Codex => crate::codex::find_program(search),
+            Kind::Cursor => crate::cursor::find_program(search).or_else(|| {
+                let mut bundles = vec![home.join("Applications").join("Cursor.app")];
+                if search.is_none() {
+                    bundles.push(PathBuf::from("/Applications/Cursor.app"));
+                }
+                bundles.into_iter().find(|bundle| bundle.is_dir())
+            }),
+        }
     }
 
-    /// The harnesses found on this machine (their program on the search path, their
-    /// configuration directory present, or graphersal-memory installed in them), in wizard
-    /// order.
+    /// Whether a harness's configuration is on this machine (its configuration directory or
+    /// file), whether or not its program is.
+    fn config_found(&self, kind: Kind) -> Option<PathBuf> {
+        let candidates: Vec<PathBuf> = match kind {
+            Kind::ClaudeCode => vec![
+                self.paths.config_dir.clone(),
+                self.paths.user_config.clone(),
+            ],
+            Kind::OpenCode => vec![self.opencode.config_dir.clone()],
+            Kind::Codex => vec![self.codex.codex_home.clone()],
+            Kind::Cursor => vec![self.cursor.cursor_dir.clone()],
+        };
+        candidates.into_iter().find(|path| path.exists())
+    }
+
+    /// The harnesses found on this machine, in wizard order: those whose program is found
+    /// ([`Setup::program`]). A configuration directory alone is not enough
+    /// ([`Setup::leftovers`]); `--harness` installs into another one after a warning.
     pub fn detected(&self) -> Vec<Kind> {
         Kind::ALL
             .into_iter()
-            .filter(|kind| {
-                State::exists_of(self, *kind)
-                    || match kind {
-                        Kind::ClaudeCode => {
-                            self.on_path("claude")
-                                || self.paths.config_dir.is_dir()
-                                || self.paths.user_config.is_file()
-                        }
-                        Kind::OpenCode => {
-                            self.on_path("opencode")
-                                || self.opencode.config_dir.is_dir()
-                                || self.opencode.home.join(".opencode/bin").is_dir()
-                        }
-                        Kind::Codex => self.on_path("codex") || self.codex.codex_home.is_dir(),
-                        Kind::Cursor => {
-                            crate::cursor::find_program(self.search_path.as_deref()).is_some()
-                                || self.cursor.cursor_dir.is_dir()
-                        }
-                    }
+            .filter(|kind| self.program(*kind).is_some())
+            .collect()
+    }
+
+    /// The harnesses whose configuration (or our installation in it) is on this machine but
+    /// whose program is not: reported, never offered. Each with the path found.
+    pub fn leftovers(&self) -> Vec<(Kind, PathBuf)> {
+        Kind::ALL
+            .into_iter()
+            .filter(|kind| self.program(*kind).is_none())
+            .filter_map(|kind| {
+                self.config_found(kind)
+                    .or_else(|| State::exists_of(self, kind).then(|| State::path_of(self, kind)))
+                    .map(|path| (kind, path))
             })
             .collect()
+    }
+
+    /// The name of a harness's program, for messages.
+    pub fn program_name(kind: Kind) -> &'static str {
+        match kind {
+            Kind::ClaudeCode => "claude",
+            Kind::OpenCode => "opencode",
+            Kind::Codex => "codex",
+            Kind::Cursor => "cursor",
+        }
     }
 
     /// The harnesses graphersal-memory is installed in (their state file exists, or one of
@@ -406,6 +455,83 @@ impl HookForm {
         } else {
             Self::posix()
         }
+    }
+}
+
+/// Names joined for a sentence: "a", "a and b", "a, b and c".
+pub fn join_and(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// The display names of `kinds` for a sentence ([`join_and`]).
+pub fn names_of(kinds: &[Kind]) -> String {
+    join_and(&kinds.iter().map(|k| k.display_name()).collect::<Vec<_>>())
+}
+
+/// `text` with the home directory written as `~` (every path that starts with it).
+pub fn tilde(text: &str, home: &Path) -> String {
+    let home = home.display().to_string();
+    if home.is_empty() || home == "/" {
+        return text.to_string();
+    }
+    let sep = std::path::MAIN_SEPARATOR;
+    let mut out = text.replace(&format!("{home}{sep}"), &format!("~{sep}"));
+    if sep != '/' {
+        out = out.replace(&format!("{home}/"), "~/");
+    }
+    // The home directory itself, at the end of the text or before a space or punctuation.
+    for end in [" ", ")", ",", ";", ":"] {
+        out = out.replace(&format!("{home}{end}"), &format!("~{end}"));
+    }
+    if out.ends_with(&home) {
+        let cut = out.len() - home.len();
+        out = format!("{}~", &out[..cut]);
+    }
+    out
+}
+
+/// What install and uninstall print when they would ask but nothing answers (no terminal: a
+/// pipe, a harness's shell command).
+pub const NO_TERMINAL: &str = "there is no terminal to ask in; run it in a terminal, or add --yes";
+
+/// An answer to a yes/no question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reply {
+    Yes,
+    No,
+    /// The input ended before an answer (no terminal).
+    NoInput,
+}
+
+/// Asks `question` in the style install and uninstall share: `[Y/n]` (Enter = yes) or `[y/N]`
+/// (Enter = no) after it.
+pub(crate) fn ask_yes_no(
+    question: &str,
+    default_yes: bool,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+) -> Reply {
+    let _ = write!(
+        out,
+        "{question} {} ",
+        if default_yes { "[Y/n]" } else { "[y/N]" }
+    );
+    let _ = out.flush();
+    let mut answer = String::new();
+    match input.read_line(&mut answer) {
+        Ok(0) | Err(_) => {
+            let _ = writeln!(out);
+            Reply::NoInput
+        }
+        Ok(_) => match answer.trim().to_ascii_lowercase().as_str() {
+            "" if default_yes => Reply::Yes,
+            "y" | "yes" => Reply::Yes,
+            _ => Reply::No,
+        },
     }
 }
 
@@ -614,6 +740,8 @@ pub struct UninstallOptions {
     pub no_export: bool,
     /// Ask whether to export (stdin and stdout are terminals, no `--yes`).
     pub interactive: bool,
+    /// Colour in the output (a terminal that supports it).
+    pub color: bool,
 }
 
 /// One planned file change.
@@ -750,9 +878,10 @@ pub(crate) struct Step {
     pub(crate) lines: Vec<String>,
 }
 
-/// The planned install.
+/// The planned install: its steps in sections (shared, one per agent, then import and
+/// indexing), each with its heading.
 struct InstallPlan {
-    steps: Vec<Step>,
+    sections: Vec<(String, Vec<Step>)>,
     /// Claude Code's file changes.
     changes: Vec<Change>,
     /// opencode's file changes.
@@ -1237,8 +1366,7 @@ fn ask(
                 "memory is the same from each agent.",
             ],
         );
-        let names: Vec<&str> = current.detected.iter().map(|k| k.display_name()).collect();
-        let mut choices = vec![Choice::new("All of them", names.join(" and "))];
+        let mut choices = vec![Choice::new("All of them", names_of(&current.detected))];
         for kind in &current.detected {
             choices.push(Choice::new(format!("{} only", kind.display_name()), ""));
         }
@@ -1572,7 +1700,7 @@ fn model_lines(setup: &Setup, current: &Current, model: &str) -> Vec<String> {
         Some(cached) => lines.push(format!(
             "{model} ({}, {}): downloaded already",
             download::human_bytes(cached.bytes),
-            cached.license
+            models::licence_name(&cached.license)
         )),
         None => lines.push(format!(
             "download {model} ({size}) from {} into {} (the one network access of install; if \
@@ -1599,37 +1727,45 @@ fn plan_install(
     current: &Current,
 ) -> Result<InstallPlan, String> {
     let mut conflicts = Vec::new();
-    let mut steps = Vec::new();
     let mut changes = Vec::new();
     let state = State::load(setup)?;
     let claude = answers.harnesses.contains(&Kind::ClaudeCode);
     let opencode = answers.harnesses.contains(&Kind::OpenCode);
-    steps.push(Step {
+    let mut shared = vec![Step {
         title: "Agents".to_string(),
         lines: vec![format!(
             "{} (one store and one daemon serve every agent chosen)",
-            answers
-                .harnesses
-                .iter()
-                .map(|k| k.display_name())
-                .collect::<Vec<_>>()
-                .join(" and ")
+            names_of(&answers.harnesses)
         )],
-    });
-    steps.push(Step {
+    }];
+    shared.push(Step {
         title: "Memory language".to_string(),
         lines: vec![format!(
-            "{} (in the MCP instructions and the rule block; config.json memory.language)",
+            "{}; written into the MCP instructions, the rule block and memory.language in \
+             config.json",
             answers.language.describe()
         )],
     });
-    steps.push(Step {
+    shared.push(Step {
         title: "Embedding model".to_string(),
         lines: model_lines(setup, current, &answers.model),
     });
+    let config_path = crate::config::path(&setup.data_dir);
+    let write_config = !config_path.exists();
+    shared.push(Step {
+        title: format!("Settings file {}", config_path.display()),
+        lines: vec![if write_config {
+            "write the defaults (daemon idle time 2h) and the answers".to_string()
+        } else {
+            "exists: the answers are set in it, everything else kept".to_string()
+        }],
+    });
+    let mut sections = vec![("Shared by every agent".to_string(), shared)];
     let mut auto_memory = AutoMemoryPlan::Keep;
     let mut imports = Vec::new();
+    let mut after = Vec::new();
     if claude {
+        let mut steps = Vec::new();
         let (step, change) = plan_user_config(setup, answers.develop, &mut conflicts)?;
         steps.push(step);
         changes.extend(change);
@@ -1637,17 +1773,18 @@ fn plan_install(
         auto_memory = plan;
         steps.push(step);
         changes.extend(change);
-        let (step, planned) = plan_import(setup, answers)?;
-        steps.push(step);
-        imports = planned;
         let (step, change) = plan_block(setup, answers.language, &mut conflicts)?;
         steps.push(step);
         changes.extend(change);
+        sections.push((Kind::ClaudeCode.display_name().to_string(), steps));
+        let (step, planned) = plan_import(setup, answers)?;
+        after.push(step);
+        imports = planned;
     }
     let mut opencode_changes = Vec::new();
     if opencode {
         let plan = crate::opencode::install::plan(setup, answers.language, answers.develop)?;
-        steps.extend(plan.steps);
+        sections.push((Kind::OpenCode.display_name().to_string(), plan.steps));
         opencode_changes = plan.changes;
         conflicts.extend(plan.conflicts);
     }
@@ -1660,7 +1797,7 @@ fn plan_install(
             answers.develop,
             answers.auto_memory_off,
         )?;
-        steps.extend(plan.steps);
+        sections.push((Kind::Codex.display_name().to_string(), plan.steps));
         codex_changes = plan.changes;
         codex_memories = plan.memories;
         conflicts.extend(plan.conflicts);
@@ -1668,24 +1805,14 @@ fn plan_install(
     let mut cursor_changes = Vec::new();
     if answers.harnesses.contains(&Kind::Cursor) {
         let plan = crate::cursor::install::plan(setup, answers.language, answers.develop)?;
-        steps.extend(plan.steps);
+        sections.push((Kind::Cursor.display_name().to_string(), plan.steps));
         cursor_changes = plan.changes;
         conflicts.extend(plan.conflicts);
     }
-    steps.push(plan_sessions(setup, options, answers, current)?);
-    let config_path = crate::config::path(&setup.data_dir);
-    let write_config = !config_path.exists();
-    steps.push(Step {
-        title: format!("Settings file {}", config_path.display()),
-        lines: vec![if write_config {
-            "write the defaults (daemon idle time 2h) and the answers".to_string()
-        } else {
-            "exists: the answers are set in it, everything else kept".to_string()
-        }],
-    });
+    after.push(plan_sessions(setup, options, answers, current)?);
     let look_alikes = crate::projects::look_alike_lines(&setup.data_dir);
     if !look_alikes.is_empty() {
-        steps.push(Step {
+        after.push(Step {
             title: "Projects that may have moved (nothing is merged automatically)".to_string(),
             lines: look_alikes
                 .into_iter()
@@ -1693,8 +1820,9 @@ fn plan_install(
                 .collect(),
         });
     }
+    sections.push(("Then, after the files are written".to_string(), after));
     Ok(InstallPlan {
-        steps,
+        sections,
         changes,
         opencode_changes,
         codex_changes,
@@ -1731,8 +1859,9 @@ fn plan_import(setup: &Setup, answers: &Answers) -> Result<(Step, Vec<DirPlan>),
     }
     if answers.import {
         lines.push(
-            "The files are read, not changed; every memory stays in its project. CLAUDE.md rules \
-             are not imported in this version."
+            "The files are read, not changed; every memory stays in its project. CLAUDE.md \
+             rules are not imported in this version: CLAUDE.md keeps working as before (Claude \
+             Code still loads it)."
                 .to_string(),
         );
     } else {
@@ -1799,11 +1928,32 @@ fn plan_sessions(
     })
 }
 
-fn print_steps(out: &mut dyn Write, steps: &[Step]) {
-    for (n, step) in steps.iter().enumerate() {
-        let _ = writeln!(out, "  {}. {}", n + 1, step.title);
-        for line in &step.lines {
-            let _ = writeln!(out, "     - {line}");
+/// The plan: each section under its heading after a blank line, the steps numbered across
+/// the sections, the home directory as `~`.
+fn print_sections(
+    out: &mut dyn Write,
+    setup: &Setup,
+    sections: &[(String, Vec<Step>)],
+    color: bool,
+) {
+    let mut n = 0;
+    for (heading, steps) in sections {
+        if steps.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "\n{}", crate::prompt::paint(color, "1", heading));
+        for step in steps {
+            n += 1;
+            let _ = writeln!(out, "  {n}. {}", setup.show(&step.title));
+            for line in &step.lines {
+                let line = setup.show(line);
+                let line = if line.starts_with("ACTION NEEDED") {
+                    crate::prompt::action_needed(color, &line)
+                } else {
+                    line
+                };
+                let _ = writeln!(out, "     - {line}");
+            }
         }
     }
 }
@@ -1826,6 +1976,7 @@ pub(crate) fn apply_changes(
     changes: &[Change],
     state: &mut State,
     report: &mut Vec<String>,
+    backups: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<(), String> {
     let stamp = crate::daemon::now_utc().replace(':', "");
     for change in changes {
@@ -1858,7 +2009,7 @@ pub(crate) fn apply_changes(
             entry.insert("backup_valid".into(), json!(true));
             if let Some(bytes) = &current {
                 let backup = backup_file(setup, &stamp, path, bytes)?;
-                backup_note = format!(" (backup: {})", backup.display());
+                backup_note = backed_up(path, &backup, backups);
                 entry.insert("backup".into(), json!(backup.display().to_string()));
             }
         } else {
@@ -1873,7 +2024,7 @@ pub(crate) fn apply_changes(
                 entry.insert("backup_valid".into(), json!(false));
                 if let Some(bytes) = &current {
                     let backup = backup_file(setup, &stamp, path, bytes)?;
-                    backup_note = format!(" (backup: {})", backup.display());
+                    backup_note = backed_up(path, &backup, backups);
                 }
             }
         }
@@ -1920,6 +2071,22 @@ pub(crate) fn apply_changes(
     Ok(())
 }
 
+/// The report's note about a backup (its directory is reported once, in `backups`).
+fn backed_up(
+    path: &Path,
+    backup: &Path,
+    backups: &mut std::collections::BTreeSet<PathBuf>,
+) -> String {
+    if let Some(dir) = backup.parent() {
+        backups.insert(dir.to_path_buf());
+    }
+    match (path.file_name(), backup.file_name()) {
+        (Some(a), Some(b)) if a == b => " (backed up)".to_string(),
+        (_, Some(b)) => format!(" (backed up as {})", b.to_string_lossy()),
+        _ => " (backed up)".to_string(),
+    }
+}
+
 fn backup_file(setup: &Setup, stamp: &str, path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
     let dir = setup.state_dir().join("backups").join(stamp);
     std::fs::create_dir_all(&dir)
@@ -1959,14 +2126,9 @@ pub fn install(
 ) -> Result<u8, String> {
     let current = Current::read(setup)?;
     let interactive = options.interactive && !options.yes && !options.dry_run;
+    let color = options.color;
     let agent = setup.agent();
-    let title_names = |kinds: &[Kind]| -> String {
-        kinds
-            .iter()
-            .map(|k| k.display_name())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+    let notes = detection_notes(setup, options, &current);
     let answers = if interactive {
         let mut console = Console::new(input, out, options.color);
         let offered = options
@@ -1975,9 +2137,12 @@ pub fn install(
             .unwrap_or_else(|| current.detected.clone());
         let title = console.bold(&format!(
             "graphersal-memory install ({})",
-            title_names(&offered)
+            names_of(&offered)
         ));
         let _ = writeln!(console.out(), "{title}");
+        for note in &notes {
+            let _ = writeln!(console.out(), "  {note}");
+        }
         let hint = console
             .dim("A few questions; Enter takes the default. Nothing changes before the last step.");
         let _ = writeln!(console.out(), "{hint}");
@@ -1992,6 +2157,25 @@ pub fn install(
         default_answers(options, &current)
     };
     let plan = plan_install(setup, options, &answers, &current)?;
+    // What must never be skipped: conflicts, Codex's hook approval, "nothing is lost".
+    let mut must_read = Vec::new();
+    for conflict in &plan.conflicts {
+        must_read.push(paint(
+            color,
+            "33",
+            &format!("conflict: {}", setup.show(conflict)),
+        ));
+    }
+    let codex_approval = answers.harnesses.contains(&Kind::Codex)
+        && !crate::codex::install::inspect(setup).hooks_trusted;
+    if answers.harnesses.contains(&Kind::ClaudeCode)
+        && answers.auto_memory_off
+        && !current.auto_memory_off
+    {
+        must_read.push(NOTHING_IS_LOST.to_string());
+    } else if plan.codex_memories == Some(true) {
+        must_read.push(crate::codex::install::NOTHING_IS_LOST.to_string());
+    }
     if interactive {
         let mut console = Console::new(input, out, options.color);
         let offered = options
@@ -2008,63 +2192,94 @@ pub fn install(
                 codex_possible,
                 &answers.harnesses,
             );
-        console.step(total, total, "Summary", &["This is what install will do:"]);
-        print_steps(console.out(), &plan.steps);
-        for conflict in &plan.conflicts {
-            let line = console.yellow(&format!("  conflict: {conflict}"));
-            let _ = writeln!(console.out(), "{line}");
+        console.step(total, total, "Ready to install", &[]);
+        for (key, value) in recap(setup, &answers, &current, &plan) {
+            let _ = writeln!(console.out(), "  {key}: {value}");
         }
-        if answers.harnesses.contains(&Kind::ClaudeCode)
-            && answers.auto_memory_off
-            && !current.auto_memory_off
-        {
-            let _ = writeln!(console.out(), "\n  {NOTHING_IS_LOST}");
-        } else if plan.codex_memories == Some(true) {
-            let _ = writeln!(
-                console.out(),
-                "\n  {}",
-                crate::codex::install::NOTHING_IS_LOST
-            );
+        if !must_read.is_empty() || codex_approval {
+            let _ = writeln!(console.out());
+        }
+        for line in &must_read {
+            let _ = writeln!(console.out(), "  {line}");
+        }
+        if codex_approval {
+            let line =
+                crate::prompt::action_needed(color, &crate::codex::install::hook_approval_line());
+            let _ = writeln!(console.out(), "  {line}");
         }
         let _ = writeln!(console.out());
-        if !console.confirm_apply() {
+        let sections = &plan.sections;
+        let installed = console.confirm_install(&mut |out: &mut dyn Write| {
+            let _ = writeln!(out, "Every change install makes:");
+            print_sections(out, setup, sections, color);
+        });
+        if !installed {
             let _ = writeln!(console.out(), "Cancelled: nothing was changed.");
             return Ok(1);
         }
     } else {
         let _ = writeln!(
             out,
-            "graphersal-memory install ({})\n",
-            title_names(&answers.harnesses)
+            "{}",
+            paint(
+                color,
+                "1",
+                &format!(
+                    "graphersal-memory install ({})",
+                    names_of(&answers.harnesses)
+                )
+            )
         );
+        for note in &notes {
+            let _ = writeln!(out, "  {note}");
+        }
         let _ = writeln!(
             out,
-            "{}",
+            "\n{}",
             if options.dry_run {
-                "Dry run: this is what install would do (nothing is changed):"
+                "Dry run: this is what install would do (nothing is changed)."
             } else {
-                "This will:"
+                "This is what install will do:"
             }
         );
-        print_steps(out, &plan.steps);
+        print_sections(out, setup, &plan.sections, color);
+        // The plan itself says "nothing is lost" in its step; the conflicts follow it.
+        if !plan.conflicts.is_empty() {
+            let _ = writeln!(out);
+        }
         for conflict in &plan.conflicts {
-            let _ = writeln!(out, "  conflict: {conflict}");
+            let line = paint(color, "33", &format!("conflict: {}", setup.show(conflict)));
+            let _ = writeln!(out, "  {line}");
         }
         if options.dry_run {
             return Ok(0);
         }
-        if !options.yes && !confirm("\nProceed?", input, out) {
-            let _ = writeln!(
-                out,
-                "Aborted: nothing was changed (pass --yes to run without asking)."
-            );
-            return Ok(1);
+        if !options.yes {
+            let _ = writeln!(out);
+            match ask_yes_no("Install?", true, input, out) {
+                Reply::Yes => {}
+                Reply::No => {
+                    let _ = writeln!(
+                        out,
+                        "Cancelled: nothing was changed (pass --yes to run without asking)."
+                    );
+                    return Ok(1);
+                }
+                Reply::NoInput => {
+                    let _ = writeln!(out, "No answer, nothing was changed: {NO_TERMINAL}.");
+                    return Ok(1);
+                }
+            }
         }
     }
+    // The report: what changed per agent, then what changed in the memory itself.
     let mut report = Vec::new();
+    let mut agent_report: Vec<(Kind, Vec<String>)> = Vec::new();
+    let mut backups = std::collections::BTreeSet::new();
     let claude = answers.harnesses.contains(&Kind::ClaudeCode);
     let mut state = State::load(setup)?;
     for kind in &answers.harnesses {
+        let mut lines = Vec::new();
         let mut kind_state = State::load_of(setup, *kind)?;
         if !kind_state.meta.contains_key("installed_at") {
             kind_state
@@ -2083,19 +2298,37 @@ pub fn install(
                     .meta
                     .insert("auto_memory_off".into(), json!(answers.auto_memory_off));
                 kind_state.save(setup)?;
-                apply_changes(setup, &plan.changes, &mut kind_state, &mut report)?;
+                apply_changes(
+                    setup,
+                    &plan.changes,
+                    &mut kind_state,
+                    &mut lines,
+                    &mut backups,
+                )?;
                 state = kind_state;
             }
             Kind::OpenCode => {
                 kind_state.save(setup)?;
-                apply_changes(setup, &plan.opencode_changes, &mut kind_state, &mut report)?;
+                apply_changes(
+                    setup,
+                    &plan.opencode_changes,
+                    &mut kind_state,
+                    &mut lines,
+                    &mut backups,
+                )?;
             }
             Kind::Codex => {
                 kind_state
                     .meta
                     .insert("auto_memory_off".into(), json!(answers.auto_memory_off));
                 kind_state.save(setup)?;
-                apply_changes(setup, &plan.codex_changes, &mut kind_state, &mut report)?;
+                apply_changes(
+                    setup,
+                    &plan.codex_changes,
+                    &mut kind_state,
+                    &mut lines,
+                    &mut backups,
+                )?;
                 let config = &setup.codex.config_file;
                 match plan.codex_memories {
                     Some(true) => {
@@ -2103,7 +2336,7 @@ pub fn install(
                             crate::codex::install::MEMORIES_RECORD.into(),
                             json!({"previous": true}),
                         );
-                        report.push(
+                        lines.push(
                             "Codex's memories: off (uninstall exports every memory as Markdown \
                              and switches them on again)"
                                 .to_string(),
@@ -2120,9 +2353,16 @@ pub fn install(
             }
             Kind::Cursor => {
                 kind_state.save(setup)?;
-                apply_changes(setup, &plan.cursor_changes, &mut kind_state, &mut report)?;
+                apply_changes(
+                    setup,
+                    &plan.cursor_changes,
+                    &mut kind_state,
+                    &mut lines,
+                    &mut backups,
+                )?;
             }
         }
+        agent_report.push((*kind, lines));
     }
     match &plan.auto_memory {
         AutoMemoryPlan::Keep => {}
@@ -2131,11 +2371,18 @@ pub fn install(
                 .file_mut(&setup.paths.settings)
                 .insert(AUTO_MEMORY_RECORD.into(), json!({"previous": previous}));
             state.save(setup)?;
-            report.push(format!(
+            let line = format!(
                 "{}'s auto-memory: off (uninstall writes every memory back to its memory files \
                  and switches it on again)",
                 agent.display_name()
-            ));
+            );
+            match agent_report
+                .iter_mut()
+                .find(|(k, _)| *k == Kind::ClaudeCode)
+            {
+                Some((_, lines)) => lines.push(line),
+                None => report.push(line),
+            }
         }
         AutoMemoryPlan::Restore => {
             state
@@ -2190,7 +2437,7 @@ pub fn install(
                     "embedding model: downloaded {} ({}, licence {}, {}) into {}",
                     answers.model,
                     download::human_bytes(done.bytes),
-                    done.license,
+                    models::licence_name(&done.license),
                     done.identity,
                     done.dir.display()
                 ));
@@ -2342,57 +2589,237 @@ pub fn install(
                 .to_string(),
         ),
     }
-    let _ = writeln!(out, "\nReport:");
-    for line in &report {
-        let _ = writeln!(out, "  {line}");
-    }
-    for conflict in &plan.conflicts {
-        let _ = writeln!(out, "  conflict: {conflict}");
-    }
-    if plan.changes.is_empty()
-        && plan.opencode_changes.is_empty()
-        && plan.codex_changes.is_empty()
-        && plan.cursor_changes.is_empty()
-        && plan.conflicts.is_empty()
-    {
-        let _ = writeln!(
-            out,
-            "  {} configuration: already up to date",
-            title_names(&answers.harnesses)
-        );
-    }
-    let _ = writeln!(
+    print_install_report(
         out,
-        "\nRestart running {} sessions to load the MCP server and the {}. \
-         `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` \
-         removes it.",
-        answers
-            .harnesses
-            .iter()
-            .map(|k| k.display_name())
-            .collect::<Vec<_>>()
-            .join(" and "),
-        match (
-            claude
-                || answers.harnesses.contains(&Kind::Codex)
-                || answers.harnesses.contains(&Kind::Cursor),
-            answers.harnesses.contains(&Kind::OpenCode)
-        ) {
-            (true, true) => "hooks and the plugin",
-            (false, true) => "plugin",
-            _ => "hooks",
-        }
+        setup,
+        &InstallReport {
+            agents: &agent_report,
+            general: &report,
+            backups: &backups,
+            conflicts: &plan.conflicts,
+            up_to_date: plan.changes.is_empty()
+                && plan.opencode_changes.is_empty()
+                && plan.codex_changes.is_empty()
+                && plan.cursor_changes.is_empty()
+                && plan.conflicts.is_empty(),
+            harnesses: &answers.harnesses,
+            codex_approval: answers.harnesses.contains(&Kind::Codex)
+                && !crate::codex::install::inspect(setup).hooks_trusted,
+        },
+        color,
     );
-    if answers.harnesses.contains(&Kind::Codex)
-        && !crate::codex::install::inspect(setup).hooks_trusted
-    {
-        let _ = writeln!(out, "\n{}", crate::codex::install::hook_approval_line());
-    }
     Ok(if plan.conflicts.is_empty() && failures == 0 {
         0
     } else {
         1
     })
+}
+
+/// The lines about detection before the plan: harnesses whose configuration is here but whose
+/// program is not (not offered), and `--harness` naming a harness whose program is missing
+/// (installed anyway, with a warning).
+fn detection_notes(setup: &Setup, options: &InstallOptions, current: &Current) -> Vec<String> {
+    let mut notes = Vec::new();
+    let named = options.harnesses.clone().unwrap_or_default();
+    for kind in &named {
+        if setup.program(*kind).is_none() {
+            notes.push(format!(
+                "warning: {}'s program `{}` is not found (not on PATH, not in its usual \
+                 places); installing anyway because --harness names it",
+                kind.display_name(),
+                Setup::program_name(*kind)
+            ));
+        }
+    }
+    let nothing_found = options.harnesses.is_none() && setup.detected().is_empty();
+    for (kind, path) in setup.leftovers() {
+        // Named with --harness (warned above), or the fallback when nothing is found.
+        if named.contains(&kind) || (nothing_found && current.detected.contains(&kind)) {
+            continue;
+        }
+        notes.push(setup.show(&format!(
+            "note: {}: configuration found ({}), but the program `{}` is not installed: not \
+             offered (`--harness {}` installs anyway)",
+            kind.display_name(),
+            path.display(),
+            Setup::program_name(kind),
+            kind.id()
+        )));
+    }
+    if nothing_found {
+        notes.push(format!(
+            "note: no agent program was found (claude, opencode, codex, cursor); setting up {}",
+            names_of(&current.detected)
+        ));
+    }
+    notes
+}
+
+/// The wizard's recap: one `(topic, answer)` line per topic.
+fn recap(
+    setup: &Setup,
+    answers: &Answers,
+    current: &Current,
+    plan: &InstallPlan,
+) -> Vec<(&'static str, String)> {
+    let mut lines = vec![
+        ("Agents", names_of(&answers.harnesses)),
+        ("Memory language", answers.language.describe().to_string()),
+    ];
+    let model = if answers.model == models::BUILTIN {
+        format!("the built-in {} (no download)", models::BUILTIN)
+    } else if models::cached(&setup.data_dir, &answers.model).is_some() {
+        format!("{} (downloaded already)", answers.model)
+    } else {
+        match models::offered(&answers.model) {
+            Some(offered) => format!(
+                "{} ({} download, {})",
+                answers.model, offered.size, offered.license
+            ),
+            None => format!("{} (downloaded from Hugging Face)", answers.model),
+        }
+    };
+    lines.push(("Embedding model", model));
+    if answers.harnesses.contains(&Kind::ClaudeCode) {
+        let (_, _, new, changed, _) = import::totals(&plan.imports);
+        lines.push((
+            "File memory",
+            if !answers.import {
+                "not imported now (the session start imports a project's files)".to_string()
+            } else if new + changed == 0 {
+                "nothing new to import".to_string()
+            } else {
+                format!(
+                    "{} memory file{} imported now",
+                    new + changed,
+                    if new + changed == 1 { "" } else { "s" }
+                )
+            },
+        ));
+    }
+    let todo: usize = answers
+        .harnesses
+        .iter()
+        .filter_map(|kind| {
+            let dir = setup.agent_of(*kind).projects_dir().to_path_buf();
+            let request = crate::sessions::Request::for_harness(*kind, &dir);
+            crate::sessions::plan(&request, &setup.data_dir)
+                .ok()
+                .map(|(_, _, todo, _)| todo)
+        })
+        .sum();
+    lines.push((
+        "Past sessions",
+        format!(
+            "{todo} to index locally in the background (raw turns{})",
+            if answers.summaries {
+                ", then summaries"
+            } else {
+                ""
+            }
+        ),
+    ));
+    lines.push((
+        "Summaries",
+        if answers.summaries {
+            format!(
+                "on, through `{}`, at most ${:.2} per month",
+                summaries_command(&current.config, &answers.harnesses).join(" "),
+                current.config.summaries.monthly_budget_usd
+            )
+        } else {
+            "off".to_string()
+        },
+    ));
+    if answers.develop {
+        lines.push(("Develop server", format!("{DEVELOP_SERVER} registered")));
+    }
+    lines
+}
+
+/// What install reports after applying.
+struct InstallReport<'a> {
+    /// What changed per agent.
+    agents: &'a [(Kind, Vec<String>)],
+    /// What changed in the memory (settings, model, import, summaries, sessions).
+    general: &'a [String],
+    /// The backup directories written.
+    backups: &'a std::collections::BTreeSet<PathBuf>,
+    conflicts: &'a [String],
+    /// Nothing in the agents' files needed a change.
+    up_to_date: bool,
+    harnesses: &'a [Kind],
+    /// Codex's hooks still need the user's approval.
+    codex_approval: bool,
+}
+
+/// The report: the backups once, a section per agent and one for the memory, then the "Next
+/// steps" block after a separator, numbered, with ACTION NEEDED highlighted.
+fn print_install_report(
+    out: &mut dyn Write,
+    setup: &Setup,
+    report: &InstallReport<'_>,
+    color: bool,
+) {
+    let _ = writeln!(out, "\n{}", paint(color, "1", "Report:"));
+    for dir in report.backups {
+        let _ = writeln!(
+            out,
+            "  Backups of the files changed: {}",
+            setup.show(&format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR))
+        );
+    }
+    for (kind, lines) in report.agents {
+        let _ = writeln!(out, "\n{}:", kind.display_name());
+        if lines.is_empty() {
+            let _ = writeln!(out, "  already up to date");
+        }
+        for line in lines {
+            let _ = writeln!(out, "  {}", setup.show(line));
+        }
+    }
+    let _ = writeln!(out, "\nMemory:");
+    for line in report.general {
+        let _ = writeln!(out, "  {}", setup.show(line));
+    }
+    for conflict in report.conflicts {
+        let line = paint(color, "33", &format!("conflict: {}", setup.show(conflict)));
+        let _ = writeln!(out, "  {line}");
+    }
+    if report.up_to_date {
+        let _ = writeln!(
+            out,
+            "  {} configuration: already up to date",
+            names_of(report.harnesses)
+        );
+    }
+    let opencode = report.harnesses.contains(&Kind::OpenCode);
+    let hooks = report.harnesses.iter().any(|k| *k != Kind::OpenCode);
+    let parts = match (hooks, opencode) {
+        (true, true) => "the MCP server, hooks and plugin",
+        (false, true) => "the MCP server and plugin",
+        _ => "the MCP server and hooks",
+    };
+    let mut steps = vec![format!(
+        "Restart running {} sessions to load {parts}.",
+        names_of(report.harnesses)
+    )];
+    if report.codex_approval {
+        steps.push(crate::prompt::action_needed(
+            color,
+            &crate::codex::install::hook_approval_line(),
+        ));
+    }
+    let _ = writeln!(out, "\n{}", crate::prompt::SEPARATOR);
+    let _ = writeln!(out, "{}", paint(color, "1", "Next steps"));
+    for (n, step) in steps.iter().enumerate() {
+        let _ = writeln!(out, "  {}. {step}", n + 1);
+    }
+    let _ = writeln!(
+        out,
+        "  `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` \
+         removes it."
+    );
 }
 
 /// One line about an import.
@@ -2592,11 +3019,6 @@ pub fn uninstall_with(
             installed
         }
     });
-    let names = kinds
-        .iter()
-        .map(|k| k.display_name())
-        .collect::<Vec<_>>()
-        .join(", ");
     let exporting = !options.disable_develop_only && !options.no_export;
     // The memories first: if they cannot be read, nothing is removed.
     let rows = if exporting && !options.dry_run {
@@ -2654,12 +3076,24 @@ pub fn uninstall_with(
             changes.push((Kind::Cursor, change, what));
         }
     }
+    // The harnesses it actually changes (or is recorded in); the title names only these.
+    let active: Vec<Kind> = kinds
+        .iter()
+        .copied()
+        .filter(|kind| changes.iter().any(|(k, _, _)| k == kind) || State::exists_of(setup, *kind))
+        .collect();
+    let shown = if active.is_empty() {
+        kinds.clone()
+    } else {
+        active.clone()
+    };
+    let names = names_of(&shown);
     let title = if options.disable_develop_only {
         format!("graphersal-memory uninstall --disable-develop ({names})")
     } else {
         format!("graphersal-memory uninstall ({names})")
     };
-    let _ = writeln!(out, "{title}\n");
+    let _ = writeln!(out, "{}", paint(options.color, "1", &title));
     let export_line = |agent: &dyn Agent, rows: Option<&Vec<export::Row>>| -> String {
         let target = crate::commands::export_target(agent);
         match rows {
@@ -2699,27 +3133,57 @@ pub fn uninstall_with(
             None => format!("export every memory into {target} first (`--no-export` skips it)"),
         }
     };
+    // The memories go to the harnesses it is removed from.
+    let export_to: Vec<Kind> = if active.is_empty() {
+        kinds.clone()
+    } else {
+        active.clone()
+    };
     if exporting {
-        for kind in &kinds {
+        let _ = writeln!(out, "\nFirst, the memories:");
+        for kind in &export_to {
             let agent = setup.agent_of(*kind);
-            let _ = writeln!(out, "  - {}", export_line(agent.as_ref(), rows.as_ref()));
+            let line = setup.show(&export_line(agent.as_ref(), rows.as_ref()));
+            let _ = writeln!(out, "  - {line}");
         }
     }
     if changes.is_empty() && conflicts.is_empty() && !exporting {
-        let _ = writeln!(out, "Nothing of graphersal-memory is installed in {names}.");
+        let _ = writeln!(
+            out,
+            "\nNothing of graphersal-memory is installed in {names}."
+        );
     }
-    for (_, change, what) in &changes {
-        let _ = writeln!(out, "  - {}: {what}", change.path.display());
+    for kind in &shown {
+        let mine: Vec<_> = changes.iter().filter(|(k, _, _)| k == kind).collect();
+        if mine.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "\n{}:", kind.display_name());
+        for (_, change, what) in mine {
+            let _ = writeln!(
+                out,
+                "  - {}: {what}",
+                setup.show(&change.path.display().to_string())
+            );
+        }
+    }
+    if !conflicts.is_empty() {
+        let _ = writeln!(out);
     }
     for conflict in &conflicts {
-        let _ = writeln!(out, "  conflict: {conflict}");
+        let line = paint(
+            options.color,
+            "33",
+            &format!("conflict: {}", setup.show(conflict)),
+        );
+        let _ = writeln!(out, "  {line}");
     }
     if options.purge {
         let _ = writeln!(
             out,
-            "  - delete the data directory {} with every memory in it (the daemon is stopped \
-             first)",
-            setup.data_dir.display()
+            "\nThen: delete the data directory {} with every memory in it (the daemon is \
+             stopped first)",
+            setup.show(&setup.data_dir.display().to_string())
         );
     }
     if options.dry_run {
@@ -2737,7 +3201,7 @@ pub fn uninstall_with(
             .map(|r| r.project.as_str())
             .filter(|p| !p.is_empty())
             .collect();
-        let targets = kinds
+        let targets = export_to
             .iter()
             .map(|k| {
                 let agent = setup.agent_of(*k);
@@ -2750,39 +3214,56 @@ pub fn uninstall_with(
             })
             .collect::<Vec<_>>()
             .join(" and ");
-        let _ = write!(
-            out,
-            "\nExport {} memor{} of {} project{} {targets}? [Y/n] ",
+        let question = setup.show(&format!(
+            "\nExport {} memor{} of {} project{} {targets}?",
             rows.len(),
             if rows.len() == 1 { "y" } else { "ies" },
             projects.len(),
             if projects.len() == 1 { "" } else { "s" },
-        );
-        let _ = out.flush();
-        let mut answer = String::new();
-        let _ = input.read_line(&mut answer);
-        if matches!(answer.trim().to_ascii_lowercase().as_str(), "n" | "no") {
+        ));
+        if ask_yes_no(&question, true, input, out) == Reply::No {
             export_rows = None;
         }
     }
     let needs_ok = !changes.is_empty() || options.purge;
     if needs_ok && !options.yes {
-        let question = if options.purge {
-            "\nThis deletes your memories for good. Proceed?"
+        let reply = if options.purge {
+            ask_yes_no(
+                "\nThis deletes your memories for good. Uninstall and delete them?",
+                false,
+                input,
+                out,
+            )
         } else {
-            "\nProceed?"
+            ask_yes_no("\nUninstall?", true, input, out)
         };
-        if !confirm(question, input, out) {
-            let _ = writeln!(out, "Aborted: nothing was changed.");
-            return Ok(1);
+        match reply {
+            Reply::Yes => {}
+            Reply::No => {
+                let _ = writeln!(out, "Cancelled: nothing was changed.");
+                return Ok(1);
+            }
+            Reply::NoInput => {
+                let _ = writeln!(out, "No answer, nothing was changed: {NO_TERMINAL}.");
+                return Ok(1);
+            }
         }
     }
     let mut report = Vec::new();
+    let mut agent_report: Vec<(Kind, Vec<String>)> =
+        shown.iter().map(|kind| (*kind, Vec::new())).collect();
+    let mut push_for = |kind: Kind, line: String, report: &mut Vec<String>| match agent_report
+        .iter_mut()
+        .find(|(k, _)| *k == kind)
+    {
+        Some((_, lines)) => lines.push(line),
+        None => report.push(line),
+    };
     if let Some(rows) = &export_rows {
         if rows.is_empty() {
             report.push("exported nothing: the graph holds no memories".to_string());
         } else {
-            for kind in &kinds {
+            for kind in &export_to {
                 let agent = setup.agent_of(*kind);
                 report.extend(export::write(agent.as_ref(), &setup.data_dir, rows)?.lines());
                 if !agent.has_file_memory() {
@@ -2802,10 +3283,14 @@ pub fn uninstall_with(
             .iter()
             .any(|(_, change, _)| change.path == setup.paths.settings)
     {
-        report.push(format!(
-            "{}'s auto-memory: back to how it was before install",
-            setup.agent().display_name()
-        ));
+        push_for(
+            Kind::ClaudeCode,
+            format!(
+                "{}'s auto-memory: back to how it was before install",
+                setup.agent().display_name()
+            ),
+            &mut report,
+        );
     }
     if !options.disable_develop_only
         && kinds.contains(&Kind::Codex)
@@ -2816,7 +3301,11 @@ pub fn uninstall_with(
             .iter()
             .any(|(_, change, _)| change.path == setup.codex.config_file)
     {
-        report.push("Codex's memories: switched on again, as before install".to_string());
+        push_for(
+            Kind::Codex,
+            "Codex's memories: switched on again, as before install".to_string(),
+            &mut report,
+        );
     }
     let mut states = [
         (Kind::ClaudeCode, state),
@@ -2828,7 +3317,11 @@ pub fn uninstall_with(
         match &change.after {
             Some(text) => {
                 fsutil::write_atomic(&change.path, text.as_bytes())?;
-                report.push(format!("changed {}", change.path.display()));
+                push_for(
+                    *kind,
+                    format!("changed {}", change.path.display()),
+                    &mut report,
+                );
                 if options.disable_develop_only && State::exists_of(setup, *kind) {
                     for (k, state) in states.iter_mut() {
                         if k == kind {
@@ -2842,7 +3335,11 @@ pub fn uninstall_with(
             }
             None => {
                 remove_file(&change.path)?;
-                report.push(format!("removed {}", change.path.display()));
+                push_for(
+                    *kind,
+                    format!("removed {}", change.path.display()),
+                    &mut report,
+                );
             }
         }
     }
@@ -2860,7 +3357,11 @@ pub fn uninstall_with(
             for dir in dirs {
                 // Only when empty: a directory someone else filled meanwhile stays.
                 if std::fs::remove_dir(&dir).is_ok() {
-                    report.push(format!("removed the directory {}", dir.display()));
+                    push_for(
+                        *kind,
+                        format!("removed the directory {}", dir.display()),
+                        &mut report,
+                    );
                 }
             }
             if conflicts.is_empty() {
@@ -2871,21 +3372,39 @@ pub fn uninstall_with(
     if options.purge {
         report.extend(purge(setup)?);
     }
-    let _ = writeln!(out, "\nReport:");
-    if report.is_empty() {
+    let _ = writeln!(out, "\n{}", paint(options.color, "1", "Report:"));
+    let nothing = report.is_empty() && agent_report.iter().all(|(_, lines)| lines.is_empty());
+    if nothing {
         let _ = writeln!(out, "  nothing to change");
     }
     for line in &report {
-        let _ = writeln!(out, "  {line}");
+        let _ = writeln!(out, "  {}", setup.show(line));
+    }
+    for (kind, lines) in &agent_report {
+        if lines.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "\n{}:", kind.display_name());
+        for line in lines {
+            let _ = writeln!(out, "  {}", setup.show(line));
+        }
+    }
+    if !conflicts.is_empty() {
+        let _ = writeln!(out);
     }
     for conflict in &conflicts {
-        let _ = writeln!(out, "  conflict: {conflict}");
+        let line = paint(
+            options.color,
+            "33",
+            &format!("conflict: {}", setup.show(conflict)),
+        );
+        let _ = writeln!(out, "  {line}");
     }
     if !options.disable_develop_only && !options.purge {
         let _ = writeln!(
             out,
-            "  Your memories stay in {} (`uninstall --purge` deletes them).",
-            setup.data_dir.display()
+            "\nYour memories stay in {} (`uninstall --purge` deletes them).",
+            setup.show(&setup.data_dir.display().to_string())
         );
     }
     Ok(if conflicts.is_empty() { 0 } else { 1 })
@@ -3202,10 +3721,13 @@ pub fn inspect(setup: &Setup) -> Inspection {
 /// The installation part of `status`.
 pub fn status_lines(setup: &Setup) -> Vec<String> {
     let inspection = inspect(setup);
-    let mut lines = vec![format!(
-        "Claude Code (user configuration {}):",
-        setup.paths.user_config.display()
-    )];
+    let mut lines = vec![
+        "Claude Code:".to_string(),
+        format!(
+            "  user configuration: {}",
+            setup.paths.user_config.display()
+        ),
+    ];
     lines.push(format!(
         "  MCP server {USE_SERVER} (use): {}",
         inspection.use_server.describe()
@@ -3251,7 +3773,6 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
     }
     let errors = inspection.errors.clone();
     let nothing = inspection.nothing_installed();
-    lines.extend(shared_status_lines(setup));
     for error in &errors {
         lines.push(format!("  problem: {error}"));
     }
@@ -3357,8 +3878,17 @@ pub(crate) fn program_found(program: &str) -> bool {
     })
 }
 
-/// `doctor`'s checks of the Claude Code installation and (`shared_doctor`) the data directory.
+/// `doctor`'s checks of the Claude Code installation and (`shared_doctor`) the data directory
+/// (the tests' view; the command prints them as two sections).
+#[cfg(test)]
 pub fn doctor(setup: &Setup) -> Vec<Finding> {
+    let mut findings = claude_doctor(setup);
+    findings.extend(shared_doctor(setup));
+    findings
+}
+
+/// `doctor`'s checks of the Claude Code installation only.
+pub fn claude_doctor(setup: &Setup) -> Vec<Finding> {
     let inspection = inspect(setup);
     let mut findings = Vec::new();
     for error in &inspection.errors {
@@ -3456,7 +3986,6 @@ pub fn doctor(setup: &Setup) -> Vec<Finding> {
             &settings,
         ));
     }
-    findings.extend(shared_doctor(setup));
     findings
 }
 

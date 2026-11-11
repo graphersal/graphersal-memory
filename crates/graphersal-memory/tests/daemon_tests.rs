@@ -690,3 +690,134 @@ fn the_daemon_opens_the_store_at_its_start_and_status_shows_its_maintenance() {
         "{text}"
     );
 }
+
+/// A shim whose daemon (started by it) panics at `site:name` (the test-only hook of debug
+/// builds, `GRAPHERSAL_MEMORY_TEST_PANIC`).
+fn shim_with_panic(env: &Env, project: &str, panic_at: &str) -> Shim {
+    let mut child = env
+        .command()
+        .env("GRAPHERSAL_MEMORY_TEST_PANIC", panic_at)
+        .arg("mcp")
+        .arg("--project")
+        .arg(project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (lines, from) = channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut shim = Shim {
+        to: child.stdin.take(),
+        from,
+        child,
+        next_id: 1,
+    };
+    let init = shim.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {},
+               "clientInfo": {"name": "test", "version": "1"}}),
+    );
+    assert!(init["result"].is_object(), "{init}");
+    shim.notify("notifications/initialized");
+    shim
+}
+
+/// A panic inside a job on the store's session thread is logged with the function it ran, the
+/// call gets a JSON refusal, and the next calls (control and MCP) are answered.
+#[test]
+fn a_panic_in_a_job_is_logged_and_the_daemon_serves_on() {
+    let env = Env::new("10m");
+    let mut shim = shim_with_panic(&env, "/w/a", "job:export_memories");
+    shim.remember("before-the-panic", "Written before the panic", "project");
+    let refused = env.raw(r#"{"protocol":1,"control":"export_memories","project":"/w/a"}"#);
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(refused["error"]["code"], "store", "{refused}");
+    let log = env.log();
+    assert!(log.contains("PANIC"), "{log}");
+    assert!(
+        log.contains("while running the catalog function export_memories"),
+        "{log}"
+    );
+    // The next calls are answered.
+    assert!(env.status().is_some());
+    let listed = shim.ok("memories", json!({}));
+    assert!(listed.contains("before-the-panic"), "{listed}");
+    // The CLI says the daemon failed, not "another program on the socket".
+    let output = env
+        .command()
+        .args(["export", "--to-files", "--harness", "opencode"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{text}");
+    assert!(!text.contains("another program"), "{text}");
+    assert!(
+        text.contains("the daemon failed") && text.contains("daemon.log"),
+        "{text}"
+    );
+    close_ok(shim);
+}
+
+/// A panic while answering a control request is logged with the request and answered with an
+/// `internal` refusal naming the log; the daemon serves on.
+#[test]
+fn a_panic_in_a_control_request_is_answered_and_the_daemon_serves_on() {
+    let env = Env::new("10m");
+    let shim = shim_with_panic(&env, "/w/a", "control:sessions_status");
+    let refused = env.control("sessions_status").unwrap();
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(refused["error"]["code"], "internal", "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("daemon.log"), "{message}");
+    let log = env.log();
+    assert!(
+        log.contains("while answering the control request 'sessions_status'"),
+        "{log}"
+    );
+    assert!(env.status().is_some());
+    close_ok(shim);
+}
+
+/// An answer longer than the handshake limit (every memory for `export_memories`, as
+/// `uninstall` reads them) is read whole: it once ended at 64 KiB and was reported as "not
+/// JSON (another program on the socket?)".
+#[test]
+fn a_large_control_answer_is_read_whole() {
+    let env = Env::new("10m");
+    let mut shim = env.shim("/w/a");
+    let body = "A long body that makes the export answer large. ".repeat(40);
+    for i in 0..60 {
+        shim.ok(
+            "remember",
+            json!({"slug": format!("long-note-{i}"), "kind": "project",
+                   "summary": format!("Long note {i}"), "body": body, "scope": "global"}),
+        );
+    }
+    let output = env
+        .command()
+        .args(["export", "--to-files", "--harness", "opencode"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{text}");
+    let global =
+        std::fs::read_to_string(env.root.join("graphersal-memory-export/opencode/global.md"))
+            .unwrap_or_default();
+    assert!(global.contains("long-note-59"), "{text}");
+    close_ok(shim);
+}

@@ -26,7 +26,10 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/agents.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex | cursor; `Agent`: MCP
     configuration file, its servers key and entry shape, settings and instruction files, the
     sessions location, the export directories, the auto-memory key, the headless command;
-    `is_our_entry` for both entry shapes) and `ClaudeCode`; `Setup::detected`/`installed`;
+    `is_our_entry` for both entry shapes) and `ClaudeCode`; `Setup::detected` (a harness's program
+    found: `Setup::program`, `PATH` plus known install locations), `leftovers` (configuration
+    without the program: reported, never offered) and `installed` (what status, doctor and
+    uninstall work on);
   - `src/opencode.rs` + `src/opencode/`: opencode 1.x and 2.x, one `OpenCode` agent with the
     line as data (`Major`, `Detected`, `detect`: `opencode --version` in a scratch home, else the
     database's tables, else 2.x; the hooks never ask the binary). Paths `OpenCodePaths`: XDG
@@ -73,7 +76,10 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     fingerprinted managed block inserted before the first table, `remove_table` for our tables
     whose markers were lost, `set_bool` in place; every edit re-parsed and checked);
   - `src/prompt.rs`: the wizard's console (`Console`: "Step N of M", numbered choices, the
-    default on Enter, re-ask; colour only on a terminal without `NO_COLOR`);
+    default on Enter, re-ask, `confirm_install` with `d` for every change; colour only on a
+    terminal without `NO_COLOR`), `paint`, `action_needed` and the `SEPARATOR` the other
+    commands' output shares (one style: a headline, sections after a blank line, indented
+    `key: value`, `~` for the home directory through `install::tilde`/`Setup::show`);
   - `src/language.rs`: the memory language (`english` | `any`) and its rule text, filled into
     `mcp/use.md`'s `{language_rule}` and into the rule block;
   - `src/models.rs`: the offered embedding models (sizes and licences from the Hugging Face
@@ -141,7 +147,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     finished = unchanged for `IDLE` (30 min) or `ended`, state
     `<data dir>/sessions/<harness>.json`,
     `Writer` (the daemon: the project's store; tests: `tests::Direct`), `run` (index in batches of
-    40 turns, then summaries), `estimate`, `plan`, the control lines `index_sessions` /
+    40 turns, then summaries; a failing or panicking file is recorded in its state entry,
+    `failed`, and skipped after `INDEX_ATTEMPTS` tries of the same version under the same binary
+    version, the rest goes on), `estimate`, `plan`, the control lines `index_sessions` /
     `sessions_status`;
   - `src/summaries.rs`: the opt-in summaries: the prompt and JSON schema (ported from the
     prototype), `harness_args` (`claude` gets `--output-format json --json-schema ... --tools ""
@@ -198,13 +206,21 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     two `unsafe` blocks of the crate), the handshake with retries on
     `restarting`/`stopping`, then a byte relay (`run_with`, with optional `Events`: the session
     start's work on a thread after the handshake, the end's after the input closed; notes to
-    stderr, never stdout); `control` (status/stop);
+    stderr, never stdout); `control` (status/stop); `exchange` reads a one-line answer of up to
+    `MAX_ANSWER_BYTES` (an export carries every memory) and reports a missing, cut or non-JSON
+    answer as "the daemon failed ...; see <daemon.log>";
   - `src/daemon.rs`: the daemon: pid lock, socket, one thread per connection, routing by the
     handshake to a `StoreRuntime` (the default store opened at the start, beside the first
     handshake; others on first use) and its profile, the maintenance thread, idle exit (no exit while
     the indexer or a store's scheduled-job runs work), drain/restart for a newer shim, clean
     shutdown (socket first, then the stores; the process exit afterwards only ends the blocked
-    accept loop);
+    accept loop); panics: a hook logs each one with its thread and what it was doing (`doing`:
+    the control request, catalog function or session file, never memory contents; the message
+    cut at its first quote, `panic_text`), connection and control handling and the indexer run
+    under `catch_unwind` (a control request gets an `internal` refusal naming the log), a job
+    panic is caught by the engine, and a store whose session thread ended makes the daemon exit
+    cleanly (`check_alive`); debug builds only: `GRAPHERSAL_MEMORY_TEST_PANIC=<site>:<name>`
+    (`injected_panic`, sites `control`, `job`, `index`) for the tests;
   - `src/registry.rs`: `registry.json` (project -> store; everything goes to `default` until
     isolation, M7);
   - `src/engine.rs`: the pinned engine version (`engine_version!`, shown by `--version`), and

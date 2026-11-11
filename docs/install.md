@@ -18,6 +18,18 @@ without a shell) ``, and Codex's and Cursor's commands carry no quotes where the
 outputs were not captured on Windows; what is tested there and what is not yet is in
 [Supported harnesses: Windows](harnesses.md#windows).
 
+**Layout since M13 (2026-11-11).** The transcripts below were captured before the output was
+regrouped; the content of each line is the same, the layout differs: the wizard's last step is
+now a short recap (agents, language, model, file memory, past sessions, summaries, plus any
+conflict, Codex's ACTION NEEDED and the "Nothing is lost" line) ending in `Install? [Y/n, d =
+show every change]`, and the full plan appears behind `d` and with `--dry-run`, in sections
+(shared, one per agent, then import and indexing); the report names the backup directory once,
+groups its lines per agent and ends with a numbered "Next steps" block after a separator; paths
+under the home directory show as `~`; `status` and `doctor` set each section off by a blank
+line (`status` puts Memory before the agents and repeats ACTION NEEDED as its last line);
+uninstall asks `Uninstall? [Y/n]` and, with nothing to answer (a pipe), says that it needs a
+terminal or `--yes`. A harness is offered only when its program is found (see the README).
+
 ## `graphersal-memory install`
 
 Answers: Enter, Enter, Enter, Enter, `2`, `2`, Enter. The model download is real (Hugging Face);

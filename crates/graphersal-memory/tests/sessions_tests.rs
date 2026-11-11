@@ -630,3 +630,125 @@ fn the_mcp_server_does_nothing_else_inside_a_summary_run() {
         assert_eq!(sessions_status(&env)["requested"], 0);
     }
 }
+
+/// Text that broke the engine (graphersal-session 0.6.0's `trailing_terminal` cut a script
+/// inside a multi-byte character before its last `(`): Cyrillic, an emoji and a no-break space
+/// each right before an unbalanced parenthesis inside a string, at the end of the text.
+const AWKWARD: &str = "Готово: релиз проверен 🎉, see (draft — е(1 and \u{a0}(x 🎉(";
+
+/// A transcript of `work` whose turns and title are [`AWKWARD`] text, finished a day ago.
+fn write_awkward_transcript(file: &Path, work: &Path) {
+    let cwd = work.display().to_string();
+    let lines = [
+        json!({"type": "user", "sessionId": "s", "cwd": cwd, "gitBranch": "main",
+               "timestamp": "2026-10-01T09:00:00.000Z", "origin": {"kind": "human"},
+               "message": {"role": "user", "content": format!("Проверь релиз (шаг 1: {AWKWARD}")}}),
+        json!({"type": "assistant", "timestamp": "2026-10-01T09:00:30.000Z",
+               "message": {"content": [{"type": "text", "text": AWKWARD}]}}),
+        json!({"type": "ai-title", "aiTitle": format!("Релиз е({AWKWARD}")}),
+    ];
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(file, text).unwrap();
+    let past = SystemTime::now() - Duration::from_secs(24 * 3600);
+    std::fs::File::options()
+        .write(true)
+        .open(file)
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+}
+
+/// Whether `value` holds the string `text` somewhere.
+fn holds_string(value: &Value, text: &str) -> bool {
+    match value {
+        Value::String(s) => s == text,
+        Value::Array(items) => items.iter().any(|v| holds_string(v, text)),
+        Value::Object(map) => map.values().any(|v| holds_string(v, text)),
+        _ => false,
+    }
+}
+
+/// Whether `value` holds a string containing `part` somewhere.
+fn holds_part(value: &Value, part: &str) -> bool {
+    match value {
+        Value::String(s) => s.contains(part),
+        Value::Array(items) => items.iter().any(|v| holds_part(v, part)),
+        Value::Object(map) => map.values().any(|v| holds_part(v, part)),
+        _ => false,
+    }
+}
+
+/// Non-ASCII text through the whole path: a transcript is indexed by the daemon and found
+/// again, a memory is remembered and recalled with its exact text. Passes only with the engine
+/// fix of graphersal main 2b2a148c (graphersal 0.6.1; with 0.6.0 the engine panics).
+#[test]
+fn non_ascii_sessions_and_memories_round_trip() {
+    let env = Env::new();
+    let (work, file) = env.project();
+    write_awkward_transcript(&file, &work);
+    let output = env.run(&["import", "--sessions"]);
+    let out = text(&output);
+    assert!(output.status.success(), "{out}");
+    assert!(!out.contains("problem"), "{out}");
+    let report = env.wait_for_indexing();
+    assert_eq!(report["indexed"], 1, "{report}");
+    let mut mcp = env.mcp(&work);
+    let newest = mcp.call("sessions", json!({}));
+    assert_eq!(newest[0]["title"], format!("Релиз е({AWKWARD}"), "{newest}");
+    let session = mcp.call("session", json!({"id": "0f0e0d0c", "turns": true}));
+    assert!(holds_part(&session, AWKWARD), "{session}");
+    let turns = mcp.call("recall", json!({"text": "релиз проверен", "label": "turn"}));
+    assert!(holds_part(&turns, AWKWARD), "{turns}");
+    let body = format!("Решение: {AWKWARD}");
+    mcp.call(
+        "remember",
+        json!({"slug": "awkward-text", "kind": "project", "summary": "Релиз е(1 🎉", "body": body}),
+    );
+    let recalled = mcp.call("memory", json!({"slug": "awkward-text"}));
+    assert!(holds_string(&recalled, &body), "{recalled}");
+    let near = mcp.call("recall", json!({"text": "Релиз е(1", "k": 5}));
+    assert!(near.to_string().contains("awkward-text"), "{near}");
+    let log = std::fs::read_to_string(env.run_dir().join("daemon.log")).unwrap_or_default();
+    assert!(!log.contains("PANIC"), "{log}");
+}
+
+/// A session file whose indexing panics (the test-only hook of debug builds) is recorded and
+/// skipped: the others are indexed in the same run, it is tried once more in a later run, then
+/// left alone; the daemon logs the panic with the file and serves on.
+#[test]
+fn indexing_goes_on_past_a_failing_transcript() {
+    let env = Env::new();
+    let (work, file) = env.project();
+    let bad = file.with_file_name("0f0e0d0c-aaaa-bbbb-cccc-0000000000ff.jsonl");
+    write_transcript(&bad, &work);
+    let run = |env: &Env| {
+        let mut command = env.command(&["import", "--sessions"]);
+        command.env("GRAPHERSAL_MEMORY_TEST_PANIC", "index:cccc-0000000000ff");
+        let output = command.stdin(Stdio::null()).output().unwrap();
+        text(&output)
+    };
+    let first = run(&env);
+    assert!(first.contains("1 indexed"), "{first}");
+    assert!(first.contains("0000000000ff.jsonl"), "{first}");
+    assert!(first.contains("attempt 1 of 2"), "{first}");
+    let log = std::fs::read_to_string(env.run_dir().join("daemon.log")).unwrap_or_default();
+    assert!(log.contains("PANIC"), "{log}");
+    assert!(log.contains("while indexing"), "{log}");
+    assert!(log.contains("0000000000ff.jsonl"), "{log}");
+    // The daemon serves on.
+    let mut mcp = env.mcp(&work);
+    let found = mcp.call("sessions", json!({}));
+    assert!(
+        found.as_array().is_some_and(|rows| rows.len() == 1),
+        "{found}"
+    );
+    // Tried once more, then skipped.
+    let second = run(&env);
+    assert!(second.contains("attempt 2 of 2"), "{second}");
+    let third = run(&env);
+    assert!(!third.contains("attempt"), "{third}");
+    let report = env.wait_for_indexing();
+    assert_eq!(report["failed"], 1, "{report}");
+    let status = text(&env.run(&["status"]));
+    assert!(status.contains("1 could not be indexed"), "{status}");
+}
