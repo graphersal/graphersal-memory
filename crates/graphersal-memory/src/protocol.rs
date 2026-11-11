@@ -4,7 +4,8 @@
 //! A connection starts with ONE JSON line from the client and ONE JSON line answer:
 //!
 //! - a handshake: `{"shim_version", "protocol": 1, "profile": "use"|"develop", "project":
-//!   {"root", "name"?}, "harness": {"name", "version"?}, "data_dir"?}` -> `{"ok": true,
+//!   {"root", "name"?}, "harness": {"name", "version"?}, "data_dir"?, "start_context"?}` ->
+//!   `{"ok": true,
 //!   "daemon_version", "store"}`, then the connection carries plain MCP stdio framing
 //!   (newline-delimited JSON-RPC) in both directions until either side closes it;
 //! - or a control request: `{"protocol": 1, "control": "status"|"stop"}` -> one answer, then
@@ -13,6 +14,11 @@
 //!   true, "run": n}`), `{"protocol": 1, "control": "sessions_status"}` reports it (`running`,
 //!   `requested`, `completed`, `report`); see `crate::sessions`. An older daemon refuses them as
 //!   unknown control requests, which the callers report and survive.
+//!
+//!   `start_context` (`full`, the default, `short` or `none`) says whether the `use` server's
+//!   instructions of the connection carry the start context ([`StartContextMode`]). `{"protocol":
+//!   1, "control": "start_context", "project", "max_chars"?}` answers the start context of a
+//!   project root (`crate::start_context::StartContext::to_json`).
 //!
 //! A refusal is `{"ok": false, "daemon_version", "error": {"code", "message"}}`; the codes are
 //! the [`Refusal`] variants. `restarting` and `stopping` are retried by the shim (the daemon
@@ -80,6 +86,46 @@ pub fn refusal(kind: Refusal, message: &str) -> String {
     .to_string()
 }
 
+/// Whether the instructions of a `use` connection carry the start context
+/// (`crate::start_context`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StartContextMode {
+    /// The whole start context (within `memory.start_context_chars`): a harness without a
+    /// session-start hook of ours, or one we cannot tell.
+    #[default]
+    Full,
+    /// Cut so that the instructions stay within Claude Code's limit for server instructions
+    /// ([`CLAUDE_CODE_INSTRUCTIONS_CHARS`]): Claude Code without our SessionStart hook.
+    Short,
+    /// None: the harness's session-start hook delivers it (Claude Code with our hook), or the
+    /// product's own connections (import).
+    None,
+}
+
+/// Claude Code cuts a server's instructions after this many characters
+/// (code.claude.com/docs/en/mcp: 4,096 since v2.1.296; 2,048 before).
+pub const CLAUDE_CODE_INSTRUCTIONS_CHARS: usize = 4096;
+
+impl StartContextMode {
+    /// The name on the wire.
+    pub fn name(self) -> &'static str {
+        match self {
+            StartContextMode::Full => "full",
+            StartContextMode::Short => "short",
+            StartContextMode::None => "none",
+        }
+    }
+
+    /// The mode of a wire name (an unknown or missing one is `Full`).
+    pub fn parse(name: Option<&str>) -> Self {
+        match name {
+            Some("short") => StartContextMode::Short,
+            Some("none") => StartContextMode::None,
+            _ => StartContextMode::Full,
+        }
+    }
+}
+
 /// A handshake as the daemon reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handshake {
@@ -93,6 +139,8 @@ pub struct Handshake {
     pub harness: String,
     /// The data directory the shim works on, when it says.
     pub data_dir: Option<String>,
+    /// Whether the instructions carry the start context.
+    pub start_context: StartContextMode,
 }
 
 /// What the first line of a connection asks for.
@@ -168,11 +216,24 @@ pub fn parse_opening(line: &[u8]) -> Result<Opening, (Refusal, String)> {
         project: project.to_string(),
         harness: harness.to_string(),
         data_dir: text("data_dir").map(str::to_string),
+        start_context: StartContextMode::parse(text("start_context")),
     }))
 }
 
-/// The handshake line the shim sends (without its line end).
+/// The handshake line the shim sends (without its line end), with the whole start context.
+#[cfg(test)]
 pub fn handshake_line(profile: Profile, project: &str, harness: &str, data_dir: &str) -> String {
+    handshake_line_with(profile, project, harness, data_dir, StartContextMode::Full)
+}
+
+/// [`handshake_line`] with the start context mode `start`.
+pub fn handshake_line_with(
+    profile: Profile,
+    project: &str,
+    harness: &str,
+    data_dir: &str,
+    start: StartContextMode,
+) -> String {
     let name = std::path::Path::new(project)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned());
@@ -183,6 +244,7 @@ pub fn handshake_line(profile: Profile, project: &str, harness: &str, data_dir: 
         "project": {"root": project, "name": name},
         "harness": {"name": harness, "version": null},
         "data_dir": data_dir,
+        "start_context": start.name(),
     })
     .to_string()
 }
@@ -244,6 +306,26 @@ mod tests {
             parse_opening(control_line("status").as_bytes()),
             Ok(Opening::Control("status".into()))
         );
+    }
+
+    #[test]
+    fn the_start_context_mode_round_trips_and_defaults_to_full() {
+        for mode in [
+            StartContextMode::Full,
+            StartContextMode::Short,
+            StartContextMode::None,
+        ] {
+            let line = handshake_line_with(Profile::Use, "/w", "claude-code", "/d", mode);
+            let Ok(Opening::Handshake(handshake)) = parse_opening(line.as_bytes()) else {
+                panic!("{line}");
+            };
+            assert_eq!(handshake.start_context, mode);
+        }
+        let old = br#"{"protocol":1,"shim_version":"0.0.0","profile":"use","project":{"root":"/w"},"harness":{"name":"x"}}"#;
+        let Ok(Opening::Handshake(handshake)) = parse_opening(old) else {
+            panic!("an older shim's handshake");
+        };
+        assert_eq!(handshake.start_context, StartContextMode::Full);
     }
 
     #[test]

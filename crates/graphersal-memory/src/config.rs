@@ -7,7 +7,9 @@
 //! ```
 //!
 //! `memory.language` (`english`, the default, or `any`) is the memory language rule of the MCP
-//! instructions and the managed rule block (`crate::language`). `embedding.model` is the
+//! instructions and the managed rule block (`crate::language`). `memory.start_context_chars`
+//! (default 8000, `0` = off) is the budget of the start context, the always-loaded memories put
+//! into the start of every session (`crate::start_context`). `embedding.model` is the
 //! embedding model the daemon makes every store's vector rules use: a Hugging Face repository
 //! downloaded into `<data dir>/models/` (`crate::models`), or `hash-ngram/1` (the built-in
 //! embedder); without the key the stores keep the embedder they have. `install` writes both.
@@ -40,10 +42,11 @@ pub const CONFIG_FILE: &str = "config.json";
 const FORMAT: u64 = 1;
 
 /// The keys this version knows, as dotted paths.
-const KNOWN: [&str; 15] = [
+const KNOWN: [&str; 16] = [
     "version",
     "memory",
     "memory.language",
+    "memory.start_context_chars",
     "embedding",
     "embedding.model",
     "daemon",
@@ -144,6 +147,8 @@ pub struct Config {
     pub language: Option<crate::language::Language>,
     /// The embedding model, when the file sets it: a repository or `hash-ngram/1`.
     pub model: Option<String>,
+    /// `memory.start_context_chars`, when the file sets it (`0`: no start context).
+    pub start_context_chars: Option<usize>,
     /// The session summaries settings.
     pub summaries: Summaries,
     /// `store.checkpoint_after` in bytes, when the file sets it.
@@ -215,6 +220,13 @@ impl Config {
                         .ok_or("'memory.language' must be \"english\" or \"any\"")?,
                 );
             }
+            if let Some(chars) = memory.get("start_context_chars") {
+                config.start_context_chars =
+                    Some(chars.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or(
+                        "'memory.start_context_chars' must be a whole number of characters \
+                             (0 = no start context)",
+                    )?);
+            }
         }
         if let Some(embedding) = object.get("embedding") {
             let embedding = embedding
@@ -255,6 +267,13 @@ impl Config {
     /// The memory language (the file's, else English).
     pub fn language(&self) -> crate::language::Language {
         self.language.unwrap_or_default()
+    }
+
+    /// The start context's budget in characters (the file's, else
+    /// [`crate::start_context::DEFAULT_CHARS`]; `0`: none).
+    pub fn start_context_chars(&self) -> usize {
+        self.start_context_chars
+            .unwrap_or(crate::start_context::DEFAULT_CHARS)
     }
 
     /// The default settings file's text.
@@ -539,6 +558,25 @@ mod tests {
         let fresh = with_summaries(None, true, None).unwrap();
         assert!(Config::parse(fresh.as_bytes()).unwrap().summaries.enabled);
         assert!(with_summaries(Some("{"), true, None).is_err());
+    }
+
+    #[test]
+    fn the_start_context_budget_parses_with_a_default_and_zero_turns_it_off() {
+        let config = Config::parse(Config::default_text().as_bytes()).unwrap();
+        assert_eq!(
+            config.start_context_chars(),
+            crate::start_context::DEFAULT_CHARS
+        );
+        let set =
+            Config::parse(br#"{"version": 1, "memory": {"start_context_chars": 0}}"#).unwrap();
+        assert_eq!(set.start_context_chars(), 0);
+        assert!(set.unknown.is_empty());
+        for bad in [
+            r#"{"version": 1, "memory": {"start_context_chars": -1}}"#,
+            r#"{"version": 1, "memory": {"start_context_chars": "8k"}}"#,
+        ] {
+            assert!(Config::parse(bad.as_bytes()).is_err(), "{bad}");
+        }
     }
 
     #[test]

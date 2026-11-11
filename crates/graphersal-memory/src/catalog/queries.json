@@ -64,7 +64,7 @@
   },
   {
     "name": "remember",
-    "description": "Store or replace the memory <slug> of this project (scope \"global\": of every project). kind: user|feedback|project|reference; summary: one line; body: markdown; why/how_to_apply appended as **Why:**/**How to apply:**; title+hook: its index line; links: related memory slugs; about: vertex ids. Check memories(text) first to replace, not duplicate.",
+    "description": "Store or replace the memory <slug> of this project (scope \"global\": of every project). kind: user|feedback|project|reference; summary: one line; body: markdown; why/how_to_apply appended as **Why:**/**How to apply:**; title+hook: its index line; pinned: load at every session start; links: related memory slugs; about: vertex ids. Check memories(text) first to replace, not duplicate.",
     "params": [
       {
         "name": "slug",
@@ -128,6 +128,16 @@
         "default": ""
       },
       {
+        "name": "pinned",
+        "schema": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "default": null
+      },
+      {
         "name": "links",
         "schema": {
           "type": "array",
@@ -179,6 +189,43 @@
           "type": "string",
           "pattern": "^[a-z0-9-]+$"
         }
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  },
+  {
+    "name": "pin",
+    "description": "Pin or unpin the memory <slug> (this project's first, else the global one) when the user asks: a pinned memory is loaded into the start of every session (feedback and user memories always are). order: its priority in its group, lower first.",
+    "params": [
+      {
+        "name": "slug",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        }
+      },
+      {
+        "name": "pinned",
+        "schema": {
+          "type": "boolean"
+        },
+        "default": true
+      },
+      {
+        "name": "order",
+        "schema": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "default": null
       },
       {
         "name": "project",

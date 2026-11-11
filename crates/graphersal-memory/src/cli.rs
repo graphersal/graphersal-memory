@@ -240,6 +240,14 @@ pub enum Command {
         #[command(subcommand)]
         action: ProjectsAction,
     },
+    /// Print the start context: the memories put into the start of every session of a project
+    /// (every pinned memory, every feedback and user memory, of the project and global),
+    /// exactly as the agent gets it.
+    StartContext {
+        /// The project (a directory in it; default: the current directory).
+        #[arg(long, value_name = "DIR")]
+        project: Option<PathBuf>,
+    },
     /// Run a harness hook (the hooks `install` adds call this; not for you).
     #[command(hide = true)]
     Hook {

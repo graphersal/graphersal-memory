@@ -713,3 +713,291 @@ fn moved_with_a_new_remote_is_suggested_as_a_merge_and_the_merge_keeps_the_memor
     client.close();
     assert!(crate::projects::look_alike_lines(data.path()).is_empty());
 }
+
+// ------------------------------------------------------------------------------------------
+// M14: pinning, the start context and the instructions of a connection.
+// ------------------------------------------------------------------------------------------
+
+/// The JSON of a tool's text answer (the whole text, or its last line that is JSON).
+fn json_of(text: &str) -> Value {
+    serde_json::from_str(text)
+        .ok()
+        .or_else(|| {
+            text.lines()
+                .rev()
+                .find_map(|line| serde_json::from_str(line.trim()).ok())
+        })
+        .unwrap_or_else(|| panic!("no JSON in {text}"))
+}
+
+/// Remembers `slug` of `kind` in `scope`, with extra arguments merged in.
+fn remember_kind(client: &mut Client, slug: &str, kind: &str, scope: &str, extra: Value) {
+    let mut args = json!({"slug": slug, "kind": kind, "summary": format!("summary of {slug}"),
+                          "body": format!("Body of {slug}."), "scope": scope});
+    for (key, value) in extra.as_object().unwrap() {
+        args[key] = value.clone();
+    }
+    client.ok("remember", args);
+}
+
+/// The memories of the start context fixture: feedback, user, project and reference memories
+/// of /work/a, one global feedback memory, one project memory of /work/b.
+fn start_context_fixture(data: &Path) {
+    let mut a = Client::start(data, ProfileKind::Use, "/work/a");
+    remember_kind(&mut a, "feedback-old", "feedback", "project", json!({}));
+    remember_kind(
+        &mut a,
+        "feedback-new",
+        "feedback",
+        "project",
+        json!({"title": "Newest rule", "hook": "the hook line"}),
+    );
+    remember_kind(&mut a, "about-me", "user", "project", json!({}));
+    remember_kind(
+        &mut a,
+        "semver",
+        "project",
+        "project",
+        json!({"pinned": true}),
+    );
+    remember_kind(&mut a, "where-logs", "reference", "project", json!({}));
+    remember_kind(&mut a, "plain-fact", "project", "project", json!({}));
+    remember_kind(&mut a, "never-push", "feedback", "global", json!({}));
+    a.close();
+    let mut b = Client::start(data, ProfileKind::Use, "/work/b");
+    remember_kind(&mut b, "b-rule", "feedback", "project", json!({}));
+    b.close();
+}
+
+/// The start context of `project` in the store of `data` within `budget`.
+fn start_context_of(
+    data: &Path,
+    project: &str,
+    budget: usize,
+) -> crate::start_context::StartContext {
+    let runtime = mcp::StoreRuntime::open(
+        "default",
+        &crate::store::default_store_dir(data),
+        std::sync::Arc::new(mcp::endpoint()),
+    )
+    .unwrap();
+    let id = crate::projects::resolve(data, project).unwrap().id;
+    let context = runtime.start_context(&id, budget).unwrap();
+    runtime.close().unwrap();
+    context
+}
+
+#[test]
+fn pin_and_remember_set_pinned_and_a_replace_keeps_it() {
+    let data = TempDir::new("pin");
+    let mut client = Client::start(data.path(), ProfileKind::Use, "/work/a");
+    remember_kind(&mut client, "ci-manual", "project", "project", json!({}));
+    let pinned = client.ok("pin", json!({"slug": "ci-manual", "order": 2}));
+    assert!(
+        pinned.contains("\"pinned\":true") && pinned.contains("\"order\":2"),
+        "{pinned}"
+    );
+    // A replace without `pinned` keeps the pin and the order.
+    remember_kind(&mut client, "ci-manual", "project", "project", json!({}));
+    let listed: Value = json_of(&client.ok("memories", json!({})));
+    assert_eq!(listed[0]["slug"], "ci-manual");
+    assert_eq!(listed[0]["pinned"], true, "{listed}");
+    // remember(pinned: false) and pin(pinned: false) unpin.
+    remember_kind(
+        &mut client,
+        "ci-manual",
+        "project",
+        "project",
+        json!({"pinned": false}),
+    );
+    let listed: Value = json_of(&client.ok("memories", json!({})));
+    assert_eq!(listed[0]["pinned"], false, "{listed}");
+    client.ok("pin", json!({"slug": "ci-manual"}));
+    let off = client.ok("pin", json!({"slug": "ci-manual", "pinned": false}));
+    assert!(off.contains("\"pinned\":false"), "{off}");
+    let missing = client.call("pin", json!({"slug": "nope"}));
+    assert!(text(&missing).contains("no memory nope"), "{missing}");
+    client.close();
+}
+
+#[test]
+fn memories_lists_pinned_then_feedback_then_user_then_the_rest() {
+    let data = TempDir::new("order");
+    start_context_fixture(data.path());
+    let mut client = Client::start(data.path(), ProfileKind::Use, "/work/a");
+    let listed: Value = json_of(&client.ok("memories", json!({})));
+    let slugs: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        slugs,
+        [
+            "semver",
+            "never-push",
+            "feedback-new",
+            "feedback-old",
+            "about-me",
+            "where-logs",
+            "plain-fact"
+        ]
+    );
+    client.close();
+}
+
+#[test]
+fn the_start_context_holds_pinned_feedback_and_user_memories_of_the_project_and_global() {
+    let data = TempDir::new("start");
+    start_context_fixture(data.path());
+    let context = start_context_of(data.path(), "/work/a", crate::start_context::DEFAULT_CHARS);
+    assert_eq!((context.total, context.shown), (5, 5), "{}", context.text);
+    let text = &context.text;
+    for slug in [
+        "semver",
+        "never-push",
+        "feedback-new",
+        "feedback-old",
+        "about-me",
+    ] {
+        assert!(
+            text.contains(&format!("(memory: {slug})")),
+            "{slug}: {text}"
+        );
+    }
+    for slug in ["where-logs", "plain-fact", "b-rule"] {
+        assert!(
+            !text.contains(&format!("(memory: {slug})")),
+            "{slug}: {text}"
+        );
+    }
+    assert!(
+        text.contains("- Newest rule — the hook line (memory: feedback-new)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("- never-push — summary of never-push (memory: never-push)"),
+        "{text}"
+    );
+    let how = text.find("## How to work").unwrap();
+    let about = text.find("## About you").unwrap();
+    let pinned = text.find("## Pinned").unwrap();
+    assert!(how < about && about < pinned, "{text}");
+    // Another project: its own rule and the global one.
+    let b = start_context_of(data.path(), "/work/b", crate::start_context::DEFAULT_CHARS);
+    assert_eq!(b.total, 2, "{}", b.text);
+    assert!(b.text.contains("(memory: b-rule)") && b.text.contains("(memory: never-push)"));
+    // Over the budget: pinned first, the rest named.
+    let cut = start_context_of(data.path(), "/work/a", 520);
+    assert!(cut.chars() <= 520, "{}", cut.text);
+    assert!(cut.shown >= 1 && cut.shown < 5, "{}", cut.text);
+    assert!(cut.text.contains("(memory: semver)"), "{}", cut.text);
+    assert!(
+        cut.text
+            .contains(&format!("{} more not shown: memories(kind:", 5 - cut.shown)),
+        "{}",
+        cut.text
+    );
+}
+
+/// The `instructions` of a `use` connection to the store of `data` in mode `start`.
+fn instructions_in_mode(data: &Path, start: crate::protocol::StartContextMode) -> String {
+    let runtime = mcp::StoreRuntime::open(
+        "default",
+        &crate::store::default_store_dir(data),
+        std::sync::Arc::new(mcp::endpoint()),
+    )
+    .unwrap();
+    let id = crate::projects::resolve(data, "/work/a").unwrap().id;
+    let (server_in, mut to) = std::io::pipe().unwrap();
+    let (from, server_out) = std::io::pipe().unwrap();
+    let connection = mcp::Connection {
+        language: crate::language::Language::default(),
+        start,
+        start_chars: crate::start_context::DEFAULT_CHARS,
+    };
+    let instructions = std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            runtime.serve_with(
+                ProfileKind::Use,
+                &id,
+                None,
+                connection,
+                BufReader::new(server_in),
+                server_out,
+            )
+        });
+        writeln!(
+            to,
+            "{}",
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"}}})
+        )
+        .unwrap();
+        let mut line = String::new();
+        BufReader::new(from).read_line(&mut line).unwrap();
+        drop(to);
+        assert_eq!(server.join().unwrap(), Ok(()));
+        let answer: Value = serde_json::from_str(&line).unwrap();
+        answer["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    });
+    runtime.close().unwrap();
+    instructions
+}
+
+#[test]
+fn the_instructions_of_a_connection_carry_its_start_context_once() {
+    use crate::protocol::StartContextMode;
+    let data = TempDir::new("instr");
+    // No always-loaded memory yet: the instructions stay as they were.
+    let empty = instructions_of(data.path());
+    assert!(!empty.contains("## How to work"), "{empty}");
+    start_context_fixture(data.path());
+    let full = instructions_of(data.path());
+    assert!(full.starts_with("graphersal-memory:"), "{full}");
+    assert!(
+        full.contains("## How to work") && full.contains("(memory: semver)"),
+        "{full}"
+    );
+    assert_eq!(
+        instructions_in_mode(data.path(), StartContextMode::Full),
+        full
+    );
+    // Claude Code with our hook: the hook delivers it, the instructions leave it out.
+    let none = instructions_in_mode(data.path(), StartContextMode::None);
+    assert_eq!(none, empty);
+    // Claude Code without the hook: within its limit for server instructions.
+    let short = instructions_in_mode(data.path(), StartContextMode::Short);
+    assert!(
+        short.chars().count() <= crate::protocol::CLAUDE_CODE_INSTRUCTIONS_CHARS,
+        "{}",
+        short.len()
+    );
+    assert!(short.contains("(memory: semver)"), "{short}");
+}
+
+#[test]
+fn the_start_context_mode_of_a_harness_avoids_double_delivery() {
+    use crate::protocol::StartContextMode;
+    assert_eq!(
+        crate::commands::start_context_mode("claude-code", true),
+        StartContextMode::None
+    );
+    assert_eq!(
+        crate::commands::start_context_mode("claude-code", false),
+        StartContextMode::Short
+    );
+    assert_eq!(
+        crate::commands::start_context_mode("unknown", false),
+        StartContextMode::Full
+    );
+    assert_eq!(
+        crate::commands::start_context_mode("unknown", true),
+        StartContextMode::Full
+    );
+}

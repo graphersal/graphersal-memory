@@ -325,18 +325,21 @@ pub struct ShimOptions {
     pub project: String,
     /// The harness's name.
     pub harness: String,
+    /// Whether the instructions carry the start context.
+    pub start_context: protocol::StartContextMode,
 }
 
 /// Connects (starting the daemon if needed) and hands over: the connection, ready for MCP
 /// lines, and the reader of the daemon's answers.
 pub fn open(options: &ShimOptions) -> Result<(Stream, BufReader<Stream>), String> {
-    let handshake = protocol::handshake_line(
+    let handshake = protocol::handshake_line_with(
         options.profile,
         &options.project,
         &options.harness,
         &crate::mcp::canonical(&options.location.data_dir)
             .display()
             .to_string(),
+        options.start_context,
     );
     let mut attempt = 0;
     loop {

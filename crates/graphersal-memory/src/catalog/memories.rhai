@@ -4,10 +4,19 @@ fn memories(text, k, kind, project) {
     if text == "" {
         let t = g.v().has_label("memory").filter(visible);
         if kind != "" { t = t.has("kind", kind); }
-        return t.order().by(__.coalesce(__.values("index_order"), __.constant(1000000))).limit(k)
-            .project("slug", "scope", "kind", "title", "hook", "updated_at")
+        // The start context's order: pinned, feedback, user (each by order, then newest), then
+        // the rest by order, then list position (as imported from MEMORY.md, then as written).
+        let group = __.choose(__.has("pinned", true), __.constant(0), __.choose(__.has("kind", "feedback"), __.constant(1),
+                __.choose(__.has("kind", "user"), __.constant(2), __.constant(3))));
+        return t.order()
+            .by(group)
+            .by(__.coalesce(__.values("order"), __.constant(1000000)))
+            .by(__.choose(__.or(__.has("pinned", true), __.has("kind", within(["feedback", "user"]))),
+                __.coalesce(__.values("updated_at").as_string(), __.constant("")), __.constant("")), Order.desc)
+            .by(__.coalesce(__.values("index_order"), __.constant(1000000))).by("name").limit(k)
+            .project("slug", "scope", "kind", "pinned", "title", "hook", "updated_at")
             .by("name").by(__.coalesce(__.values("project").constant("project"), __.constant("global")))
-            .by("kind").by(__.coalesce(__.values("title"), __.values("name")))
+            .by("kind").by(__.coalesce(__.values("pinned"), __.constant(false))).by(__.coalesce(__.values("title"), __.values("name")))
             .by(__.coalesce(__.values("hook"), __.values("summary"))).by("updated_at").to_list();
     }
     let hits = g.query("recall", #{text: text, k: if kind == "" { k } else { k * 4 }, label: "memory", project: project});

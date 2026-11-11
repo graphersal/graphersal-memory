@@ -249,6 +249,34 @@ or `GRAPHERSAL_MEMORY_DIR` gets `<data dir>/run`, so each data directory has a d
   gives the whole summary. A failed summary is tried twice per session version, then waits until
   the session changes.
 
+## The start context
+
+The memories that always apply reach the model at the start of every session, without the agent
+having to search for them: every **pinned** memory (any kind), and every **feedback** and **user**
+memory, of the session's project and the global ones. This replaces what Claude Code's
+`MEMORY.md` does for its own memory.
+
+- **Order**: pinned first, then feedback, then user; within each by `order` (a priority the user
+  can give, lower first), then newest first. `memories()` without text lists them in that order,
+  then the other memories.
+- **Text**: grouped like `MEMORY.md` ("How to work" = feedback, "About you" = user, "Pinned" =
+  the other pinned ones), one line per memory: `- <title> — <hook or summary> (memory: <slug>)`,
+  then a line naming `memory(slug)` for the full text and `memories(text)` for the rest.
+- **Budget**: `memory.start_context_chars` in `config.json` (default 8,000 characters; `0` turns
+  it off). Over it, memories are kept in the order above and the text ends with "N more not
+  shown: memories(kind: ...)".
+- **Pinning**: the agent pins on request with `pin(slug, pinned, order?)` (or `remember(...,
+  pinned)`); memories under a `## Pinned` heading of Claude Code's `MEMORY.md` are imported as
+  pinned, and an index line moved out of that heading unpins the memory at its next import.
+- **Delivery**: the session-start hooks (Claude Code: `additionalContext`; Cursor:
+  `additional_context`) and the `use` server's instructions of each connection, computed when the
+  connection opens. A Claude Code connection whose settings hold our SessionStart hook leaves it
+  out of the instructions, so it is not sent twice; per harness: [Supported
+  harnesses](harnesses.md#the-start-context-what-reaches-the-model-at-a-sessions-start).
+- **Seeing it**: `graphersal-memory start-context [--project DIR]` prints the text; `status` and
+  `doctor` show "start context: N memories, X of Y characters (Z not shown)" for the current
+  directory's project (when the daemon runs).
+
 ## Profiles: the two MCP servers
 
 | Server | Default | Tools | Enforcement |
@@ -313,9 +341,9 @@ session starts and closes it when the session ends, so the server does the hooks
   Code sets `CLAUDECODE`).
 - **At the end** (the harness closes its input): it queues the indexing again, when the daemon
   still runs.
-- **The start line** the session-start hook prints is covered by the server's instructions,
-  which every MCP client reads at the start: they name the memory tools and say to write
-  memories there, not into memory files.
+- **The start line and the start context** the session-start hook delivers are covered by the
+  server's instructions, which every MCP client reads at the start: they name the memory tools,
+  say to write memories there, not into memory files, and end with the start context (below).
 
 When the hooks run too, nothing happens twice: the import holds the import lock and skips files
 whose fingerprint it already has, and the daemon merges index requests and skips unchanged

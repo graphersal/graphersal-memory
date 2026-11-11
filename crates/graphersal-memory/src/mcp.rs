@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use crate::catalog;
 use crate::cli::Profile as ProfileKind;
 use crate::language::Language;
+use crate::protocol::StartContextMode;
 use crate::{registry, store};
 
 /// The instructions of the `use` server.
@@ -61,13 +62,33 @@ pub fn config(kind: ProfileKind) -> Result<McpConfig, String> {
 
 /// The MCP configuration of a profile with the memory language rule `language` in the `use`
 /// instructions.
+#[cfg(test)]
 pub fn config_for(kind: ProfileKind, language: Language) -> Result<McpConfig, String> {
+    config_with(kind, language, "")
+}
+
+/// The `use` instructions with the memory language rule `language`.
+pub fn use_instructions(language: Language) -> String {
+    crate::language::instructions(USE_INSTRUCTIONS, language)
+}
+
+/// [`config_for`] with `start_context` (the connection's start context, `crate::start_context`)
+/// after the `use` instructions, when it is not empty.
+pub fn config_with(
+    kind: ProfileKind,
+    language: Language,
+    start_context: &str,
+) -> Result<McpConfig, String> {
+    let mut text = use_instructions(language);
+    if !start_context.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(start_context);
+    }
     let value = match kind {
         ProfileKind::Use => json!({
             "server_name": "graphersal-memory",
             "server_title": "graphersal-memory",
-            "instructions": {"mode": "replace",
-                             "text": crate::language::instructions(USE_INSTRUCTIONS, language)},
+            "instructions": {"mode": "replace", "text": text},
             "tools": {"include": []},
             // `remember` and `forget` are meant to be called by the agent: their own
             // descriptions say what they write, without the engine's "only when the user asked".
@@ -105,7 +126,17 @@ pub fn profile_for(
     use_policy: graphersal::auth::AccessPolicy,
     language: Language,
 ) -> Result<Profile, String> {
-    let profile = Profile::new(false).with_config(config_for(kind, language)?);
+    profile_with(kind, use_policy, language, "")
+}
+
+/// [`profile_for`] with the connection's start context in the `use` instructions.
+pub fn profile_with(
+    kind: ProfileKind,
+    use_policy: graphersal::auth::AccessPolicy,
+    language: Language,
+    start_context: &str,
+) -> Result<Profile, String> {
+    let profile = Profile::new(false).with_config(config_with(kind, language, start_context)?);
     Ok(match kind {
         ProfileKind::Use => profile.with_access_policy(use_policy),
         ProfileKind::Develop => profile,
@@ -163,8 +194,19 @@ pub struct ServeOptions {
 
 /// Serves the default store of `options.data_dir` (created on first use) over newline-delimited
 /// JSON-RPC on `read`/`write` until `read` ends; the store is closed before this returns.
+#[cfg(test)]
 pub fn serve(
     options: &ServeOptions,
+    read: impl BufRead,
+    write: impl Write + Send,
+) -> Result<(), String> {
+    serve_in_mode(options, StartContextMode::Full, read, write)
+}
+
+/// [`serve`] with the start context mode `start` (`crate::commands::start_context_mode`).
+pub fn serve_in_mode(
+    options: &ServeOptions,
+    start: StartContextMode,
     read: impl BufRead,
     write: impl Write + Send,
 ) -> Result<(), String> {
@@ -179,12 +221,41 @@ pub fn serve(
     let project = crate::projects::resolve(&options.data_dir, &options.project)
         .map(|resolved| resolved.id)
         .unwrap_or_else(|_| options.project.clone());
-    let language = crate::config::Config::load(&options.data_dir)
-        .map(|config| config.language())
-        .unwrap_or_default();
-    let served = runtime.serve_with(options.profile, &project, None, language, read, write);
+    let config = crate::config::Config::load(&options.data_dir).unwrap_or_default();
+    let connection = Connection {
+        language: config.language(),
+        start,
+        start_chars: config.start_context_chars(),
+    };
+    let served = runtime.serve_with(options.profile, &project, None, connection, read, write);
     let closed = runtime.close();
     served.and(closed)
+}
+
+/// What a connection's instructions carry.
+#[derive(Debug, Clone, Copy)]
+pub struct Connection {
+    /// The memory language rule.
+    pub language: Language,
+    /// Whether the start context is in them.
+    pub start: StartContextMode,
+    /// The start context's budget (`memory.start_context_chars`).
+    pub start_chars: usize,
+}
+
+impl Connection {
+    /// The start context's budget for this connection: `0` without one, Claude Code's limit
+    /// for server instructions less the `use` instructions in `Short` mode.
+    pub fn start_budget(&self) -> usize {
+        match self.start {
+            StartContextMode::None => 0,
+            StartContextMode::Full => self.start_chars,
+            StartContextMode::Short => self.start_chars.min(
+                crate::protocol::CLAUDE_CODE_INSTRUCTIONS_CHARS
+                    .saturating_sub(use_instructions(self.language).chars().count() + 2),
+            ),
+        }
+    }
 }
 
 /// The MCP endpoint every store's contexts share (its statistics and tool catalog are the
@@ -347,19 +418,52 @@ impl StoreRuntime {
         read: impl BufRead,
         write: impl Write + Send,
     ) -> Result<(), String> {
-        self.serve_with(kind, project, identity, Language::default(), read, write)
+        let connection = Connection {
+            language: Language::default(),
+            start: StartContextMode::Full,
+            start_chars: crate::start_context::DEFAULT_CHARS,
+        };
+        self.serve_with(kind, project, identity, connection, read, write)
     }
 
-    /// [`Self::serve`] with the memory language rule `language` in the instructions.
+    /// The start context of `project` (its stable id) within `budget` characters.
+    pub fn start_context(
+        &self,
+        project: &str,
+        budget: usize,
+    ) -> Result<crate::start_context::StartContext, String> {
+        let rows = self.call("start_context", json!({"project": project}))?;
+        Ok(crate::start_context::render(
+            crate::start_context::entries(&rows),
+            budget,
+        ))
+    }
+
+    /// [`Self::serve`] with the memory language rule and the start context of `connection` in
+    /// the instructions (the start context as of the connection's start).
     pub fn serve_with(
         &self,
         kind: ProfileKind,
         project: &str,
         identity: Option<&str>,
-        language: Language,
+        options: Connection,
         read: impl BufRead,
         write: impl Write + Send,
     ) -> Result<(), String> {
+        let language = options.language;
+        let budget = if kind == ProfileKind::Use {
+            options.start_budget()
+        } else {
+            0
+        };
+        // A start context that cannot be read leaves it out; the connection still serves.
+        let start = if budget > 0 {
+            self.start_context(project, budget)
+                .map(|context| context.text)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let connection = self
             .context(kind)
             .mcp_connection()
@@ -368,10 +472,10 @@ impl StoreRuntime {
             Some(identity) => connection.with_identity(identity),
             None => connection,
         };
-        let base = if language == Language::default() {
+        let base = if language == Language::default() && start.is_empty() {
             connection.profile().clone()
         } else {
-            profile_for(kind, self.use_policy.clone(), language)?
+            profile_with(kind, self.use_policy.clone(), language, &start)?
         };
         // The connection's project: hidden from the tool list, set on every call of a saved
         // query that declares it (the memory functions), whatever the client sent.

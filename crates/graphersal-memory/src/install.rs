@@ -572,6 +572,14 @@ pub fn is_our_hook(hook: &Value) -> bool {
     }
 }
 
+/// Whether Claude Code's settings file (`paths.settings`) holds our SessionStart hook (then
+/// the hook delivers the start context, and the MCP instructions leave it out).
+pub fn claude_start_hook_installed(paths: &ClaudePaths) -> bool {
+    read_json(&paths.settings, &mut Vec::new())["hooks"]["SessionStart"]
+        .as_array()
+        .is_some_and(|groups| groups.iter().any(is_our_hook_group))
+}
+
 /// Whether a hook group (an element of `hooks.<Event>`) consists of our commands only.
 pub fn is_our_hook_group(group: &Value) -> bool {
     group["hooks"]
@@ -1007,10 +1015,44 @@ pub const NOTHING_IS_LOST: &str = "Nothing is lost: if you uninstall graphersal-
     every memory, including new ones, is written back to Claude Code's memory files and its \
     auto-memory is switched back on.";
 
+/// What the auto-memory question and the recap say about the start context: that the rules
+/// and pinned memories still reach every session (with the numbers), or why the default keeps
+/// Claude Code's own memory on.
+fn start_context_sentence(current: &Current) -> String {
+    match &current.start_blocked {
+        Some(reason) => format!("The default is to keep it on: {reason}."),
+        None if current.start_preview.total == 0 => "Your rules and pinned memories reach every \
+            session through graphersal-memory's start context (none in your memory files yet; \
+            `graphersal-memory start-context` shows it)."
+            .to_string(),
+        None => format!(
+            "Your rules and pinned memories still reach every session through \
+             graphersal-memory's start context: {} memor{}, {} characters{} \
+             (`graphersal-memory start-context` shows it).",
+            current.start_preview.total,
+            if current.start_preview.total == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            current.start_preview.chars(),
+            if current.start_preview.not_shown() > 0 {
+                format!(
+                    ", {} over the budget not shown",
+                    current.start_preview.not_shown()
+                )
+            } else {
+                String::new()
+            }
+        ),
+    }
+}
+
 /// Plans the change of the user settings (the hooks, and the auto-memory switch).
 fn plan_settings(
     setup: &Setup,
     auto_memory_off: bool,
+    start_note: &str,
     state: &State,
 ) -> Result<(Step, Option<Change>, AutoMemoryPlan), String> {
     let path = &setup.paths.settings;
@@ -1066,7 +1108,8 @@ fn plan_settings(
             } else if let Some((new, _)) = jsonedit::set_member(&text, &[], key, &json!(false))? {
                 text = new;
                 lines.push(format!(
-                    "{key}: false (switch Claude Code's auto-memory off). {NOTHING_IS_LOST}"
+                    "{key}: false (switch Claude Code's auto-memory off). {start_note} \
+                     {NOTHING_IS_LOST}"
                 ));
                 plan = AutoMemoryPlan::SwitchOff {
                     previous: recorded
@@ -1095,8 +1138,13 @@ fn plan_settings(
             plan = AutoMemoryPlan::Restore;
         } else {
             lines.push(format!(
-                "{key}: kept as it is (auto-memory {})",
-                if off { "off" } else { "on" }
+                "{key}: kept as it is (auto-memory {}){}",
+                if off { "off" } else { "on" },
+                if off {
+                    String::new()
+                } else {
+                    format!(". {start_note}")
+                }
             ));
         }
     }
@@ -1217,6 +1265,62 @@ struct Current {
     detected: Vec<Kind>,
     /// Whether Codex's own memories are on (`[features] memories = true`).
     codex_memories_on: bool,
+    /// The start context the memory files give (the project with the most always-loaded
+    /// memories), within the budget of the settings.
+    start_preview: crate::start_context::StartContext,
+    /// Why the start context cannot carry the always-loaded memories, when it cannot.
+    start_blocked: Option<String>,
+}
+
+/// The start context Claude Code's memory files give once imported: per project its pinned,
+/// feedback and user memories, rendered with `budget`; the project with the most of them.
+pub fn start_preview(
+    imports: &[import::DirPlan],
+    budget: usize,
+) -> crate::start_context::StartContext {
+    imports
+        .iter()
+        .map(|plan| {
+            let entries = plan
+                .dir
+                .files
+                .iter()
+                .filter(|f| f.pinned || f.kind == "feedback" || f.kind == "user")
+                .map(|f| crate::start_context::Entry {
+                    slug: f.slug.clone(),
+                    scope: "project".to_string(),
+                    kind: f.kind.clone(),
+                    pinned: f.pinned,
+                    order: None,
+                    title: if f.title.is_empty() {
+                        f.slug.clone()
+                    } else {
+                        f.title.clone()
+                    },
+                    hook: if f.hook.is_empty() {
+                        f.summary.clone()
+                    } else {
+                        f.hook.clone()
+                    },
+                    updated_at: String::new(),
+                })
+                .collect();
+            crate::start_context::render(entries, budget)
+        })
+        .max_by_key(|context| (context.total, context.chars()))
+        .unwrap_or_else(|| crate::start_context::render(Vec::new(), budget))
+}
+
+/// Why the start context cannot carry the always-loaded memories into Claude Code's sessions
+/// (then the auto-memory question defaults to keeping Claude Code's own memory on), or `None`.
+/// Install adds the SessionStart hook, which delivers it; without the hook the MCP instructions
+/// carry what fits Claude Code's limit for them.
+pub fn start_context_blocked(config: &Config) -> Option<String> {
+    (config.start_context_chars() == 0).then(|| {
+        "memory.start_context_chars is 0 in config.json, so graphersal-memory loads no memories \
+         at session start"
+            .to_string()
+    })
 }
 
 impl Current {
@@ -1239,7 +1343,11 @@ impl Current {
             &ImportState::load(&setup.data_dir)?,
         );
         let (with_project, _, new, changed, _) = import::totals(&imports);
+        let start_preview = start_preview(&imports, config.start_context_chars());
+        let start_blocked = start_context_blocked(&config);
         Ok(Self {
+            start_preview,
+            start_blocked,
             installed: State::exists(setup),
             auto_memory_answer: state
                 .meta
@@ -1321,7 +1429,9 @@ fn default_answers(options: &InstallOptions, current: &Current) -> Answers {
         model: default_model(options, current, language),
         language,
         import: !options.no_import,
+        // Off only when the start context carries the always-loaded memories instead.
         auto_memory_off: !options.keep_auto_memory
+            && current.start_blocked.is_none()
             && current
                 .auto_memory_answer
                 .unwrap_or(!current.auto_memory_off_by_user),
@@ -1487,6 +1597,7 @@ fn ask(
         let mut lines = vec![
             format!("{name} also writes its own memory files and loads them into every session;"),
             "with graphersal-memory both would keep the same facts twice.".to_string(),
+            start_context_sentence(current),
             NOTHING_IS_LOST.to_string(),
         ];
         if codex_memory {
@@ -1769,7 +1880,12 @@ fn plan_install(
         let (step, change) = plan_user_config(setup, answers.develop, &mut conflicts)?;
         steps.push(step);
         changes.extend(change);
-        let (step, change, plan) = plan_settings(setup, answers.auto_memory_off, &state)?;
+        let (step, change, plan) = plan_settings(
+            setup,
+            answers.auto_memory_off,
+            &start_context_sentence(current),
+            &state,
+        )?;
         auto_memory = plan;
         steps.push(step);
         changes.extend(change);
@@ -2734,6 +2850,19 @@ fn recap(
                     new + changed,
                     if new + changed == 1 { "" } else { "s" }
                 )
+            },
+        ));
+    }
+    if answers.harnesses.contains(&Kind::ClaudeCode) && !current.auto_memory_off_by_user {
+        lines.push((
+            "Auto-memory",
+            if answers.auto_memory_off {
+                format!("switched off. {}", start_context_sentence(current))
+            } else {
+                match &current.start_blocked {
+                    Some(reason) => format!("kept on: {reason}"),
+                    None => "kept on".to_string(),
+                }
             },
         ));
     }
@@ -4117,7 +4246,8 @@ pub fn shared_doctor(setup: &Setup) -> Vec<Finding> {
                         "config.json has keys this version does not know: {}",
                         config.unknown.join(", ")
                     ),
-                    "check their spelling (known: daemon.idle, memory.language, embedding.model, \
+                    "check their spelling (known: daemon.idle, memory.language, \
+                     memory.start_context_chars, embedding.model, \
                      summaries.enabled, summaries.harness_command, summaries.monthly_budget_usd, \
                      summaries.since, store.checkpoint_after, store.keep_history)",
                 ));

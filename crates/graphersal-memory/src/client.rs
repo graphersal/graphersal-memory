@@ -113,6 +113,7 @@ pub fn connect(
         profile: Profile::Use,
         project: project.to_string(),
         harness: "graphersal-memory".to_string(),
+        start_context: crate::protocol::StartContextMode::None,
     };
     let (stream, reader) = shim::open(&options)?;
     let _ = reader.get_ref().set_read_timeout(Some(timeout));

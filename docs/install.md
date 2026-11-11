@@ -73,6 +73,8 @@ Choose [1]:
 Step 4 of 7 · Claude Code's auto-memory
   Claude Code also writes its own memory files and loads them into every session;
   with graphersal-memory both would keep the same facts twice.
+  Your rules and pinned memories still reach every session through graphersal-memory's
+  start context: N memories, X characters (`graphersal-memory start-context` shows it).
   Nothing is lost: if you uninstall graphersal-memory later, every memory, including new
   ones, is written back to Claude Code's memory files and its auto-memory is switched
   back on.
@@ -116,7 +118,7 @@ Step 7 of 7 · Summary
   4. Add the SessionStart and SessionEnd hooks in /tmp/gmw/h/.claude/settings.json
      - SessionStart: add `"/private/tmp/gmw/bin/graphersal-memory" hook session-start --data-dir "/tmp/gmw/d" --run-dir "/tmp/gmw/r"`
      - SessionEnd: add `"/private/tmp/gmw/bin/graphersal-memory" hook session-end --data-dir "/tmp/gmw/d" --run-dir "/tmp/gmw/r"`
-     - autoMemoryEnabled: false (switch Claude Code's auto-memory off). Nothing is lost: if you uninstall graphersal-memory later, every memory, including new ones, is written back to Claude Code's memory files and its auto-memory is switched back on.
+     - autoMemoryEnabled: false (switch Claude Code's auto-memory off). Your rules and pinned memories still reach every session through graphersal-memory's start context: N memories, X characters (`graphersal-memory start-context` shows it). Nothing is lost: if you uninstall graphersal-memory later, every memory, including new ones, is written back to Claude Code's memory files and its auto-memory is switched back on.
   5. Import the existing file memory (MEMORY.md and the memory files)
      - 1 memory directory under /tmp/gmw/h/.claude/projects: 2 new and 0 changed memory files to import, 0 unchanged
      - The files are read, not changed; every memory stays in its project. CLAUDE.md rules are not imported in this version.
@@ -153,6 +155,16 @@ Report:
 
 Restart running Claude Code sessions to load the MCP server and the hooks. `graphersal-memory status` shows what is installed; `graphersal-memory uninstall` removes it.
 ```
+
+The auto-memory question can switch Claude Code's own memory off without losing your rules:
+Claude Code loads `MEMORY.md` into every session, and graphersal-memory's start context does the
+same job from the graph. Every pinned memory and every feedback and user memory of the project
+and the global ones go into the start of every session (memories under a `## Pinned` heading of
+`MEMORY.md` are imported as pinned, and the import runs during install, so they are there from
+the first session). N and X are what your memory files give (the project with the most of them).
+When the start context is off (`memory.start_context_chars` is `0` in `config.json`), the default
+answer is "No, keep it on" and the step says why.
+
 
 ## `graphersal-memory status` afterwards
 
@@ -597,7 +609,7 @@ Step 7 of 7 · Summary
   5. Add the SessionStart and SessionEnd hooks in /tmp/gmb/h/.claude/settings.json
      - SessionStart: add `"/opt/gm/graphersal-memory" hook session-start --data-dir "/tmp/gmb/d" --run-dir "/tmp/gm-wiz2"`
      - SessionEnd: add `"/opt/gm/graphersal-memory" hook session-end --data-dir "/tmp/gmb/d" --run-dir "/tmp/gm-wiz2"`
-     - autoMemoryEnabled: false (switch Claude Code's auto-memory off). Nothing is lost: if you uninstall graphersal-memory later, every memory, including new ones, is written back to Claude Code's memory files and its auto-memory is switched back on.
+     - autoMemoryEnabled: false (switch Claude Code's auto-memory off). Your rules and pinned memories still reach every session through graphersal-memory's start context: N memories, X characters (`graphersal-memory start-context` shows it). Nothing is lost: if you uninstall graphersal-memory later, every memory, including new ones, is written back to Claude Code's memory files and its auto-memory is switched back on.
   6. Import Claude Code's existing file memory (MEMORY.md and the memory files)
      - 0 memory directories under /tmp/gmb/h/.claude/projects: 0 new and 0 changed memory files to import, 0 unchanged
      - The files are read, not changed; every memory stays in its project. CLAUDE.md rules are not imported in this version.

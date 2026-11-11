@@ -16,7 +16,7 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/cli.rs`: the clap command definitions and help text, plus parsing tests;
   - `src/commands.rs`: running a command (`run_cli`): `mcp` runs the shim (`--no-daemon`:
     serves in this process), `daemon` runs (`--foreground`) or starts the daemon, `install`,
-    `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects` and the
+    `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects`, `start-context` and the
     hidden `hook` work on Claude Code, opencode, Codex and Cursor (`Setup` from the environment, with the model download
     `Source`; `bench_options` for `bench`; `DaemonSource` reads the memories for the export);
     `ui` and `export` without `--to-files` report their planned stage and exit with code 2
@@ -126,15 +126,25 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     product's own calls go through the daemon, the single writer);
   - `src/hook.rs`: `hook session-start|session-end`: time-boxed import of the session project's
     changed memory files, then one `index_sessions` control line to the daemon (`run_with`'s
-    `Enqueue`; start: its transcript is `active`, end: `ended`), one status line at session
-    start, always exit 0; `GRAPHERSAL_MEMORY_HOOK=off` makes it do nothing; `run_opencode` for
+    `Enqueue`; start: its transcript is `active`, end: `ended`), at session start one status line
+    plus the start context (`run_with_context`, `StartFetch` from the daemon's `start_context`
+    control line after the import; `claude_start_output`: one JSON object with
+    `hookSpecificOutput.additionalContext`, capped by `CLAUDE_CODE_CONTEXT_CHARS`; the plain line
+    when there is none), always exit 0; `GRAPHERSAL_MEMORY_HOOK=off` makes it do nothing; `run_opencode` for
     opencode's plugin (`--harness opencode`: no import, `<db>#<id>` active/ended); `run_codex`
     for Codex's hooks (`--harness codex`: no import, the rollout `transcript_path`
     active/ended, the start line becomes model context); `run_cursor` for Cursor's hooks
     (`--harness cursor`: records `transcript_path` + `workspace_roots` in the registry, the
-    transcript active/ended, the start answer `{"additional_context": ...}`); `read_input` and
+    transcript active/ended, the start answer `{"additional_context": ...}` with the start
+    context of the workspace, `run_cursor_with_context`); `read_input` and
     `is_cursor_input` (a Claude Code hook run by Cursor's third-party hooks does nothing);
+  - `src/start_context.rs`: the start context (D7): the always-loaded memories (pinned, feedback,
+    user) of a project and the global ones, `sort` (pinned, feedback, user; `order`, newest),
+    `render` within the budget (groups like `MEMORY.md`, "N more not shown"), `StartContext`
+    (`status_line`, the control-line JSON), `request`/`request_running` (the daemon's
+    `start_context` control line);
   - `src/config.rs`: `<data dir>/config.json` (`daemon.idle`, `memory.language`,
+    `memory.start_context_chars`,
     `embedding.model`, `summaries.enabled|harness_command|monthly_budget_usd|since`,
     `store.checkpoint_after|keep_history`;
     `with_summaries` and `with_values` edit in place); flag > env > file > default;
@@ -199,7 +209,10 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `daemon.pid`, `daemon.start.lock`, `daemon.log`), the socket types per platform (std on
     Unix, `uds_windows` on Windows), `LockFile` (`fd-lock`);
   - `src/protocol.rs`: the shim <-> daemon handshake and control lines, refusal codes, version
-    order (the protocol is internal; bump `PROTOCOL` on an incompatible change);
+    order, `StartContextMode` (the handshake's optional `start_context`: `full` | `short` (Claude
+    Code without our hook: within `CLAUDE_CODE_INSTRUCTIONS_CHARS`) | `none` (Claude Code with
+    our SessionStart hook, `commands::start_context_mode`; the product's own connections)) (the
+    protocol is internal; bump `PROTOCOL` on an incompatible change);
   - `src/shim.rs`: `connect_or_start` (start lock, stale socket only after a failed connect AND a
     free `daemon.pid`, detached spawn, timeout naming the log; on Windows the spawning process's
     standard handles are made non-inheritable first, `keep_std_handles_from_children`, one of the
@@ -229,13 +242,15 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     per-user directory) and the default store `<data dir>/stores/default`, created on first use;
   - `src/catalog.rs` + `src/catalog/`: the product catalog built into the binary: `schema.json`,
     `queries.json` (name, description, parameters of each memory function) and one
-    `<name>.rhai` body per function (folder `memory`, `meta` `{"origin": "product", "catalog":
+    `<name>.rhai` body per function (`pin` sets `pinned`/`order`) (folder `memory`, `meta` `{"origin": "product", "catalog":
     <fingerprint>}`); `apply` writes it to a store whose product queries carry another
     fingerprint; `use_policy` builds the `use` access policy from the functions' inferred effects;
   - `src/mcp.rs` + `src/mcp/{use,develop}.md`: the two profiles (configuration, instructions,
     tool lists), the project of a session (`--project`, else the git root of the cwd),
     `StoreRuntime` (one open store: `graphersal-serve`'s session thread, one `Context` per
-    profile over it sharing one `Mcp` endpoint, `serve_with` (the connection's memory language),
+    profile over it sharing one `Mcp` endpoint, `serve_with` (the connection's memory language and
+    start context, `Connection`: the instructions end with the project's start context, computed
+    when the connection opens), `start_context` (the internal function, rendered),
     `switch_embedder` (import the cached model into the store, then rules off, old vectors
     dropped, rules on with the model: the engine checks old vectors against a new dimension
     before the fill), the job ticker (`JobTicker`, stopped by `close`,
@@ -289,13 +304,15 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
 - Project scoping: a vertex with a `project` property (the project's stable id, `crate::projects`)
   is visible only from that project; one without it is global. Memory ids are
   `memory:<slug>@<project>` (project) and `memory:<slug>` (global); `memory`, `forget` and
-  `links` look in the project first, then in the global memory.
+  `links` look in the project first, then in the global memory. `pinned` (bool) and `order`
+  (int) select and order the start context (`crate::start_context`); `remember`'s `pinned`
+  default `null` keeps the memory's pin; `pin` is a `use` tool.
 - Sessions: `session:<transcript name>` (with `fingerprint` of its indexed lines, `summarized` =
   the fingerprint its summary came from, `harness`), `turn:<session>:<n>`, `fact:<session>:<kind>:<i>`
   (`fact_kind` decision | correction | outcome | open_thread), all with the session's `project`;
   `session -contains-> turn|fact`. They are written only by the internal catalog functions
   (`src/catalog/internal.json`: `indexed_sessions`, `index_session`, `index_turns`,
-  `set_summary`; plus `merge_project` and `export_memories`), which the daemon runs on the
+  `set_summary`; plus `merge_project`, `export_memories` and `start_context`), which the daemon runs on the
   store's session thread (`catalog::call`); they are never tools of the `use` server (its tool
   list is `FUNCTIONS`).
 - **No LLM call without consent**: summaries run only when `summaries.enabled` is true, only

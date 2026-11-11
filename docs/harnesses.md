@@ -31,6 +31,25 @@ Where a harness has no hooks, synchronisation runs from the MCP server itself or
   texts. A block of a version it does not know (a newer one) is kept by `install` and reported.
 - `uninstall` removes exactly the managed parts and leaves the rest as it was.
 
+## The start context: what reaches the model at a session's start
+
+Every pinned memory and every feedback and user memory (of the project and the global ones) goes
+into the start of every session, grouped like `MEMORY.md` ("How to work", "About you",
+"Pinned"), one line per memory, within `memory.start_context_chars` of `config.json` (default
+8,000 characters; `0` = off). `graphersal-memory start-context` prints exactly that text. How it
+gets to the model, per harness (documentation checked on 2026-11-11):
+
+| Harness | Channel | Why this one |
+|---|---|---|
+| Claude Code | the SessionStart hook answers `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ...}}`; the MCP instructions of that connection leave it out | Claude Code adds `additionalContext` to the context "at the start of the conversation, before the first prompt" and does not show it as a chat message; it caps it at 10,000 characters (more is saved to a file and only a 2,000-character preview reaches the model), so the hook asks for at most that ([hooks](https://code.claude.com/docs/en/hooks)). Server instructions are cut at 4,096 characters (2,048 before v2.1.296; [MCP](https://code.claude.com/docs/en/mcp)), too little for the whole text. The MCP server knows its connection is Claude Code's (`CLAUDECODE`) and that our hook is in `settings.json`, and then leaves the text out of its instructions, so it is not sent twice. Without the hook, the instructions carry what fits 4,096 characters and name the rest. |
+| Claude Desktop and other MCP clients without hooks | the MCP server's `instructions` | The MCP specification: instructions "MAY be added to the system prompt". |
+| opencode 1.x and 2.x | the MCP server's `instructions`; the plugin still shows only the short start line as a toast | Both lines put every server's instructions into the system prompt (`<mcp_instructions>`: 1.x [`session/system.ts`](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/session/system.ts), 2.x [`mcp/instructions.ts`](https://github.com/anomalyco/opencode/blob/dev/packages/core/src/mcp/instructions.ts)). A plugin could add context too (2.x `instructions.entry`), which would send it twice. |
+| Codex | the MCP server's `instructions`; the SessionStart hook keeps printing the short start line | Codex gives a server's instructions to the model as the description of its tool namespace ([`codex-mcp/src/rmcp_client.rs`](https://github.com/openai/codex/blob/main/codex-rs/codex-mcp/src/rmcp_client.rs)); hooks run only after the user trusted them, so the instructions are the channel that always works. Its hook output would reach the model as well ("Plain text on `stdout` is added as extra developer context", [hooks](https://learn.chatgpt.com/docs/hooks)), so the hook does not repeat it. |
+| Cursor | the sessionStart hook's `additional_context`, and the MCP server's `instructions` | `additional_context` is documented as "Additional context to add to the conversation's initial system context" ([hooks](https://cursor.com/docs/hooks)); whether Cursor gives MCP instructions to the model is not documented. Both carry it until a live check shows whether Cursor reads the instructions (then the text reaches the model twice; see [cursor-live-check.md](cursor-live-check.md)). |
+
+Not verified live: the Claude Code path is tested against the documented output contract, the
+others against their documentation and source; no harness has been watched receiving it yet.
+
 ## Claude Code
 
 Claude Code keeps its files in `~/.claude` (or in `$CLAUDE_CONFIG_DIR` when that is set; the user
@@ -78,8 +97,10 @@ When the data or run directory was chosen explicitly (`--data-dir`, `GRAPHERSAL_
 
 - `hook session-start` imports the memory files of the session's project that are new or changed
   since their last import (the project's memory directory under `~/.claude/projects/`), then
-  prints one line, which Claude Code adds to the session's context: where the memory is and which
-  tools to use.
+  answers with one line (where the memory is and which tools to use) and the start context
+  ([above](#the-start-context-what-reaches-the-model-at-a-sessions-start)) as
+  `additionalContext`, which Claude Code adds to the session's context without showing it in the
+  chat; with no always-loaded memory it prints the plain line.
 - `hook session-end` does the same import and prints nothing.
 - Both stop after 15 seconds, exit with code 0 on every error (a note on stderr), and skip the
   import when another import is running.

@@ -53,6 +53,16 @@ were, and step 9 checks that.
 
    Does the agent search the memory (`memories` or `recall`) and answer "tabs"?
 
+7b. **Start context.** Ask the agent to remember a rule as feedback ("Remember as a rule:
+   always answer in short sentences"), then start a new chat and ask:
+
+   > Without calling any tool: which rules from graphersal-memory's start context do you see,
+   > and do you see them once or twice?
+
+   Does it list the rule without searching? Once (from the hook's `additional_context`) or twice
+   (the MCP server's instructions too)? If twice, Cursor reads MCP instructions and one channel
+   can go.
+
 8. **Status.** In the terminal:
 
    ```sh

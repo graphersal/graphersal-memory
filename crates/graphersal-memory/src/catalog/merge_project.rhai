@@ -4,7 +4,7 @@ fn merge_project(from, into) {
     // `into` has a memory of the same slug, the more recently updated one stays), then the old
     // one is dropped. Sessions, turns and facts only change their `project`.
     let keys = ["name", "kind", "summary", "body", "embed_text", "origin", "visibility", "source",
-                "updated_at", "why", "how_to_apply", "title", "hook", "index_order", "pinned"];
+                "updated_at", "why", "how_to_apply", "title", "hook", "index_order", "pinned", "order"];
     let renamed = #{};
     let moved = 0;
     let replaced = 0;

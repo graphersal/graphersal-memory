@@ -38,6 +38,7 @@ pub fn planned_stage(command: &Command) -> (&'static str, &'static str) {
             ("M3", "one-click install for Claude Code")
         }
         Command::Projects { .. } => ("M6b", "project identity"),
+        Command::StartContext { .. } => ("M14", "the start context"),
         Command::Import { .. } => ("M3", "import of the file memory"),
         Command::Summaries { .. } => ("M4", "sessions and facts"),
         Command::Export { .. } => (
@@ -67,6 +68,7 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::Summaries { .. } => "summaries",
         Command::Export { .. } => "export",
         Command::Projects { .. } => "projects",
+        Command::StartContext { .. } => "start-context",
         Command::Hook { .. } => "hook",
     }
 }
@@ -239,6 +241,25 @@ pub fn run_cli(
             run_projects(&setup, action, &mut BufReader::new(stdin), &mut stdout)
         }),
         Command::Doctor => setup(cli).map(|setup| doctor(&setup, &mut stdout)),
+        Command::StartContext { project } => location(cli).and_then(|location| {
+            let dir = match project {
+                Some(dir) => absolute(dir),
+                None => std::env::current_dir()
+                    .map_err(|err| format!("cannot read the current directory: {err}"))?,
+            };
+            let project = mcp::project_key(None, &dir);
+            let context = crate::start_context::request(&location, &project, None)?;
+            if context.text.is_empty() {
+                let _ = writeln!(
+                    stderr,
+                    "graphersal-memory start-context: {}",
+                    context.status_line()
+                );
+            } else {
+                let _ = writeln!(stdout, "{}", context.text);
+            }
+            Ok(0)
+        }),
         Command::Import {
             dry_run,
             sessions: true,
@@ -261,7 +282,18 @@ pub fn run_cli(
             no_daemon: true,
             project,
         } => serve_options(cli, *profile, project.as_deref())
-            .and_then(|options| mcp::serve(&options, BufReader::new(stdin), stdout))
+            .and_then(|options| {
+                let harness = shim::harness_name(&|name| std::env::var(name).ok());
+                let hook = harness == "claude-code"
+                    && setup_with(cli, false)
+                        .is_ok_and(|setup| install::claude_start_hook_installed(&setup.paths));
+                mcp::serve_in_mode(
+                    &options,
+                    start_context_mode(harness, hook),
+                    BufReader::new(stdin),
+                    stdout,
+                )
+            })
             .map(|()| 0),
         Command::Mcp {
             profile,
@@ -1047,10 +1079,11 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
         };
         sections.push((kind.display_name().to_string(), findings));
     }
-    sections.push((
-        "Memory and daemon".to_string(),
-        install::shared_doctor(setup),
-    ));
+    let mut shared = install::shared_doctor(setup);
+    if ipc::connect(&setup.run_dir).is_ok() {
+        shared.push(install::ok(start_context_line(&setup.run_dir)));
+    }
+    sections.push(("Memory and daemon".to_string(), shared));
     let _ = writeln!(
         out,
         "{}",
@@ -1134,11 +1167,12 @@ fn run_hook(
             let enqueue: hook::Enqueue =
                 Box::new(move |request: sessions::Request| enqueue_request(&location, &request));
             if harness == Harness::Cursor {
-                return hook::run_cursor(
+                return hook::run_cursor_with_context(
                     event,
                     setup.cursor.registry.clone(),
                     std::env::var("CURSOR_PROJECT_DIR").ok(),
                     Some(enqueue),
+                    Some(start_fetch(&setup)),
                     stdin,
                     stdout,
                     stderr,
@@ -1164,12 +1198,14 @@ fn run_hook(
                     stderr,
                 );
             }
-            hook::run_with(
+            let fetch = start_fetch(&setup);
+            hook::run_with_context(
                 event,
                 Ok(setup.paths.clone()),
                 setup.data_dir.clone(),
                 Box::new(connect),
                 Some(enqueue),
+                Some(fetch),
                 stdin,
                 stdout,
                 stderr,
@@ -1180,6 +1216,18 @@ fn run_hook(
             0
         }
     }
+}
+
+/// The hooks' start context: asked from the daemon for the project of the session's directory
+/// (its git root; the daemon resolves its stable id).
+fn start_fetch(setup: &Setup) -> hook::StartFetch {
+    let location = setup_location(setup);
+    Box::new(move |dir: Option<&Path>, max: usize| {
+        let project = dir
+            .map(|dir| mcp::project_key(None, dir))
+            .unwrap_or_default();
+        crate::start_context::request(&location, &project, Some(max))
+    })
 }
 
 /// A `bench` or `bench questions` invocation.
@@ -1339,12 +1387,33 @@ fn shim_options(
     profile: Profile,
     project_flag: Option<&Path>,
 ) -> Result<ShimOptions, String> {
+    let harness = shim::harness_name(&|name| std::env::var(name).ok()).to_string();
+    let hook_installed = harness == "claude-code"
+        && setup_with(cli, false)
+            .is_ok_and(|setup| install::claude_start_hook_installed(&setup.paths));
     Ok(ShimOptions {
         location: location(cli)?,
         profile,
         project: project(project_flag)?,
-        harness: shim::harness_name(&|name| std::env::var(name).ok()).to_string(),
+        start_context: start_context_mode(&harness, hook_installed),
+        harness,
     })
+}
+
+/// Whether a `use` connection's instructions carry the start context: not for Claude Code
+/// with our SessionStart hook (the hook delivers it as `additionalContext`, so it is not sent
+/// twice), cut to Claude Code's instruction limit for Claude Code without the hook, whole for
+/// every other harness (opencode, Codex, Cursor, Claude Desktop: their hooks print only the
+/// short start line, or there is none).
+pub fn start_context_mode(
+    harness: &str,
+    claude_hook_installed: bool,
+) -> protocol::StartContextMode {
+    match (harness, claude_hook_installed) {
+        ("claude-code", true) => protocol::StartContextMode::None,
+        ("claude-code", false) => protocol::StartContextMode::Short,
+        _ => protocol::StartContextMode::Full,
+    }
 }
 
 /// What the shim does at the session's start and end (`crate::session_sync`): `None` inside
@@ -1488,6 +1557,19 @@ fn status(cli: &Cli, mut stdout: impl Write) -> Result<(), String> {
     Ok(())
 }
 
+/// The start context line of `status` and `doctor` for the project of the current directory,
+/// from the running daemon (none is started).
+fn start_context_line(run_dir: &Path) -> String {
+    let project = std::env::current_dir()
+        .map(|dir| mcp::project_key(None, &dir))
+        .unwrap_or_default();
+    match crate::start_context::request_running(run_dir, &project) {
+        Ok(Some(context)) => context.status_line(),
+        Ok(None) => "start context: the daemon is not running".to_string(),
+        Err(err) => format!("start context: {err}"),
+    }
+}
+
 /// The text of `status` without colour (the tests' view).
 #[cfg(test)]
 pub fn status_text(
@@ -1575,7 +1657,11 @@ pub fn status_text_with(
     let mut sections: Vec<Vec<String>> = Vec::new();
     match setup {
         Ok(setup) => {
-            sections.push(install::shared_status_lines(setup));
+            let mut memory = install::shared_status_lines(setup);
+            if running.is_some() {
+                memory.push(format!("  {}", start_context_line(run_dir)));
+            }
+            sections.push(memory);
             let kinds = setup.installed();
             let mut lines = Vec::new();
             if kinds.is_empty() || kinds.contains(&crate::agents::Kind::ClaudeCode) {

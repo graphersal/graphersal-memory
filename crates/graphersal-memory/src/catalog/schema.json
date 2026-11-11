@@ -91,7 +91,11 @@
           },
           "pinned": {
             "type": "boolean",
-            "description": "always listed in the exported index"
+            "description": "always loaded into the start of every session (with every feedback and user memory)"
+          },
+          "order": {
+            "type": "integer",
+            "description": "priority within its group of the start context and the memory list (lower first; absent = after the ordered ones, newest first)"
           }
         },
         "required": [
