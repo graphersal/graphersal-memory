@@ -36,6 +36,10 @@ impl Env {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("h")).unwrap();
+        // Claude Code's program in its known location (found, never run): install refuses on
+        // a machine without any agent program, and the real PATH may have none.
+        std::fs::create_dir_all(root.join("h/.local/bin")).unwrap();
+        std::fs::write(root.join("h/.local/bin/claude"), "").unwrap();
         Self { root }
     }
 

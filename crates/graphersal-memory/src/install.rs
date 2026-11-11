@@ -1978,7 +1978,14 @@ pub(crate) fn apply_changes(
     report: &mut Vec<String>,
     backups: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<(), String> {
-    let stamp = crate::daemon::now_utc().replace(':', "");
+    // One backup directory per install: the stamp of a directory already written is reused
+    // (the agents' changes are applied one after the other, maybe across a second).
+    let stamp = backups
+        .iter()
+        .next()
+        .and_then(|dir| dir.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| crate::daemon::now_utc().replace(':', ""));
     for change in changes {
         let path = &change.path;
         let current = fsutil::read_optional(path)?;
@@ -2124,11 +2131,14 @@ pub fn install(
     input: &mut dyn BufRead,
     out: &mut dyn Write,
 ) -> Result<u8, String> {
+    if options.harnesses.is_none() && setup.detected().is_empty() {
+        return Ok(refuse_without_programs(setup, out, options.color));
+    }
     let current = Current::read(setup)?;
     let interactive = options.interactive && !options.yes && !options.dry_run;
     let color = options.color;
     let agent = setup.agent();
-    let notes = detection_notes(setup, options, &current);
+    let notes = detection_notes(setup, options);
     let answers = if interactive {
         let mut console = Console::new(input, out, options.color);
         let offered = options
@@ -2618,7 +2628,7 @@ pub fn install(
 /// The lines about detection before the plan: harnesses whose configuration is here but whose
 /// program is not (not offered), and `--harness` naming a harness whose program is missing
 /// (installed anyway, with a warning).
-fn detection_notes(setup: &Setup, options: &InstallOptions, current: &Current) -> Vec<String> {
+fn detection_notes(setup: &Setup, options: &InstallOptions) -> Vec<String> {
     let mut notes = Vec::new();
     let named = options.harnesses.clone().unwrap_or_default();
     for kind in &named {
@@ -2631,10 +2641,9 @@ fn detection_notes(setup: &Setup, options: &InstallOptions, current: &Current) -
             ));
         }
     }
-    let nothing_found = options.harnesses.is_none() && setup.detected().is_empty();
     for (kind, path) in setup.leftovers() {
-        // Named with --harness (warned above), or the fallback when nothing is found.
-        if named.contains(&kind) || (nothing_found && current.detected.contains(&kind)) {
+        // Named with --harness: warned above.
+        if named.contains(&kind) {
             continue;
         }
         notes.push(setup.show(&format!(
@@ -2646,13 +2655,44 @@ fn detection_notes(setup: &Setup, options: &InstallOptions, current: &Current) -
             kind.id()
         )));
     }
-    if nothing_found {
-        notes.push(format!(
-            "note: no agent program was found (claude, opencode, codex, cursor); setting up {}",
-            names_of(&current.detected)
-        ));
-    }
     notes
+}
+
+/// `install` without `--harness` when no agent's program is found: nothing is changed; the
+/// message names what was looked for and where, the leftover configurations, and the way
+/// out. Returns the exit code (1).
+fn refuse_without_programs(setup: &Setup, out: &mut dyn Write, color: bool) -> u8 {
+    let _ = writeln!(
+        out,
+        "{}",
+        paint(
+            color,
+            "1",
+            "graphersal-memory install: no agent program found"
+        )
+    );
+    let _ = writeln!(
+        out,
+        "  looked for: claude, opencode, codex and cursor on PATH, and in ~/.local/bin/claude, \
+         ~/.claude/local/claude, ~/.opencode/bin/opencode and Cursor's app"
+    );
+    for (kind, path) in setup.leftovers() {
+        let _ = writeln!(
+            out,
+            "{}",
+            setup.show(&format!(
+                "  configuration found without its program: {} ({})",
+                kind.display_name(),
+                path.display()
+            ))
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\nNothing was changed. Install an agent first, or name one to install anyway:\n  \
+         graphersal-memory install --harness claude-code|opencode|codex|cursor"
+    );
+    1
 }
 
 /// The wizard's recap: one `(topic, answer)` line per topic.

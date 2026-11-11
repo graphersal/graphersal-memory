@@ -22,6 +22,12 @@ use crate::{hook, registry, store};
 /// A setup for the home `home` and the data directory `data`, with a binary path that does not
 /// need to exist.
 pub(crate) fn setup_in(home: &Path, data: &Path) -> Setup {
+    // A machine with Claude Code's program (install refuses when no agent program is found).
+    with_programs(bare_setup_in(home, data), &["claude"])
+}
+
+/// [`setup_in`] without any agent program on its search path.
+pub(crate) fn bare_setup_in(home: &Path, data: &Path) -> Setup {
     let paths =
         ClaudePaths::resolve(&|name| (name == "HOME").then(|| home.display().to_string())).unwrap();
     Setup {
@@ -2246,7 +2252,7 @@ fn codex_rules_go_into_the_override_file_when_that_is_the_one_codex_loads() {
 }
 
 #[test]
-fn codex_is_detected_by_its_home_and_exported_as_markdown() {
+fn codex_is_detected_by_its_program_leftovers_are_not_offered_and_it_is_exported_as_markdown() {
     let home = TempDir::new("cx-det-home");
     let data = TempDir::new("cx-det-data");
     let setup = setup_in(home.path(), data.path());
@@ -2618,7 +2624,8 @@ fn cursor_rule_file_follows_the_language_and_a_hand_edit_is_kept() {
 }
 
 #[test]
-fn cursor_is_detected_by_its_home_status_and_doctor_name_its_parts() {
+fn cursor_is_detected_by_its_program_leftovers_are_not_offered_and_status_and_doctor_name_its_parts()
+ {
     let home = TempDir::new("cu-det-home");
     let data = TempDir::new("cu-det-data");
     let setup = setup_in(home.path(), data.path());
@@ -3172,7 +3179,7 @@ fn a_harness_with_only_leftover_configuration_is_not_offered() {
 fn a_program_in_its_known_location_outside_path_is_offered() {
     let home = TempDir::new("m13-known-home");
     let data = TempDir::new("m13-known-data");
-    let setup = setup_in(home.path(), data.path());
+    let setup = bare_setup_in(home.path(), data.path());
     assert_eq!(setup.detected(), Vec::<Kind>::new());
     std::fs::create_dir_all(home.path().join(".opencode/bin")).unwrap();
     std::fs::write(home.path().join(".opencode/bin/opencode"), "").unwrap();
@@ -3518,4 +3525,65 @@ fn names_are_joined_with_and_and_the_home_is_a_tilde() {
         install::tilde("/Users/meg/x and /Users/me", home),
         "/Users/meg/x and ~"
     );
+}
+
+/// Without `--harness` and without any agent program, install refuses (also as a dry run):
+/// nothing changes, the message names what it looked for, the leftovers and the way out.
+#[test]
+fn install_refuses_when_no_agent_program_is_found() {
+    let home = TempDir::new("m13-none-home");
+    let data = TempDir::new("m13-none-data");
+    existing_home(home.path());
+    existing_codex_home(home.path());
+    let before = snapshot(home.path());
+    let setup = bare_setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    for options in [
+        yes(),
+        InstallOptions {
+            dry_run: true,
+            ..InstallOptions::default()
+        },
+    ] {
+        let (code, out) = run_install(&setup, &memory, options);
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.starts_with("graphersal-memory install: no agent program found\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("looked for: claude, opencode, codex and cursor on PATH"),
+            "{out}"
+        );
+        assert!(
+            out.contains("configuration found without its program: Claude Code (~/.claude)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("configuration found without its program: Codex (~/.codex)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("--harness claude-code|opencode|codex|cursor"),
+            "{out}"
+        );
+        assert_eq!(snapshot(home.path()), before, "{out}");
+        assert!(!crate::config::path(data.path()).exists(), "{out}");
+    }
+    // `--harness` installs anyway, after the warning.
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            harnesses: Some(vec![Kind::ClaudeCode]),
+            ..yes()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("warning: Claude Code's program `claude` is not found"),
+        "{out}"
+    );
+    assert_eq!(setup.installed(), vec![Kind::ClaudeCode]);
+    memory.close();
 }

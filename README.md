@@ -116,7 +116,7 @@ Cursor (`--harness claude-code|opencode|codex|cursor|all` chooses). A harness co
 when its program is (on `PATH`, or where its installer puts it: `~/.local/bin/claude`,
 `~/.claude/local/claude`, `~/.opencode/bin/opencode`, Cursor's app); a configuration directory
 left behind without the program is reported, not offered (`--harness` installs there anyway,
-with a warning). With more than one found, the wizard's first step asks which; every chosen agent gets the same memory (one store, one daemon). For opencode
+with a warning); with no agent program found at all, install changes nothing and says so. With more than one found, the wizard's first step asks which; every chosen agent gets the same memory (one store, one daemon). For opencode
 (1.x and 2.x; install asks `opencode --version` which one it is) it registers the MCP servers in
 `~/.config/opencode/opencode.json`, a rules file listed in `instructions` and a small session
 plugin; for Codex, the MCP servers in `~/.codex/config.toml`, the rule block in

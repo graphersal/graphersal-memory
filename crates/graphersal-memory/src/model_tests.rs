@@ -210,7 +210,13 @@ fn setup_with(home: &Path, data: &Path, endpoint: &str) -> Setup {
         opencode: crate::opencode::OpenCodePaths::of_home(home),
         codex: crate::codex::CodexPaths::of_home(home),
         cursor: crate::cursor::CursorPaths::of_home(home, data),
-        search_path: Some(std::ffi::OsString::new()),
+        // A machine with Claude Code's program (install refuses when none is found).
+        search_path: Some({
+            let bin = std::env::temp_dir().join(format!("gmm{}.bin", std::process::id()));
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("claude"), "").unwrap();
+            bin.into_os_string()
+        }),
         data_dir: data.to_path_buf(),
         run_dir: std::env::temp_dir().join(format!("gmm{}", std::process::id())),
         exe: std::path::PathBuf::from("/opt/gm/bin/graphersal-memory"),
