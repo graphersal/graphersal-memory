@@ -1250,3 +1250,19 @@ fn a_config_rewritten_while_install_waits_keeps_the_agents_write_and_the_switch_
     assert_eq!(config["lastSessionId"], "abc");
     memory.close();
 }
+
+#[test]
+fn a_long_line_with_store_and_memory_far_apart_is_not_an_instruction() {
+    // Found by the coordinator's final run on a real repository's CLAUDE.md: a line about a
+    // storage engine was shown as "keeps memory elsewhere".
+    let text = "- **Persistence** (`persist/CLAUDE.md`): streaming snapshots, WAL journal in its own \
+        hook slot, recovery, the Store over `StoreDir` (directory, single file, memory), verified \
+        backups.\n\
+        - Keep all memory in the knowledge graph of the memory MCP server (create_entities).\n\
+        Save project memories into notes/.\n";
+    let found: Vec<usize> = coexist::mentions_in(text, &[])
+        .into_iter()
+        .map(|(line, _, _)| line)
+        .collect();
+    assert_eq!(found, vec![2, 3]);
+}

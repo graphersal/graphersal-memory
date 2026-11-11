@@ -1179,11 +1179,19 @@ pub fn mentions_in(text: &str, names: &[String]) -> Vec<(usize, String, Option<S
                 .cloned()
         };
         let verb = words.iter().any(|w| KEEP_VERBS.contains(w));
-        let instruction = memory_word
-            && verb
-            && words
-                .iter()
-                .any(|w| ["in", "into", "to", "via", "using", "with", "under"].contains(w));
+        // Without a named target the line must read as one instruction: a keep verb at most
+        // four words before "memory"/"memories" and a place word at most four words after it
+        // ("keep all memory in the KB"), not the words scattered over a long line ("the Store
+        // over `StoreDir` (directory, single file, memory)").
+        let instruction = words.iter().enumerate().any(|(i, w)| {
+            matches!(*w, "memory" | "memories")
+                && words[i.saturating_sub(4)..i]
+                    .iter()
+                    .any(|v| KEEP_VERBS.contains(v))
+                && words[i + 1..words.len().min(i + 5)]
+                    .iter()
+                    .any(|p| ["in", "into", "to", "via", "using", "with", "under"].contains(p))
+        });
         let hit = match &target {
             Some(t) if t == "MEMORY.md" => true,
             Some(_) => memory_word || verb,
