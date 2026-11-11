@@ -118,12 +118,35 @@ pub fn describe(data_dir: &Path, model: &str) -> String {
         Some(cached) => format!(
             "{model} ({}, {}, downloaded)",
             crate::download::human_bytes(cached.bytes),
-            cached.license
+            licence_name(&cached.license)
         ),
         None => {
             format!("{model} (NOT downloaded: run `graphersal-memory install --model {model}`)")
         }
     }
+}
+
+/// A licence id as its card writes it (Hugging Face metadata gives SPDX ids in lower case:
+/// `mit` -> `MIT`, `apache-2.0` -> `Apache-2.0`); an unknown id stays as it is.
+pub fn licence_name(id: &str) -> String {
+    const KNOWN: [&str; 12] = [
+        "MIT",
+        "Apache-2.0",
+        "BSD-2-Clause",
+        "BSD-3-Clause",
+        "ISC",
+        "MPL-2.0",
+        "CC0-1.0",
+        "CC-BY-4.0",
+        "CC-BY-SA-4.0",
+        "CC-BY-NC-4.0",
+        "GPL-3.0",
+        "LGPL-3.0",
+    ];
+    KNOWN
+        .iter()
+        .find(|known| known.eq_ignore_ascii_case(id))
+        .map_or_else(|| id.to_string(), |known| (*known).to_string())
 }
 
 /// Whether the cached model `repo` loads as a Model2Vec model (`doctor`): `Err` says why not.
@@ -141,6 +164,14 @@ pub fn check(data_dir: &Path, repo: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn licence_ids_are_written_as_their_cards_write_them() {
+        assert_eq!(super::licence_name("mit"), "MIT");
+        assert_eq!(super::licence_name("apache-2.0"), "Apache-2.0");
+        assert_eq!(super::licence_name("MIT"), "MIT");
+        assert_eq!(super::licence_name("other"), "other");
+    }
+
     use super::*;
 
     #[test]

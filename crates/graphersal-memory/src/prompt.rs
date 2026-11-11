@@ -47,6 +47,24 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// `text` in the ANSI style `code` when `color` is on.
+pub fn paint(color: bool, code: &str, text: &str) -> String {
+    if color {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// An "ACTION NEEDED" line highlighted (bold yellow) when `color` is on; the text says
+/// "ACTION NEEDED" either way.
+pub fn action_needed(color: bool, text: &str) -> String {
+    paint(color, "1;33", text)
+}
+
+/// The separator line before a closing block ("Next steps").
+pub const SEPARATOR: &str = "----------------------------------------";
+
 /// The answers ran out (the input ended) before a question without a default was answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoAnswer;
@@ -76,11 +94,7 @@ impl<'a> Console<'a> {
     }
 
     fn style(&self, code: &str, text: &str) -> String {
-        if self.color {
-            format!("\x1b[{code}m{text}\x1b[0m")
-        } else {
-            text.to_string()
-        }
+        paint(self.color, code, text)
     }
 
     /// Bold text (titles).
@@ -195,13 +209,12 @@ impl<'a> Console<'a> {
         Ok(self.choose(&choices, index)? == 0)
     }
 
-    /// The final confirmation: Enter (or `y`) applies; `n` (or the end of the input) does not.
-    pub fn confirm_apply(&mut self) -> bool {
+    /// The wizard's last question, `Install? [Y/n, d = show every change]`: Enter (or `y`)
+    /// installs; `n` (or the end of the input) does not; `d` shows every change (`details`)
+    /// and asks again.
+    pub fn confirm_install(&mut self, details: &mut dyn FnMut(&mut dyn Write)) -> bool {
         loop {
-            let _ = write!(
-                self.out,
-                "Apply these changes? [Enter = apply, n = cancel]: "
-            );
+            let _ = write!(self.out, "Install? [Y/n, d = show every change]: ");
             let Some(answer) = self.answer() else {
                 let _ = writeln!(self.out);
                 return false;
@@ -209,8 +222,15 @@ impl<'a> Console<'a> {
             match answer.to_ascii_lowercase().as_str() {
                 "" | "y" | "yes" => return true,
                 "n" | "no" => return false,
+                "d" => {
+                    let _ = writeln!(self.out);
+                    details(self.out);
+                    let _ = writeln!(self.out);
+                }
                 _ => {
-                    let again = self.yellow("  Please press Enter to apply or type n to cancel.");
+                    let again = self.yellow(
+                        "  Please press Enter to install, type n to cancel or d to see every change.",
+                    );
                     let _ = writeln!(self.out, "{again}");
                 }
             }
@@ -280,6 +300,26 @@ mod tests {
     }
 
     #[test]
+    fn d_shows_every_change_and_asks_again() {
+        let mut input = &b"d\n\n"[..];
+        let mut out = Vec::new();
+        let mut shown = 0;
+        let installed = Console::new(&mut input, &mut out, false).confirm_install(&mut |out| {
+            shown += 1;
+            let _ = writeln!(out, "every change");
+        });
+        assert!(installed);
+        assert_eq!(shown, 1);
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(
+            out.matches("Install? [Y/n, d = show every change]: ")
+                .count(),
+            2
+        );
+        assert!(out.contains("every change"), "{out}");
+    }
+
+    #[test]
     fn the_confirmation_applies_on_enter() {
         for (input, expected) in [
             ("\n", true),
@@ -291,7 +331,7 @@ mod tests {
             let mut input = input.as_bytes();
             let mut out = Vec::new();
             assert_eq!(
-                Console::new(&mut input, &mut out, false).confirm_apply(),
+                Console::new(&mut input, &mut out, false).confirm_install(&mut |_| {}),
                 expected
             );
         }

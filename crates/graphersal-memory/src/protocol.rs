@@ -48,6 +48,8 @@ pub enum Refusal {
     Restarting,
     /// The daemon is stopping (retry).
     Stopping,
+    /// The daemon failed while handling the request (a bug; its log says where).
+    Internal,
 }
 
 impl Refusal {
@@ -61,6 +63,7 @@ impl Refusal {
             Refusal::Store => "store",
             Refusal::Restarting => "restarting",
             Refusal::Stopping => "stopping",
+            Refusal::Internal => "internal",
         }
     }
 

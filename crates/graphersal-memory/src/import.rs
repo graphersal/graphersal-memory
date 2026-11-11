@@ -879,6 +879,26 @@ mod tests {
         assert_eq!(old_style.kind, "user");
     }
 
+    /// The text helpers cut only at ASCII markers, so multi-byte text around them stays whole
+    /// (the byte-slicing pattern of the engine's B1 panic, checked here for the product).
+    #[test]
+    fn non_ascii_text_around_the_markers_stays_whole() {
+        let body = "Решение е(1 🎉\u{a0}(x\n\n**Why:** потому что е(\n\n**How to apply:** \u{a0}всегда 🎉(";
+        let (main, why, how) = split_why(body);
+        assert_eq!(main, "Решение е(1 🎉\u{a0}(x");
+        assert_eq!(why, "потому что е(");
+        assert_eq!(how, "всегда 🎉(");
+        // Links are slugified to ASCII: only `x` is left of these three.
+        assert_eq!(
+            wiki_links("см. [[релиз-е(]] и [[🎉]] и [[\u{a0}x]]"),
+            vec!["x".to_string()]
+        );
+        assert_eq!(unquote("\"е(1 🎉\""), "е(1 🎉");
+        assert_eq!(unquote("е\""), "е\"");
+        let (front, rest) = split_front_matter("---\nname: е(\n---\nтело 🎉(\n");
+        assert_eq!((front, rest), ("name: е(", "тело 🎉(\n"));
+    }
+
     #[test]
     fn why_is_split_only_from_a_clean_tail() {
         assert_eq!(

@@ -36,6 +36,10 @@ impl Env {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("h")).unwrap();
+        // Claude Code's program in its known location (found, never run): install refuses on
+        // a machine without any agent program, and the real PATH may have none.
+        std::fs::create_dir_all(root.join("h/.local/bin")).unwrap();
+        std::fs::write(root.join("h/.local/bin/claude"), "").unwrap();
         Self { root }
     }
 
@@ -217,7 +221,11 @@ fn install_import_status_doctor_hook_uninstall_and_purge() {
 
     let refused = env.run(&["install"]);
     assert_eq!(refused.status.code(), Some(1), "{}", text(&refused));
-    assert!(text(&refused).contains("Aborted"), "{}", text(&refused));
+    assert!(
+        text(&refused).contains("No answer, nothing was changed"),
+        "{}",
+        text(&refused)
+    );
     assert_eq!(env.home_snapshot(), before);
 
     let installed = env.run(&["install", "--yes"]);
@@ -532,7 +540,7 @@ fn cursor_install_hooks_status_and_uninstall_through_the_binary() {
     );
     let status = env.run(&["status"]);
     let out = text(&status);
-    assert!(out.contains("Cursor (configuration"), "{out}");
+    assert!(out.contains("Cursor:\n  configuration:"), "{out}");
     assert!(out.contains("hook sessionStart"), "{out}");
 
     // Cursor's sessionStart input (cursor.com/docs/hooks) with a transcript in its home.

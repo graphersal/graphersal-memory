@@ -147,6 +147,16 @@ pub fn run_cli(
                 color: terminal && crate::prompt::color_allowed(&|name| std::env::var(name).ok()),
             };
             setup(cli).and_then(|setup| {
+                // `all`: every harness whose program is found (Claude Code when none is).
+                let mut options = options;
+                if *harness == Some(Harness::All) {
+                    let found = setup.detected();
+                    options.harnesses = Some(if found.is_empty() {
+                        vec![crate::agents::Kind::ClaudeCode]
+                    } else {
+                        found
+                    });
+                }
                 let mut connect = daemon_connector(&setup);
                 install::install(
                     &setup,
@@ -176,13 +186,15 @@ pub fn run_cli(
                 },
             };
             let options = UninstallOptions {
-                harnesses,
+                // `all`: every harness it is installed in (the default).
+                harnesses: harnesses.filter(|_| *harness != Some(Harness::All)),
                 dry_run: *dry_run,
                 yes: *yes,
                 purge: *purge,
                 disable_develop_only: *disable_develop,
                 no_export: *no_export,
                 interactive: terminal(),
+                color: terminal() && crate::prompt::color_allowed(&|name| std::env::var(name).ok()),
             };
             setup(cli).and_then(|setup| {
                 let mut source = DaemonSource(setup_location(&setup));
@@ -873,12 +885,13 @@ pub fn estimate_all(
 }
 
 /// Indexed and summarized sessions over every harness's state.
-fn session_counts(data_dir: &Path) -> Result<(usize, usize), String> {
-    let mut counts = (0, 0);
+fn session_counts(data_dir: &Path) -> Result<(usize, usize, usize), String> {
+    let mut counts = (0, 0, 0);
     for kind in crate::agents::Kind::ALL {
         let state = sessions::State::load_for(data_dir, kind)?;
         counts.0 += state.indexed();
         counts.1 += state.summarized();
+        counts.2 += state.failed();
     }
     Ok(counts)
 }
@@ -954,7 +967,7 @@ fn run_summaries(
         SummariesAction::Status => {
             let spend = summaries::Spend::load(&setup.data_dir)?;
             let month = summaries::this_month();
-            let (indexed, summarized) = session_counts(&setup.data_dir)?;
+            let (indexed, summarized, _) = session_counts(&setup.data_dir)?;
             let _ = writeln!(
                 out,
                 "summaries: {}\nthis month ({month}): ${:.2} spent of ${:.2}, {} summaries\n\
@@ -1013,48 +1026,65 @@ pub fn write_summaries(setup: &Setup, enabled: bool, budget: Option<f64>) -> Res
 
 /// `doctor`: every check with its fix; exit code 1 when a problem was found.
 fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
+    use crate::agents::Kind;
     let kinds = session_harnesses(setup);
-    let mut findings = Vec::new();
-    if kinds.contains(&crate::agents::Kind::OpenCode) {
-        findings.extend(crate::opencode::install::doctor(setup));
+    let color = {
+        use std::io::IsTerminal;
+        std::io::stdout().is_terminal()
+            && crate::prompt::color_allowed(&|name| std::env::var(name).ok())
+    };
+    // One section per harness, in wizard order, then the checks every harness shares.
+    let mut sections: Vec<(String, Vec<install::Finding>)> = Vec::new();
+    for kind in Kind::ALL {
+        if !kinds.contains(&kind) {
+            continue;
+        }
+        let findings = match kind {
+            Kind::ClaudeCode => install::claude_doctor(setup),
+            Kind::OpenCode => crate::opencode::install::doctor(setup),
+            Kind::Codex => crate::codex::install::doctor(setup),
+            Kind::Cursor => crate::cursor::install::doctor(setup),
+        };
+        sections.push((kind.display_name().to_string(), findings));
     }
-    if kinds.contains(&crate::agents::Kind::Codex) {
-        findings.extend(crate::codex::install::doctor(setup));
-    }
-    if kinds.contains(&crate::agents::Kind::Cursor) {
-        findings.extend(crate::cursor::install::doctor(setup));
-    }
-    // Claude Code's checks end with the shared ones (settings, model, daemon, registry).
-    if kinds.contains(&crate::agents::Kind::ClaudeCode) {
-        findings.extend(install::doctor(setup));
-    } else {
-        findings.extend(install::shared_doctor(setup));
-    }
+    sections.push((
+        "Memory and daemon".to_string(),
+        install::shared_doctor(setup),
+    ));
     let _ = writeln!(
         out,
-        "graphersal-memory doctor ({})\n",
-        kinds
-            .iter()
-            .map(|k| k.display_name())
-            .collect::<Vec<_>>()
-            .join(", ")
+        "{}",
+        crate::prompt::paint(
+            color,
+            "1",
+            &format!("graphersal-memory doctor ({})", install::names_of(&kinds))
+        )
     );
     let mut problems = 0;
-    for finding in &findings {
-        if finding.problem {
-            problems += 1;
-            let _ = writeln!(out, "  PROBLEM {}", finding.text);
-            if let Some(fix) = &finding.fix {
-                let _ = writeln!(out, "          fix: {fix}");
-            }
-        } else {
-            match &finding.fix {
-                Some(hint) => {
-                    let _ = writeln!(out, "  note    {}", finding.text);
-                    let _ = writeln!(out, "          {hint}");
+    for (heading, findings) in &sections {
+        let _ = writeln!(out, "\n{heading}:");
+        let prefix = format!("{heading}: ");
+        for finding in findings {
+            let text = setup.show(finding.text.strip_prefix(&prefix).unwrap_or(&finding.text));
+            if finding.problem {
+                problems += 1;
+                let _ = writeln!(
+                    out,
+                    "  {} {text}",
+                    crate::prompt::paint(color, "1;33", "PROBLEM")
+                );
+                if let Some(fix) = &finding.fix {
+                    let _ = writeln!(out, "          fix: {}", setup.show(fix));
                 }
-                None => {
-                    let _ = writeln!(out, "  ok      {}", finding.text);
+            } else {
+                match &finding.fix {
+                    Some(hint) => {
+                        let _ = writeln!(out, "  note    {text}");
+                        let _ = writeln!(out, "          {}", setup.show(hint));
+                    }
+                    None => {
+                        let _ = writeln!(out, "  ok      {text}");
+                    }
                 }
             }
         }
@@ -1421,8 +1451,7 @@ fn describe(status: &serde_json::Value) -> String {
         .map(|stores| stores.iter().filter_map(|s| s.as_str()).collect())
         .unwrap_or_default();
     format!(
-        "daemon: running (pid {}, version {}, up {}s, {} connection(s), stores open: {}, run \
-         directory {}){}",
+        "daemon: running (pid {}, version {}, up {}s, {} connection(s), stores open: {}){}",
         status["pid"],
         status["daemon_version"].as_str().unwrap_or("?"),
         status["uptime_secs"],
@@ -1432,7 +1461,6 @@ fn describe(status: &serde_json::Value) -> String {
         } else {
             stores.join(", ")
         },
-        status["run_dir"].as_str().unwrap_or("?"),
         if status["draining"] == serde_json::Value::Bool(true) {
             ", draining for an upgrade"
         } else {
@@ -1445,27 +1473,65 @@ fn describe(status: &serde_json::Value) -> String {
 fn status(cli: &Cli, mut stdout: impl Write) -> Result<(), String> {
     let (data_dir, run_dir) = dirs(cli)?;
     let setup = setup(cli);
-    let text = status_text(&data_dir, &run_dir, setup.as_ref().map_err(String::as_str))?;
+    let color = {
+        use std::io::IsTerminal;
+        std::io::stdout().is_terminal()
+            && crate::prompt::color_allowed(&|name| std::env::var(name).ok())
+    };
+    let text = status_text_with(
+        &data_dir,
+        &run_dir,
+        setup.as_ref().map_err(String::as_str),
+        color,
+    )?;
     let _ = write!(stdout, "{text}");
     Ok(())
 }
 
-/// The text of `status`.
+/// The text of `status` without colour (the tests' view).
+#[cfg(test)]
 pub fn status_text(
     data_dir: &Path,
     run_dir: &Path,
     setup: Result<&Setup, &str>,
 ) -> Result<String, String> {
-    let running = shim::control(run_dir, "status")?;
-    let daemon = match &running {
-        Some(status) => describe(status),
-        None => format!(
-            "daemon: not running (run directory {}; the next agent session starts it)",
-            run_dir.display()
+    status_text_with(data_dir, run_dir, setup, false)
+}
+
+/// The text of `status`: a headline with the general lines (daemon, directories, settings,
+/// sessions, stores), then one section per topic after a blank line (Memory, each agent), the
+/// home directory as `~`, the data directory once and the paths in it relative; every ACTION
+/// NEEDED line highlighted (`color`) and repeated as the last line.
+pub fn status_text_with(
+    data_dir: &Path,
+    run_dir: &Path,
+    setup: Result<&Setup, &str>,
+    color: bool,
+) -> Result<String, String> {
+    let log = run_dir.join(ipc::LOG_FILE);
+    let (running, daemon) = match shim::control(run_dir, "status") {
+        Ok(Some(status)) => {
+            let line = describe(&status);
+            (Some(status), line)
+        }
+        Ok(None) => (
+            None,
+            "daemon: not running (the next agent session starts it)".to_string(),
         ),
+        Err(err) => (None, format!("daemon: {err}")),
     };
-    let stores = store_lines(data_dir, running.as_ref());
-    let settings = match Config::load(data_dir) {
+    let in_data = |path: &Path| -> String {
+        match path.strip_prefix(data_dir) {
+            Ok(rest) if !rest.as_os_str().is_empty() => rest.display().to_string(),
+            _ => path.display().to_string(),
+        }
+    };
+    let mut general = vec![
+        daemon,
+        format!("data directory: {}", data_dir.display()),
+        format!("run directory: {}", in_data(run_dir)),
+    ];
+    general.push(match Config::load(data_dir) {
         Ok(settings) => {
             let idle = config::idle(None, std::env::var(daemon::IDLE_ENV).ok(), &settings)
                 .map(|idle| format!("{}s", idle.as_secs()))
@@ -1473,21 +1539,26 @@ pub fn status_text(
             format!(
                 "settings: {} (daemon idle time {idle})",
                 if config::path(data_dir).exists() {
-                    config::path(data_dir).display().to_string()
+                    in_data(&config::path(data_dir))
                 } else {
                     "defaults".to_string()
                 }
             )
         }
         Err(err) => format!("settings: {err}"),
-    };
-    let sessions = match (session_counts(data_dir), Config::load(data_dir)) {
-        (Ok((indexed, summarized)), Ok(config)) => {
+    });
+    general.push(match (session_counts(data_dir), Config::load(data_dir)) {
+        (Ok((indexed, summarized, failed)), Ok(config)) => {
             let spend = summaries::Spend::load(data_dir)
                 .map(|spend| spend.usd(&summaries::this_month()))
                 .unwrap_or(0.0);
             format!(
-                "sessions: {indexed} indexed, {summarized} summarized; summaries {}",
+                "sessions: {indexed} indexed, {summarized} summarized{}; summaries {}",
+                if failed > 0 {
+                    format!(", {failed} could not be indexed (see {})", in_data(&log))
+                } else {
+                    String::new()
+                },
                 if config.summaries.enabled {
                     format!(
                         "on (${spend:.2} of ${:.2} spent this month)",
@@ -1499,55 +1570,105 @@ pub fn status_text(
             )
         }
         (Err(err), _) | (_, Err(err)) => format!("sessions: {err}"),
-    };
-    let mut text = format!(
-        "{daemon}\ndata directory: {}\n{settings}\n{sessions}\n",
-        data_dir.display()
-    );
-    for line in stores {
-        text.push_str(&line);
-        text.push('\n');
-    }
+    });
+    general.extend(store_lines(data_dir, running.as_ref()));
+    let mut sections: Vec<Vec<String>> = Vec::new();
     match setup {
         Ok(setup) => {
+            sections.push(install::shared_status_lines(setup));
             let kinds = setup.installed();
             let mut lines = Vec::new();
             if kinds.is_empty() || kinds.contains(&crate::agents::Kind::ClaudeCode) {
                 lines.extend(install::status_lines(setup));
-            } else {
-                lines.extend(install::shared_status_lines(setup));
             }
             if kinds.contains(&crate::agents::Kind::OpenCode) {
                 lines.extend(crate::opencode::install::status_lines(setup));
-            } else if setup.detected().contains(&crate::agents::Kind::OpenCode) {
-                lines.push(
-                    "opencode: found, not set up (`graphersal-memory install --harness \
-                     opencode`)"
-                        .to_string(),
-                );
             }
             if kinds.contains(&crate::agents::Kind::Codex) {
                 lines.extend(crate::codex::install::status_lines(setup));
-            } else if setup.detected().contains(&crate::agents::Kind::Codex) {
-                lines.push(
-                    "Codex: found, not set up (`graphersal-memory install --harness codex`)"
-                        .to_string(),
-                );
             }
             if kinds.contains(&crate::agents::Kind::Cursor) {
                 lines.extend(crate::cursor::install::status_lines(setup));
-            } else if setup.detected().contains(&crate::agents::Kind::Cursor) {
-                lines.push(
-                    "Cursor: found, not set up (`graphersal-memory install --harness cursor`)"
-                        .to_string(),
-                );
             }
+            let found: Vec<_> = setup
+                .detected()
+                .into_iter()
+                .filter(|kind| !kinds.contains(kind))
+                .collect();
+            let leftovers: Vec<_> = setup
+                .leftovers()
+                .into_iter()
+                .filter(|(kind, _)| !kinds.contains(kind))
+                .collect();
+            if !found.is_empty() || !leftovers.is_empty() {
+                lines.push("Other agents:".to_string());
+                for kind in found {
+                    lines.push(format!(
+                        "  {}: found, not set up (`graphersal-memory install --harness {}`)",
+                        kind.display_name(),
+                        kind.id()
+                    ));
+                }
+                for (kind, path) in leftovers {
+                    lines.push(format!(
+                        "  {}: configuration found ({}), but the program `{}` is not installed",
+                        kind.display_name(),
+                        path.display(),
+                        Setup::program_name(kind)
+                    ));
+                }
+            }
+            // A line without indentation starts a section.
             for line in lines {
-                text.push_str(&line);
+                match sections.last_mut() {
+                    Some(section) if line.starts_with(' ') => section.push(line),
+                    _ => sections.push(vec![line]),
+                }
+            }
+            for section in &mut sections {
+                for line in section.iter_mut() {
+                    *line = setup.show(line);
+                }
+            }
+            for line in &mut general {
+                *line = setup.show(line);
+            }
+        }
+        Err(err) => sections.push(vec![format!("Claude Code: cannot check ({err})")]),
+    }
+    let mut text = format!(
+        "{}\n",
+        crate::prompt::paint(color, "1", "graphersal-memory status")
+    );
+    for line in &general {
+        // A store's own lines are indented under it.
+        text.push_str(&format!("  {line}\n"));
+    }
+    let mut actions = Vec::new();
+    for section in &sections {
+        text.push('\n');
+        for line in section {
+            if line.trim_start().starts_with("ACTION NEEDED") {
+                let indent = &line[..line.len() - line.trim_start().len()];
+                actions.push(line.trim_start().to_string());
+                text.push_str(&format!(
+                    "{indent}{}\n",
+                    crate::prompt::action_needed(color, line.trim_start())
+                ));
+            } else {
+                text.push_str(line);
                 text.push('\n');
             }
         }
-        Err(err) => text.push_str(&format!("Claude Code: cannot check ({err})\n")),
+    }
+    if !actions.is_empty() {
+        text.push('\n');
+        for action in actions {
+            text.push_str(&format!(
+                "{}\n",
+                crate::prompt::action_needed(color, &action)
+            ));
+        }
     }
     Ok(text)
 }
