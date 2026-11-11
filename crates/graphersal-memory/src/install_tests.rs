@@ -244,7 +244,7 @@ fn install_then_uninstall_leaves_existing_files_byte_identical() {
     assert_eq!(
         settings["hooks"]["SessionStart"][1]["hooks"][0]["command"],
         format!(
-            "\"/opt/gm/bin/graphersal-memory\" hook session-start --data-dir \"{}\"",
+            "'/opt/gm/bin/graphersal-memory' hook session-start --data-dir '{}'",
             data.path().display()
         )
     );
@@ -702,7 +702,7 @@ fn purge_refuses_a_directory_that_is_not_ours() {
     std::fs::write(data.path().join("precious.txt"), "keep").unwrap();
     let setup = setup_in(home.path(), data.path());
     let mut out = Vec::new();
-    let err = install::uninstall(
+    let code = install::uninstall(
         &setup,
         &UninstallOptions {
             yes: true,
@@ -713,8 +713,8 @@ fn purge_refuses_a_directory_that_is_not_ours() {
         &mut &b""[..],
         &mut out,
     )
-    .unwrap_err();
-    assert!(err.contains("does not look like"), "{err}");
+    .unwrap();
+    assert_eq!(code, 0);
     assert!(data.path().join("precious.txt").exists());
 }
 
@@ -2084,9 +2084,9 @@ fn codex_install_then_uninstall_leaves_existing_files_byte_identical() {
     assert!(
         crate::codex::install::doctor(&setup)
             .iter()
-            .any(|f| f.problem
-                && f.text.contains("not approved yet")
-                && f.fix.as_deref().is_some_and(|fix| fix.contains("`/hooks`"))),
+            .any(|f| !f.problem
+                && f.text.starts_with("ACTION NEEDED")
+                && f.text.contains("`/hooks`")),
     );
 
     // Idempotent.
@@ -2606,7 +2606,7 @@ fn cursor_rule_file_follows_the_language_and_a_hand_edit_is_kept() {
         read(&setup.cursor.rules_file),
         format!(
             "{}\nAlso: answer briefly.\n",
-            crate::cursor::install::FRONT_MATTER
+            crate::cursor::install::KEPT_FRONT_MATTER
         )
     );
     // Edited inside the block: kept, reported.
@@ -2879,7 +2879,7 @@ fn a_reinstall_replaces_the_quoted_form_and_uninstall_still_gives_the_files_back
     let old = setup_in(home.path(), data.path());
     assert_eq!(run_install(&old, &memory, yes()).0, 0);
     let quoted = settings_json(&old)["hooks"]["SessionStart"][1]["hooks"][0]["command"].clone();
-    assert!(quoted.as_str().unwrap().starts_with('"'), "{quoted}");
+    assert!(quoted.as_str().unwrap().starts_with('\''), "{quoted}");
     // This version on Windows: the hooks are updated to the exec form, nothing else changes.
     let setup = windows_setup(home.path(), data.path(), None);
     assert!(
@@ -4099,6 +4099,14 @@ fn an_import_reports_conflicts_and_files_and_never_brings_back_a_settled_memory(
     let npm_file = memory_dir.join("use-npm.md").display().to_string();
     let yarn_file = memory_dir.join("use-yarn.md").display().to_string();
 
+    // A memory of another source (the agent's `remember`): imported memories near it wait for
+    // the check (memories of one directory alone do not wait for each other, M16).
+    memory.call(
+        &project,
+        "remember",
+        json!({"slug": "deps-note", "kind": "project",
+               "summary": "Install dependencies before running the tests", "body": "First install."}),
+    );
     // The first import: every memory with similar ones waits for the agent's check.
     let out = import_text(&setup, &memory);
     assert!(out.contains("(3 new, 0 updated)"), "{out}");
@@ -4210,5 +4218,993 @@ fn an_import_reports_conflicts_and_files_and_never_brings_back_a_settled_memory(
     .unwrap();
     let out = import_text(&setup, &memory);
     assert!(out.contains("(1 new, 0 updated)"), "{out}");
+    memory.close();
+}
+
+// ---- M16: do-no-harm audit (reports/2026-11-12-do-no-harm-audit.md) ----
+
+fn all_four() -> InstallOptions {
+    InstallOptions {
+        yes: true,
+        harnesses: Some(Kind::ALL.to_vec()),
+        ..InstallOptions::default()
+    }
+}
+
+fn all_four_uninstall() -> UninstallOptions {
+    UninstallOptions {
+        harnesses: Some(Kind::ALL.to_vec()),
+        ..uninstall_yes()
+    }
+}
+
+/// A home with every agent's files (Claude Code, opencode, Codex, Cursor).
+fn every_agent_home(home: &Path) {
+    existing_home(home);
+    existing_opencode_home(home);
+    existing_codex_home(home);
+    existing_cursor_home(home);
+}
+
+/// The files of `home` that mention graphersal-memory.
+fn files_naming_us(home: &Path) -> Vec<PathBuf> {
+    snapshot(home)
+        .into_iter()
+        .filter(|(_, bytes)| install::holds_ours(bytes))
+        .map(|(path, _)| path)
+        .collect()
+}
+
+#[test]
+fn h1_install_refuses_a_data_dir_that_holds_other_files() {
+    let home = TempDir::new("h1-home");
+    let documents = home.path().join("Documents");
+    std::fs::create_dir_all(documents.join("photos")).unwrap();
+    std::fs::write(documents.join("thesis.docx"), "x").unwrap();
+    existing_home(home.path());
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), &documents);
+    let memory_dir = TempDir::new("h1-store");
+    let memory = Memory::open(memory_dir.path());
+    let mut connect = memory.connector();
+    let err =
+        install::install(&setup, &yes(), &mut connect, &mut &b""[..], &mut Vec::new()).unwrap_err();
+    assert!(
+        err.contains("already holds other files") && err.contains("thesis.docx"),
+        "{err}"
+    );
+    assert!(
+        err.contains("Documents/graphersal-memory"),
+        "names a way out: {err}"
+    );
+    assert_eq!(snapshot(home.path()), before, "nothing changed");
+    memory.close();
+}
+
+#[test]
+fn h1_purge_deletes_only_what_graphersal_memory_created() {
+    let home = TempDir::new("h1p-home");
+    let data = TempDir::new("h1p-data");
+    existing_home(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, yes()).0, 0);
+    memory.close();
+    // The user's own files land in the same folder later (a data directory set to a folder of
+    // theirs, as in the audit's thesis.docx case).
+    std::fs::create_dir_all(data.path().join("photos")).unwrap();
+    std::fs::write(data.path().join("thesis.docx"), "x").unwrap();
+    let (code, out) = run_uninstall(
+        &setup,
+        UninstallOptions {
+            purge: true,
+            ..uninstall_yes()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(read(&data.path().join("thesis.docx")), "x");
+    assert!(data.path().join("photos").is_dir());
+    for name in store::OUR_ENTRIES {
+        assert!(!data.path().join(name).exists(), "{name} deleted");
+    }
+    assert!(
+        out.contains("kept what else is in it (photos, thesis.docx)"),
+        "{out}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn h2_linked_config_files_stay_links_through_install_and_uninstall() {
+    let home = TempDir::new("h2-home");
+    let data = TempDir::new("h2-data");
+    every_agent_home(home.path());
+    let dot = home.path().join("dotfiles");
+    std::fs::create_dir_all(&dot).unwrap();
+    let files = [
+        ".claude.json",
+        ".claude/settings.json",
+        ".claude/CLAUDE.md",
+        ".config/opencode/opencode.jsonc",
+        ".codex/config.toml",
+        ".codex/AGENTS.md",
+        ".cursor/mcp.json",
+        ".cursor/hooks.json",
+    ];
+    for (n, file) in files.iter().enumerate() {
+        let path = home.path().join(file);
+        let target = dot.join(format!("{n}"));
+        std::fs::rename(&path, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+    }
+    let before = snapshot(&dot);
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, all_four());
+    assert_eq!(code, 0, "{out}");
+    let is_link = |file: &str| {
+        std::fs::symlink_metadata(home.path().join(file))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    };
+    for (n, file) in files.iter().enumerate() {
+        assert!(is_link(file), "{file} stays a link after install");
+        let text = read(&dot.join(format!("{n}")));
+        assert!(
+            text.contains("graphersal-memory"),
+            "{file}: the target holds our parts"
+        );
+    }
+    let (code, out) = run_uninstall(&setup, all_four_uninstall());
+    assert_eq!(code, 0, "{out}");
+    for file in files {
+        assert!(is_link(file), "{file} stays a link after uninstall");
+    }
+    assert_eq!(
+        snapshot(&dot),
+        before,
+        "every target byte for byte as before"
+    );
+    memory.close();
+}
+
+#[test]
+fn h3_one_install_at_a_time() {
+    let home = TempDir::new("h3-home");
+    let data = TempDir::new("h3-data");
+    existing_home(home.path());
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let held = install::InstallLock::take(&setup, true).unwrap();
+    let mut connect = memory.connector();
+    let err =
+        install::install(&setup, &yes(), &mut connect, &mut &b""[..], &mut Vec::new()).unwrap_err();
+    assert!(err.contains("another graphersal-memory install"), "{err}");
+    assert_eq!(snapshot(home.path()), before, "nothing changed");
+    drop(held);
+    assert_eq!(run_install(&setup, &memory, yes()).0, 0);
+    let held = install::InstallLock::take(&setup, true).unwrap();
+    let err =
+        install::uninstall(&setup, &uninstall_yes(), &mut &b""[..], &mut Vec::new()).unwrap_err();
+    assert!(err.contains("another graphersal-memory install"), "{err}");
+    drop(held);
+    memory.close();
+}
+
+#[test]
+fn h3_a_backup_that_holds_our_parts_is_never_put_back() {
+    let home = TempDir::new("h3b-home");
+    let data = TempDir::new("h3b-data");
+    every_agent_home(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, all_four()).0, 0);
+    // The install records are lost (a second install that ran at the same time and backed up
+    // the first one's output as the "original"): install again from there.
+    std::fs::remove_dir_all(data.path().join("install")).unwrap();
+    assert_eq!(run_install(&setup, &memory, all_four()).0, 0);
+    let (code, out) = run_uninstall(&setup, all_four_uninstall());
+    assert_eq!(code, 0, "{out}");
+    let left: Vec<PathBuf> = files_naming_us(home.path())
+        .into_iter()
+        .filter(|p| !p.starts_with("graphersal-memory-export"))
+        .collect();
+    assert!(left.is_empty(), "no part of ours stays: {left:?}\n{out}");
+    memory.close();
+}
+
+#[test]
+fn h4_a_reinstall_keeps_the_auto_memory_the_user_switched_back_on() {
+    let home = TempDir::new("h4-home");
+    let data = TempDir::new("h4-data");
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(home.path().join(".claude/settings.json"), "{}\n").unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, yes()).0, 0);
+    assert_eq!(settings_json(&setup)["autoMemoryEnabled"], false);
+    let on = read(&setup.paths.settings).replace(
+        "\"autoMemoryEnabled\": false",
+        "\"autoMemoryEnabled\": true",
+    );
+    std::fs::write(&setup.paths.settings, on).unwrap();
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(settings_json(&setup)["autoMemoryEnabled"], true, "{out}");
+    memory.close();
+}
+
+#[cfg(unix)]
+#[test]
+fn b3_hook_commands_keep_dollar_backtick_and_backslash_literal() {
+    let home = TempDir::new("b3-home");
+    let data = TempDir::new("b3-data");
+    let mut setup = setup_in(home.path(), data.path());
+    setup.exe = PathBuf::from("/opt/a $HOME `id` \\x 'q'/graphersal-memory");
+    setup.dir_args = vec!["--data-dir".into(), "/d/$(echo no)".into()];
+    let command = setup.hook_command("session-start");
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("printf '%s|' {command}"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "/opt/a $HOME `id` \\x 'q'/graphersal-memory|hook|session-start|--data-dir|/d/$(echo no)|"
+    );
+    assert!(setup.ours().command(&command));
+    // The forms earlier versions wrote are still recognised.
+    assert!(
+        setup
+            .ours()
+            .command("\"/opt/gm/bin/graphersal-memory\" hook session-end --data-dir \"/d\"")
+    );
+}
+
+#[test]
+fn b4_our_hook_moved_into_a_group_of_the_user_is_removed_alone() {
+    let home = TempDir::new("b4-home");
+    let data = TempDir::new("b4-data");
+    existing_home(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, yes()).0, 0);
+    // The user moves our SessionStart hook into their own group.
+    let mut settings = settings_json(&setup);
+    let ours = settings["hooks"]["SessionStart"][1]["hooks"][0].clone();
+    settings["hooks"]["SessionStart"] = json!([{"hooks": [
+        {"type": "command", "command": "echo mine"}, ours]}]);
+    std::fs::write(&setup.paths.settings, settings.to_string()).unwrap();
+    // A re-install sees it installed (no second copy).
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        settings_json(&setup)["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    let settings = settings_json(&setup);
+    assert_eq!(
+        settings["hooks"]["SessionStart"],
+        json!([{"hooks": [{"type": "command", "command": "echo mine"}]}]),
+        "{settings}"
+    );
+    assert!(
+        files_naming_us(home.path()).is_empty(),
+        "{:?}",
+        files_naming_us(home.path())
+    );
+    memory.close();
+}
+
+#[test]
+fn b5_a_renamed_binary_recognises_its_own_entries() {
+    let home = TempDir::new("b5-home");
+    let data = TempDir::new("b5-data");
+    every_agent_home(home.path());
+    let before = snapshot(home.path());
+    let mut setup = setup_in(home.path(), data.path());
+    setup.exe = PathBuf::from("/opt/gm/bin/gm-0.2");
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, all_four());
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = run_install(&setup, &memory, all_four());
+    assert_eq!(code, 0, "a re-install sees no conflict: {out}");
+    assert!(!out.contains("conflict"), "{out}");
+    let problems = doctor_problems(&setup);
+    assert!(
+        !problems.iter().any(|p| p.contains("another program")),
+        "{problems:?}"
+    );
+    // The binary is renamed again: the recorded one is still ours.
+    setup.exe = PathBuf::from("/opt/gm/bin/gm-0.3");
+    std::fs::write(
+        &setup.paths.user_config,
+        read(&setup.paths.user_config).replacen('{', "{\"tipsShown\": 1, ", 1),
+    )
+    .unwrap();
+    let (code, out) = run_uninstall(&setup, all_four_uninstall());
+    assert_eq!(code, 0, "{out}");
+    let after: Vec<_> = snapshot(home.path())
+        .into_iter()
+        .filter(|(p, _)| !p.starts_with(".claude.json"))
+        .collect();
+    let before: Vec<_> = before
+        .into_iter()
+        .filter(|(p, _)| !p.starts_with(".claude.json"))
+        .collect();
+    assert_eq!(after, before);
+    assert!(!read(&setup.paths.user_config).contains("gm-0.2"));
+    memory.close();
+}
+
+#[cfg(unix)]
+#[test]
+fn b6_a_write_that_fails_midway_puts_back_everything() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = TempDir::new("b6-home");
+    let data = TempDir::new("b6-data");
+    existing_home(home.path());
+    existing_codex_home(home.path());
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    // Codex's directory cannot take a new file: its writes fail after Claude Code's succeeded.
+    let codex = home.path().join(".codex");
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let mut connect = memory.connector();
+    let options = InstallOptions {
+        harnesses: Some(vec![Kind::ClaudeCode, Kind::Codex]),
+        ..yes()
+    };
+    let result = install::install(
+        &setup,
+        &options,
+        &mut connect,
+        &mut &b""[..],
+        &mut Vec::new(),
+    );
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = result.unwrap_err();
+    assert!(err.contains("put back what it had written"), "{err}");
+    assert!(
+        err.contains(".claude.json"),
+        "names what was put back: {err}"
+    );
+    assert_eq!(snapshot(home.path()), before, "every file as before");
+    for kind in Kind::ALL {
+        assert!(
+            !data
+                .path()
+                .join("install")
+                .join(format!("{}.json", kind.id()))
+                .exists()
+        );
+    }
+    memory.close();
+}
+
+#[test]
+fn b8_a_read_only_file_is_refused_and_nothing_changes() {
+    let home = TempDir::new("b8-home");
+    let data = TempDir::new("b8-data");
+    existing_home(home.path());
+    existing_codex_home(home.path());
+    let config = home.path().join(".codex/config.toml");
+    let mut perms = std::fs::metadata(&config).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&config, perms.clone()).unwrap();
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let mut connect = memory.connector();
+    let options = InstallOptions {
+        harnesses: Some(vec![Kind::ClaudeCode, Kind::Codex]),
+        ..yes()
+    };
+    let err = install::install(
+        &setup,
+        &options,
+        &mut connect,
+        &mut &b""[..],
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("config.toml is read-only") && err.contains("nothing was changed"),
+        "{err}"
+    );
+    assert_eq!(snapshot(home.path()), before);
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&config, perms).unwrap();
+    memory.close();
+}
+
+/// Input that answers "y" to the question, but first rewrites a file the way a running agent
+/// does (Claude Code rewrites `~/.claude.json` often).
+struct RacingInput {
+    path: PathBuf,
+    answered: bool,
+}
+
+impl std::io::Read for RacingInput {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.answered {
+            return Ok(0);
+        }
+        self.answered = true;
+        let text = std::fs::read_to_string(&self.path)?;
+        std::fs::write(
+            &self.path,
+            text.replacen('{', "{\"lastSessionId\": \"abc\", ", 1),
+        )?;
+        buf[..2].copy_from_slice(b"y\n");
+        Ok(2)
+    }
+}
+
+#[test]
+fn d5_a_file_rewritten_while_install_waits_is_merged_again_never_overwritten() {
+    let home = TempDir::new("d5-home");
+    let data = TempDir::new("d5-data");
+    existing_home(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let mut connect = memory.connector();
+    let mut input = BufReader::new(RacingInput {
+        path: setup.paths.user_config.clone(),
+        answered: false,
+    });
+    let options = InstallOptions {
+        yes: false,
+        ..yes()
+    };
+    let mut out = Vec::new();
+    let code = install::install(&setup, &options, &mut connect, &mut input, &mut out).unwrap();
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&out));
+    let config: Value = serde_json::from_str(&read(&setup.paths.user_config)).unwrap();
+    assert_eq!(
+        config["lastSessionId"], "abc",
+        "the agent's write is kept: {config}"
+    );
+    assert!(
+        config["mcpServers"]["graphersal-memory"].is_object(),
+        "{config}"
+    );
+    assert_eq!(config["mcpServers"]["other"]["command"], "x");
+    // A change between the plan and the write is caught by the fingerprint the plan was made
+    // from.
+    let mut state = install::State::default();
+    let mut bases = std::collections::BTreeMap::new();
+    bases.insert(
+        setup.paths.user_config.clone(),
+        Some("0000000000000000".to_string()),
+    );
+    let change = install::Change {
+        path: setup.paths.user_config.clone(),
+        after: Some("{}".into()),
+        created: Vec::new(),
+        separator: None,
+    };
+    let err = install::apply_changes(
+        &setup,
+        &[change],
+        &mut state,
+        &mut Vec::new(),
+        &mut Default::default(),
+        &bases,
+        &mut Vec::new(),
+        &mut |_, _| {},
+    )
+    .unwrap_err();
+    assert!(err.starts_with(crate::fsutil::CHANGED_MEANWHILE), "{err}");
+    assert_eq!(
+        config,
+        serde_json::from_str::<Value>(&read(&setup.paths.user_config)).unwrap()
+    );
+    memory.close();
+}
+
+/// A memory directory with the formatting people and Claude Code really write: CRLF, a blank
+/// line between the why and the how, a folded description, a metadata key of Claude Code's,
+/// no blank line after the front matter.
+fn formatted_fixture(home: &Path, project: &Path) -> PathBuf {
+    let name = import::claude_slug(&project.display().to_string());
+    let dir = home.join(".claude").join("projects").join(&name);
+    let memory = dir.join("memory");
+    std::fs::create_dir_all(&memory).unwrap();
+    std::fs::write(
+        dir.join("0001.jsonl"),
+        format!(
+            "{}\n",
+            json!({"cwd": project.display().to_string(), "type": "user"})
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        memory.join("MEMORY.md"),
+        "- [CRLF](crlf-rule.md) — crlf\n- [Spaced](spaced-rule.md) — spaced\n\
+         - [Folded](folded-rule.md) — folded\n- [Meta](meta-rule.md) — meta\n",
+    )
+    .unwrap();
+    std::fs::write(
+        memory.join("crlf-rule.md"),
+        "---\r\nname: crlf-rule\r\ndescription: Line ends of Windows\r\nmetadata:\r\n  type: feedback\r\n---\r\n\r\nKeep CRLF.\r\n",
+    )
+    .unwrap();
+    std::fs::write(
+        memory.join("spaced-rule.md"),
+        "---\nname: spaced-rule\ndescription: A blank line between why and how\nmetadata:\n  type: feedback\n---\n\nSpace them.\n\n**Why:** readable.\n\n**How to apply:** always.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        memory.join("folded-rule.md"),
+        "---\nname: folded-rule\ndescription: >-\n  A description folded\n  over two lines\nmetadata:\n  type: project\n---\nNo blank line after the front matter.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        memory.join("meta-rule.md"),
+        "---\nname: meta-rule\ndescription: Extra keys of others\nmetadata:\n  type: user\n  originSessionId: 1234-abcd\n---\n\nThe user is a tester.\n",
+    )
+    .unwrap();
+    memory
+}
+
+#[test]
+fn b1_b2_the_export_round_trip_makes_no_siblings_and_refreshes_files_unchanged_since_import() {
+    let home = TempDir::new("b1-home");
+    let data = TempDir::new("b1-data");
+    let work = TempDir::new("b1-work");
+    let project_dir = mcp::canonical(work.path());
+    let dir = formatted_fixture(home.path(), &project_dir);
+    let before = snapshot(&dir);
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    let project = project_dir.display().to_string();
+    let folded = memory.call(&project, "memory", json!({"slug": "folded-rule"}));
+    assert_eq!(
+        folded["summary"], "A description folded over two lines",
+        "{folded}"
+    );
+    // Nothing changed in the graph: the export leaves every file as it is, writes no sibling.
+    let rows = InProcess(&memory).memories_all();
+    let report = crate::export::write(&setup.agent(), data.path(), &rows).unwrap();
+    assert_eq!(snapshot(&dir), before, "{report:?}");
+    assert!(report.conflicts.is_empty(), "{report:?}");
+    // A memory changed in the graph after install reaches its file (unchanged since import),
+    // and the metadata key of Claude Code's stays.
+    memory.call(
+        &project,
+        "remember",
+        json!({"slug": "meta-rule", "kind": "user", "summary": "Extra keys of others",
+               "body": "The user is a tester and a writer."}),
+    );
+    let rows = InProcess(&memory).memories_all();
+    let report = crate::export::write(&setup.agent(), data.path(), &rows).unwrap();
+    assert_eq!(
+        report.refreshed,
+        vec![dir.join("meta-rule.md")],
+        "{report:?}"
+    );
+    let text = read(&dir.join("meta-rule.md"));
+    assert!(text.contains("a tester and a writer"), "{text}");
+    assert!(text.contains("  originSessionId: 1234-abcd\n---"), "{text}");
+    assert!(report.conflicts.is_empty(), "{report:?}");
+    // A file the user edited since its import keeps its text; the graph's goes beside it, and
+    // a re-install never imports that sibling as a memory.
+    std::fs::write(
+        dir.join("crlf-rule.md"),
+        "---\nname: crlf-rule\ndescription: Mine now\n---\nMine.\n",
+    )
+    .unwrap();
+    memory.call(
+        &project,
+        "remember",
+        json!({"slug": "crlf-rule", "kind": "feedback", "summary": "Line ends of Windows",
+               "body": "Keep CRLF, always."}),
+    );
+    let rows = InProcess(&memory).memories_all();
+    let report = crate::export::write(&setup.agent(), data.path(), &rows).unwrap();
+    assert_eq!(report.conflicts.len(), 1, "{report:?}");
+    assert!(dir.join("crlf-rule.graphersal.md").exists());
+    let scanned = import::read_dir(&dir, Some(project.clone()));
+    assert!(
+        !scanned.files.iter().any(|f| f.slug.contains("graphersal")),
+        "{:?}",
+        scanned.files.iter().map(|f| &f.slug).collect::<Vec<_>>()
+    );
+    memory.close();
+}
+
+#[test]
+fn a_superseded_memory_is_written_but_left_out_of_the_index_and_a_conflict_is_named() {
+    let home = TempDir::new("sup-home");
+    let data = TempDir::new("sup-data");
+    let work = TempDir::new("sup-work");
+    let project_dir = mcp::canonical(work.path());
+    std::fs::create_dir_all(project_dir.join(".git")).unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let project = project_dir.display().to_string();
+    for (slug, summary) in [
+        ("use-npm", "Install with npm"),
+        ("tabs", "Indent with tabs"),
+        ("spaces", "Indent with spaces"),
+    ] {
+        memory.call(
+            &project,
+            "remember",
+            json!({"slug": slug, "kind": "feedback", "summary": summary, "body": summary}),
+        );
+    }
+    memory.call(
+        &project,
+        "remember",
+        json!({"slug": "use-pnpm", "kind": "feedback",
+        "summary": "Install with pnpm instead of npm", "body": "pnpm", "supersedes": ["use-npm"]}),
+    );
+    memory.call(
+        &project,
+        "settle",
+        json!({"slug": "tabs", "decision": "conflict", "other": "spaces"}),
+    );
+    let rows = InProcess(&memory).memories_all();
+    crate::projects::resolve(data.path(), &project).unwrap();
+    crate::export::write(&setup.agent(), data.path(), &rows).unwrap();
+    let dir = crate::agents::Agent::memory_dir(&setup.agent(), &project_dir);
+    let index = read(&dir.join("MEMORY.md"));
+    assert!(!index.contains("(use-npm.md)"), "{index}");
+    assert!(index.contains("(use-pnpm.md)"), "{index}");
+    let npm = read(&dir.join("use-npm.md"));
+    let body = npm.split("---\n\n").nth(1).unwrap();
+    assert!(body.starts_with("SUPERSEDED by use-pnpm on 20"), "{npm}");
+    let tabs = read(&dir.join("tabs.md"));
+    assert!(tabs.contains("CONFLICT with spaces:"), "{tabs}");
+    // Imported back, the notes are not part of the memory.
+    let scanned = import::read_dir(&dir, Some(project.clone()));
+    let npm = scanned.files.iter().find(|f| f.slug == "use-npm").unwrap();
+    assert_eq!(npm.body, "Install with npm");
+    memory.close();
+}
+
+#[test]
+fn memories_imported_together_from_one_directory_do_not_wait_for_each_other() {
+    let home = TempDir::new("unch-home");
+    let data = TempDir::new("unch-data");
+    let work = TempDir::new("unch-work");
+    let project_dir = mcp::canonical(work.path());
+    std::fs::create_dir_all(project_dir.join(".git")).unwrap();
+    // A realistic memory directory: 64 files on related topics (the hash embedder finds
+    // neighbours among them).
+    let topics = [
+        "tests", "release", "build", "deploy", "review", "docs", "style", "commits",
+    ];
+    let mut files = Vec::new();
+    for n in 0..64 {
+        let topic = topics[n % topics.len()];
+        files.push((
+            format!("{topic}-rule-{n}"),
+            if n % 3 == 0 { "feedback" } else { "project" },
+            format!(
+                "Rule {n} about the {topic} of the project: run the {topic} step before merging"
+            ),
+        ));
+    }
+    let refs: Vec<(&str, &str, &str)> = files
+        .iter()
+        .map(|(a, b, c)| (a.as_str(), *b, c.as_str()))
+        .collect();
+    conflict_fixture(home.path(), &project_dir, &refs);
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    let project = project_dir.display().to_string();
+    let listed = memory.call(&project, "conflicts", json!({"k": 5}));
+    assert_eq!(listed["unchecked_total"], 0, "{listed}");
+    let context = memory.runtime.start_context(&project, 4000).unwrap();
+    assert!(
+        !context.status_line().contains("to check"),
+        "{}",
+        context.status_line()
+    );
+    // A memory of another source near them is checked.
+    let new = memory.call(&project, "remember", json!({"slug": "tests-again", "kind": "feedback",
+        "summary": "Rule about the tests of the project: run the tests step before merging", "body": "x"}));
+    assert!(new["nearest"].is_array(), "{new}");
+    memory.close();
+}
+
+#[test]
+fn memories_imported_before_m12_get_their_file_as_source_once() {
+    let data = TempDir::new("mig-data");
+    let memory = Memory::open(data.path());
+    // As an old import wrote it: source "user", no imported_at.
+    memory.call(
+        "/w/app",
+        "remember",
+        json!({"slug": "old-rule", "kind": "feedback",
+        "summary": "An old rule", "body": "Old."}),
+    );
+    let mut state = ImportState::default();
+    let file = import::MemoryFile {
+        path: PathBuf::from("/h/.claude/projects/-w-app/memory/old-rule.md"),
+        slug: "old-rule".into(),
+        kind: "feedback".into(),
+        kind_defaulted: false,
+        summary: "An old rule".into(),
+        body: "Old.".into(),
+        why: String::new(),
+        how_to_apply: String::new(),
+        title: String::new(),
+        hook: String::new(),
+        order: 0,
+        listed: false,
+        links: Vec::new(),
+        pinned: false,
+        fingerprint: "f".into(),
+        content: "c".into(),
+        modified_at: String::new(),
+    };
+    state.record_for_test(&file, "/w/app");
+    state.save(data.path()).unwrap();
+    let call = |name: &str, args: Value| memory.runtime.call(name, args);
+    assert_eq!(import::migrate_sources(data.path(), &call).unwrap(), 1);
+    let read = memory.call("/w/app", "memory", json!({"slug": "old-rule"}));
+    assert_eq!(
+        read["source"], "/h/.claude/projects/-w-app/memory/old-rule.md",
+        "{read}"
+    );
+    assert!(read["imported_at"].is_string(), "{read}");
+    // Once only: an agent's later rewrite stays its own.
+    memory.call(
+        "/w/app",
+        "remember",
+        json!({"slug": "old-rule", "kind": "feedback",
+        "summary": "An old rule, rewritten", "body": "New."}),
+    );
+    assert_eq!(import::migrate_sources(data.path(), &call).unwrap(), 0);
+    let read = memory.call("/w/app", "memory", json!({"slug": "old-rule"}));
+    assert_eq!(read["source"], "remember", "{read}");
+    memory.close();
+}
+
+#[test]
+fn n2_a_crlf_instruction_file_gets_a_crlf_block_and_gets_it_back_out_cleanly() {
+    let home = TempDir::new("n2-home");
+    let data = TempDir::new("n2-data");
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    let original = "# Rules\r\n\r\nBe brief.\r\n";
+    std::fs::write(home.path().join(".claude/CLAUDE.md"), original).unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, yes()).0, 0);
+    let text = read(&setup.paths.instructions);
+    assert!(
+        !text.replace("\r\n", "").contains('\n'),
+        "every line end is CRLF"
+    );
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("conflict"), "{out}");
+    // The user adds a line: the structural removal leaves no stray line end.
+    std::fs::write(&setup.paths.instructions, format!("{text}Mine.\r\n")).unwrap();
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        read(&setup.paths.instructions),
+        format!("{original}\r\nMine.\r\n")
+    );
+    memory.close();
+}
+
+#[test]
+fn n3_an_empty_settings_file_is_an_empty_configuration() {
+    let home = TempDir::new("n3-home");
+    let data = TempDir::new("n3-data");
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(home.path().join(".claude/settings.json"), "").unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(settings_json(&setup)["hooks"]["SessionStart"].is_array());
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(read(&setup.paths.settings), "");
+    memory.close();
+}
+
+#[test]
+fn n4_uninstall_says_when_it_kept_the_users_newer_auto_memory_value() {
+    let home = TempDir::new("n4-home");
+    let data = TempDir::new("n4-data");
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(home.path().join(".claude/settings.json"), "{}\n").unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, yes()).0, 0);
+    let on = read(&setup.paths.settings).replace(
+        "\"autoMemoryEnabled\": false",
+        "\"autoMemoryEnabled\": true",
+    );
+    std::fs::write(&setup.paths.settings, on).unwrap();
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("auto-memory: kept as you set it after install"),
+        "{out}"
+    );
+    assert!(!out.contains("back to how it was"), "{out}");
+    assert_eq!(settings_json(&setup)["autoMemoryEnabled"], true);
+    memory.close();
+}
+
+#[test]
+fn b7_uninstall_with_nothing_installed_creates_nothing() {
+    let home = TempDir::new("b7-home");
+    let data = TempDir::new("b7-data");
+    let missing = data.path().join("none");
+    let setup = setup_in(home.path(), &missing);
+    let memory_dir = TempDir::new("b7-store");
+    let memory = Memory::open(memory_dir.path());
+    let (code, out) = run_uninstall_exporting(
+        &setup,
+        &memory,
+        UninstallOptions {
+            yes: true,
+            ..UninstallOptions::default()
+        },
+        b"",
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("Nothing of graphersal-memory is installed"),
+        "{out}"
+    );
+    assert!(!missing.exists(), "no data directory created");
+    assert!(snapshot(home.path()).is_empty());
+    memory.close();
+}
+
+#[test]
+fn b9_a_config_error_names_the_file_and_the_way_out() {
+    let home = TempDir::new("b9-home");
+    let data = TempDir::new("b9-data");
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(
+        home.path().join(".claude/settings.json"),
+        "{\"hooks\": 3}\n",
+    )
+    .unwrap();
+    existing_codex_home(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let mut connect = memory.connector();
+    let options = InstallOptions {
+        harnesses: Some(vec![Kind::ClaudeCode, Kind::Codex]),
+        ..yes()
+    };
+    let err = install::install(
+        &setup,
+        &options,
+        &mut connect,
+        &mut &b""[..],
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(err.contains("settings.json"), "{err}");
+    assert!(err.contains("nothing was changed"), "{err}");
+    assert!(err.contains("--harness <agent>` for codex"), "{err}");
+    memory.close();
+}
+
+#[test]
+fn h5_a_run_dir_whose_socket_path_is_too_long_is_refused_before_any_change() {
+    let home = TempDir::new("h5-home");
+    let data = TempDir::new("h5-data");
+    existing_home(home.path());
+    let before = snapshot(home.path());
+    let mut setup = setup_in(home.path(), data.path());
+    setup.run_dir = PathBuf::from("/").join("r".repeat(120));
+    let memory = Memory::open(data.path());
+    let mut connect = memory.connector();
+    let err =
+        install::install(&setup, &yes(), &mut connect, &mut &b""[..], &mut Vec::new()).unwrap_err();
+    assert!(
+        err.contains("longer than") && err.contains("nothing was changed"),
+        "{err}"
+    );
+    assert_eq!(snapshot(home.path()), before);
+    memory.close();
+}
+
+#[test]
+fn n5_text_the_user_added_to_the_cursor_rule_file_loses_our_front_matter() {
+    let home = TempDir::new("n5-home");
+    let data = TempDir::new("n5-data");
+    existing_cursor_home(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    assert_eq!(run_install(&setup, &memory, cursor_only()).0, 0);
+    let rules = read(&setup.cursor.rules_file);
+    std::fs::write(&setup.cursor.rules_file, format!("{rules}\nMine.\n")).unwrap();
+    let (code, out) = run_uninstall(&setup, cursor_uninstall());
+    assert_eq!(code, 0, "{out}");
+    let left = read(&setup.cursor.rules_file);
+    assert!(!left.contains("graphersal-memory"), "{left}");
+    assert!(
+        left.starts_with("---\nalwaysApply: true\n---\n") && left.ends_with("Mine.\n"),
+        "{left}"
+    );
+    memory.close();
+}
+
+#[test]
+fn note18_cursor_in_its_windows_install_location_is_found() {
+    let home = TempDir::new("n18-home");
+    let data = TempDir::new("n18-data");
+    let setup = bare_setup_in(home.path(), data.path());
+    assert!(setup.program(Kind::Cursor).is_none());
+    let exe = home.path().join("AppData/Local/Programs/cursor/Cursor.exe");
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    std::fs::write(&exe, "").unwrap();
+    assert_eq!(setup.program(Kind::Cursor), Some(exe));
+}
+
+#[test]
+fn note21_commands_shown_keep_full_paths_and_prose_uses_the_tilde() {
+    let home = Path::new("/Users/ann");
+    assert_eq!(
+        install::tilde(
+            "in /Users/ann/.claude/settings.json: add `'/Users/ann/bin/gm' hook x`",
+            home
+        ),
+        "in ~/.claude/settings.json: add `'/Users/ann/bin/gm' hook x`"
+    );
+    // An unpaired backtick is prose.
+    assert_eq!(install::tilde("a ` /Users/ann/x", home), "a ` ~/x");
+    let tmp = TempDir::new("n21-home");
+    let data = TempDir::new("n21-data");
+    let mut setup = setup_in(tmp.path(), data.path());
+    setup.exe = tmp.path().join("bin/graphersal-memory");
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            dry_run: true,
+            ..InstallOptions::default()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    let full = format!("`'{}' hook session-start", setup.exe.display());
+    assert!(
+        out.contains(&full),
+        "the hook command with its full path: {out}"
+    );
+    memory.close();
+}
+
+#[test]
+fn note23_the_wizard_shows_paths_under_the_home_directory_with_a_tilde() {
+    let home = TempDir::new("n23-home");
+    let data = TempDir::new("n23-data");
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(home.path().join(".claude/settings.json"), "{}\n").unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (_, out) = run_wizard(&setup, &memory, "\n\nn\n");
+    assert!(out.contains("false in ~/.claude/settings.json"), "{out}");
+    assert!(!out.contains(&home.path().display().to_string()), "{out}");
     memory.close();
 }

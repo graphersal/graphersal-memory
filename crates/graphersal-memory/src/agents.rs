@@ -102,6 +102,7 @@ pub trait Agent {
 
 /// Whether an MCP entry is one of ours: it starts a `graphersal-memory` binary with `mcp`
 /// (Claude Code: `command` + `args`; opencode: `command` as one array).
+#[cfg(test)]
 pub fn is_our_entry(entry: &Value) -> bool {
     let (command, first) = match &entry["command"] {
         Value::Array(parts) => (

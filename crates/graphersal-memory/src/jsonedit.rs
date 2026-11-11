@@ -540,6 +540,18 @@ fn insert_into(
     match (last_end, unit) {
         (Some(end), Some(unit)) => {
             let indent = unit.repeat(depth + 1);
+            // A comment that ends the last item's line stays with that item: the new item goes
+            // on the next line.
+            if let Some((line, comma)) = trailing_comment(text, end) {
+                let cr = if line.ends_with('\r') { "\r" } else { "" };
+                let body = line.strip_suffix('\r').unwrap_or(line);
+                let new = if comma {
+                    format!("{body}{cr}\n{indent}{item},{cr}")
+                } else {
+                    format!(",{body}{cr}\n{indent}{item}{cr}")
+                };
+                return splice(text, end, end + line.len(), &new);
+            }
             splice(text, end, end, &format!(",\n{indent}{item}"))
         }
         (Some(end), None) => splice(text, end, end, &format!(", {item}")),
@@ -571,6 +583,21 @@ fn insert_into(
         }
         (None, None) => splice(text, node.start + 1, node.end - 1, item),
     }
+}
+
+/// The rest of the line after byte `end` when it is only a comment (after an optional comma) and
+/// a line end follows: that rest (without the `\n`, with a `\r`) and whether the comma is there.
+fn trailing_comment(text: &str, end: usize) -> Option<(&str, bool)> {
+    let rest = text.get(end..)?;
+    let line = &rest[..rest.find('\n')?];
+    let body = line.strip_suffix('\r').unwrap_or(line).trim_start();
+    let (comma, body) = match body.strip_prefix(',') {
+        Some(after) => (true, after.trim_start()),
+        None => (false, body),
+    };
+    let comment = body.starts_with("//")
+        || (body.starts_with("/*") && body.find("*/").is_some_and(|at| at + 2 == body.len()));
+    comment.then_some((line, comma))
 }
 
 /// Appends `value` to the array at `path`, creating the array (and the objects before it) when
@@ -645,6 +672,34 @@ fn remove_item(
     if index + 1 == items.len() {
         // The last item: from the end of the previous one (its comma goes too).
         let previous_end = items[index - 1].1;
+        let between = text.get(previous_end..start).unwrap_or_default();
+        // A comment between them ends the previous item's line (`insert_into` put the item
+        // after it): the comment stays where it was.
+        if clean(between) != between
+            && let Some(newline) = between.rfind('\n')
+        {
+            let after = text.get(end..).unwrap_or_default();
+            let gap = after.len() - after.trim_start_matches([' ', '\t']).len();
+            if after[gap..].starts_with(',') {
+                // The item had the user's trailing comma: the item's line goes.
+                let mut to = end + gap + 1;
+                if text[to..].starts_with('\r') {
+                    to += 1;
+                }
+                return splice(text, previous_end + newline, to, "");
+            }
+            let mut kept = between[..newline].to_string();
+            if let Some(comma) = kept.find(',')
+                && kept[..comma].trim().is_empty()
+            {
+                kept.remove(comma);
+            }
+            let mut to = end;
+            if text[to..].starts_with('\r') {
+                to += 1;
+            }
+            return splice(text, previous_end, to, &kept);
+        }
         return splice(text, previous_end, end, "");
     }
     // Any other item: up to the start of the next one.
@@ -701,6 +756,45 @@ pub fn remove_elements(
     Ok(changed.then_some(text))
 }
 
+/// Removes, in every element of the array at `path` that is an object with an array member
+/// `inner`, the elements of that inner array for which `ours` holds (a hook of ours that the
+/// user moved into a group of their own). Returns `None` when none matched.
+pub fn remove_inner_elements(
+    text: &str,
+    path: &[&str],
+    inner: &str,
+    ours: &dyn Fn(&Value) -> bool,
+) -> Result<Option<String>, String> {
+    let mut text = text.to_string();
+    let mut changed = false;
+    loop {
+        let cleaned = clean(&text);
+        let root = parse_clean(&cleaned)?;
+        let Some(elements) = locate(&root, path).and_then(Node::elements) else {
+            break;
+        };
+        let found = elements.iter().find_map(|element| {
+            let array = element.get(inner)?;
+            let items = array.elements()?;
+            let index = items.iter().position(|item| {
+                cleaned
+                    .get(item.start..item.end)
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                    .is_some_and(|value| ours(&value))
+            })?;
+            Some((array.clone(), index))
+        });
+        let Some((array, index)) = found else {
+            break;
+        };
+        let items = array.elements().unwrap_or_default();
+        let spans: Vec<(usize, usize)> = items.iter().map(|e| (e.start, e.end)).collect();
+        text = checked(remove_item(&text, &array, &spans, index)?)?;
+        changed = true;
+    }
+    Ok(changed.then_some(text))
+}
+
 /// Whether the container at `path` exists and is empty.
 pub fn is_empty_container(text: &str, path: &[&str]) -> bool {
     parse(text).ok().is_some_and(|root| {
@@ -716,6 +810,48 @@ pub fn is_empty_container(text: &str, path: &[&str]) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_comment_after_the_last_member_stays_on_its_line_and_the_removal_gives_it_back() {
+        for original in [
+            "{\n  \"mcp\": {\n    \"other\": {\"type\": \"local\"} // my server\n  }\n}\n",
+            "{\n  \"mcp\": {\n    \"other\": {\"type\": \"local\"}, /* keep */\n  },\n}\n",
+            "{\r\n  \"mcp\": {\r\n    \"other\": 1 // crlf\r\n  }\r\n}\r\n",
+        ] {
+            let (added, _) = set_member(original, &["mcp"], "ours", &json!({"a": 1}))
+                .unwrap()
+                .unwrap();
+            let line = added.lines().find(|l| l.contains("other")).unwrap();
+            assert!(line.contains("//") || line.contains("/*"), "{added}");
+            assert!(
+                !added
+                    .lines()
+                    .any(|l| l.contains("ours") && l.contains("//")),
+                "{added}"
+            );
+            let back = remove_member(&added, &["mcp"], "ours").unwrap().unwrap();
+            assert_eq!(back, original, "{added}");
+        }
+    }
+
+    #[test]
+    fn inner_elements_go_and_the_rest_of_their_group_stays() {
+        let text = "{\n  \"hooks\": {\n    \"SessionStart\": [\n      {\"hooks\": [{\"command\": \"mine\"}, {\"command\": \"ours\"}]},\n      {\"hooks\": [{\"command\": \"other\"}]}\n    ]\n  }\n}\n";
+        let ours = |v: &Value| v["command"] == "ours";
+        let new = remove_inner_elements(text, &["hooks", "SessionStart"], "hooks", &ours)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            value_of(&new).unwrap(),
+            json!({"hooks": {"SessionStart": [{"hooks": [{"command": "mine"}]},
+                                              {"hooks": [{"command": "other"}]}]}})
+        );
+        assert!(
+            remove_inner_elements(&new, &["hooks", "SessionStart"], "hooks", &ours)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn insert_then_remove_gives_the_original_bytes() {

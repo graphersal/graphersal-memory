@@ -294,10 +294,13 @@ add` is not used, because it rewrites the whole file.)
 `graphersal-memory uninstall` first writes every memory back into Claude Code's file memory: per
 project `MEMORY.md` and one file per memory in `~/.claude/projects/<project>/memory/` (the format
 `import` reads), and the global memories into `~/.claude/rules/graphersal-memory-global.md`, a user
-rules file Claude Code loads in every project. A file that already says the same is left alone; a
-memory file you or the agent changed is kept, and the graph's version goes beside it as
-`<slug>.graphersal.md` (named in the report); a `MEMORY.md` that differs keeps its lines and gets
-the lines of the memories it lacks appended; nothing is deleted. In a terminal it asks first
+rules file Claude Code loads in every project. A file that already says the same (whatever its
+formatting) is left alone; a file nobody changed since its import gets the graph's newer version
+(front-matter keys of other tools kept); a memory file you or the agent changed since is kept, and
+the graph's version goes beside it as `<slug>.graphersal.md` (named in the report; never imported
+back); a `MEMORY.md` that differs keeps its lines and gets the lines of the memories it lacks
+appended; a superseded memory keeps its file (starting "SUPERSEDED by ...") but is not listed in
+`MEMORY.md`; nothing is deleted. In a terminal it asks first
 (default yes; `--no-export` skips it). `graphersal-memory export --to-files [--project ROOT]` does
 the same at any time. Then uninstall removes exactly what `install` added: the MCP entries, the
 hooks, the marked block, and the auto-memory switch goes back to what it was. A file nobody
@@ -305,7 +308,11 @@ changed since install gets its original bytes back (or is deleted again if insta
 in a file Claude Code rewrote since, only our entries are removed. The acceptance test for this
 is byte-for-byte: install, then uninstall, on a temporary home directory leaves the configuration
 identical. Your memories stay in the data directory; `uninstall --purge` deletes them too (after
-asking). `status` shows what is installed (with the language, the model and the auto-memory
+asking), and only what graphersal-memory created there: install refuses a data directory that
+already holds other files. A configuration file that is a symbolic link (a dotfiles repository)
+stays a link: install and uninstall write its target. A read-only file is refused before anything
+changes, a write that fails midway puts back everything written so far, and only one install or
+uninstall runs at a time. `status` shows what is installed (with the language, the model and the auto-memory
 state), and `doctor` checks it (the model is downloaded and loads) and says how to fix what isn't
 working.
 

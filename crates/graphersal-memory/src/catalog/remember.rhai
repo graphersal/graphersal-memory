@@ -110,10 +110,20 @@ fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, o
             + "- supersedes: the new memory is a later decision on the same question that names or implies a change (\"instead of\", \"moved to\", \"now\", \"since <date>\", \"no longer\"). Remember the new one again with supersedes: [old slug].\n"
             + "- contradicts: following one would break the other and the new memory does not say it replaces it (e.g. two sources disagree). Record it with settle(\"" + slug + "\", \"conflict\", <old slug>) and ask the user which holds; change nothing else yet.\n"
             + "Decide from the texts, not the dates (updated_at of a memory imported from a file is when that file last changed). When the superseded or contradicting memory has a file source, tell the user that file must change too, or the old rule stays in what the harness loads from there.";
-        // An imported memory waits for this check until an agent settles it (conflicts()).
-        if imported && g.v(id).in_("supersedes").has_label("memory").filter(visible).count().next() == 0 {
+        // An imported memory waits for this check until an agent settles it (conflicts()), but
+        // only against memories of another source: the files of one memory directory already
+        // stood side by side in the user's setup.
+        let dir = "";
+        if imported && from_file.contains("dir") && type_of(from_file.dir) == "string" { dir = from_file.dir; }
+        let foreign = 0;
+        for n in nearest {
+            if dir == "" || n.source == "remember" || !n.source.starts_with(dir) { foreign += 1; }
+        }
+        if imported && foreign > 0 && g.v(id).in_("supersedes").has_label("memory").filter(visible).count().next() == 0 {
             g.v(id).property("unchecked", true).iterate();
             out.unchecked = true;
+        } else if imported {
+            g.v(id).properties("unchecked").drop().iterate();
         }
     } else if imported {
         g.v(id).properties("unchecked").drop().iterate();

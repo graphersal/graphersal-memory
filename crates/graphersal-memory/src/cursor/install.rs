@@ -16,10 +16,10 @@
 
 use serde_json::{Value, json};
 
-use crate::agents::{Agent, is_our_entry};
+use crate::agents::Agent;
 use crate::install::{
-    Change, DEVELOP_SERVER, Finding, PartState, Setup, State, Step, USE_SERVER, find_block_in,
-    is_our_command, ok, problem, read_json, read_text, wrap_block,
+    Change, DEVELOP_SERVER, Finding, PartState, Setup, State, Step, USE_SERVER, find_block_in, ok,
+    problem, read_json, read_text, wrap_block,
 };
 use crate::language::Language;
 use crate::{fsutil, jsonedit};
@@ -78,6 +78,9 @@ pub const FRONT_MATTER: &str = "---\n\
 description: How to use the long-term memory served by the MCP server graphersal-memory\n\
 alwaysApply: true\n\
 ---\n\n";
+
+/// The front matter uninstall leaves above text the user added to our rule file.
+pub const KEPT_FRONT_MATTER: &str = "---\nalwaysApply: true\n---\n\n";
 
 /// The start of a `hooks.json` install creates (cursor.com/docs/hooks: `"version": 1`).
 const NEW_HOOKS_FILE: &str = "{\n  \"version\": 1\n}\n";
@@ -151,11 +154,6 @@ pub fn hook_entry(setup: &Setup, event: &str) -> Value {
     json!({"command": hook_command(setup, event), "timeout": crate::cursor::HOOK_TIMEOUT_SECS})
 }
 
-/// Whether a hook entry (an element of `hooks.<event>`) is ours.
-pub fn is_our_hook(entry: &Value) -> bool {
-    is_our_command(entry["command"].as_str().unwrap_or_default())
-}
-
 /// The planned install for Cursor: its steps, file changes and conflicts.
 pub struct Plan {
     /// The steps for the wizard and the report.
@@ -177,7 +175,7 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
     let path = &paths.mcp_file;
     let key = "mcpServers";
     let before = read_text(path)?;
-    let mut text = before.clone().unwrap_or_else(|| "{\n}\n".to_string());
+    let mut text = crate::install::json_start(&before, "{\n}\n");
     let parsed = jsonedit::value_of(&text)
         .map_err(|err| format!("{} is not valid JSON: {err}", path.display()))?;
     let mut created = Vec::new();
@@ -188,7 +186,7 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
     }
     for (name, profile) in servers {
         let existing = &parsed[key][name];
-        if !existing.is_null() && !is_our_entry(existing) {
+        if !existing.is_null() && !setup.ours().entry(existing) {
             conflicts.push(format!(
                 "{}: {key}.{name} exists and is not ours; kept. Remove it and run install again.",
                 path.display()
@@ -198,7 +196,9 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
             ));
             continue;
         }
-        match jsonedit::set_member(&text, &[key], name, &mcp_entry(setup, profile))? {
+        match jsonedit::set_member(&text, &[key], name, &mcp_entry(setup, profile))
+            .map_err(|e| crate::install::in_file(path, e))?
+        {
             Some((new, made)) => {
                 lines.push(format!(
                     "{name} ({profile} profile): {}",
@@ -217,8 +217,9 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
                 "{DEVELOP_SERVER}: not registered (off; `graphersal-memory install --harness \
                  cursor --enable-develop` registers it)"
             ));
-        } else if is_our_entry(existing)
-            && let Some(new) = jsonedit::remove_member(&text, &[key], DEVELOP_SERVER)?
+        } else if setup.ours().entry(existing)
+            && let Some(new) = jsonedit::remove_member(&text, &[key], DEVELOP_SERVER)
+                .map_err(|e| crate::install::in_file(path, e))?
         {
             text = new;
             lines.push(format!("{DEVELOP_SERVER}: unregister (you answered no)"));
@@ -246,7 +247,7 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
     // hooks.json: the session start and end hooks.
     let path = &paths.hooks_file;
     let before = read_text(path)?;
-    let mut text = before.clone().unwrap_or_else(|| NEW_HOOKS_FILE.to_string());
+    let mut text = crate::install::json_start(&before, NEW_HOOKS_FILE);
     let parsed = jsonedit::value_of(&text)
         .map_err(|err| format!("{} is not valid JSON: {err}", path.display()))?;
     let mut created = Vec::new();
@@ -255,18 +256,22 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
         let entry = hook_entry(setup, sub);
         let ours: Vec<&Value> = parsed["hooks"][event]
             .as_array()
-            .map(|entries| entries.iter().filter(|e| is_our_hook(e)).collect())
+            .map(|entries| entries.iter().filter(|e| setup.ours().hook(e)).collect())
             .unwrap_or_default();
         if ours.len() == 1 && *ours[0] == entry {
             lines.push(format!("{event}: already installed"));
             continue;
         }
         if !ours.is_empty()
-            && let Some(new) = jsonedit::remove_elements(&text, &["hooks", event], &is_our_hook)?
+            && let Some(new) = jsonedit::remove_elements(&text, &["hooks", event], &|h: &Value| {
+                setup.ours().hook(h)
+            })
+            .map_err(|e| crate::install::in_file(path, e))?
         {
             text = new;
         }
-        let (new, made) = jsonedit::append_element(&text, &["hooks", event], &entry)?;
+        let (new, made) = jsonedit::append_element(&text, &["hooks", event], &entry)
+            .map_err(|e| crate::install::in_file(path, e))?;
         text = new;
         created.extend(made);
         lines.push(format!(
@@ -383,12 +388,18 @@ pub fn removal(
         let Some(bytes) = fsutil::read_optional(&path)? else {
             continue;
         };
+        // An empty file holds nothing of ours (and is no JSON to parse).
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
         let entry = state.file(&path);
         let fp = fsutil::fingerprint(&bytes);
         let untouched = entry.is_some_and(|e| {
             e.get("written").and_then(Value::as_str) == Some(fp.as_str())
                 && e.get("backup_valid") == Some(&Value::Bool(true))
         });
+        // A backup that holds our parts (an install that ran twice at once) is never put back.
+        let untouched = untouched && !crate::install::backup_holds_ours(entry);
         let existed = entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(true)));
         if untouched && !develop_only {
             let after = if existed {
@@ -424,7 +435,8 @@ pub fn removal(
             .map_err(|_| format!("{} is not UTF-8 text", path.display()))?;
         let created_by_us = entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(false)));
         let (new, empty) = if path == paths.mcp_file {
-            let new = remove_servers(&text, entry, develop_only)?;
+            let new = remove_servers(setup, &text, entry, develop_only)
+                .map_err(|e| crate::install::in_file(&path, e))?;
             let empty = new.as_deref().is_some_and(|t| {
                 jsonedit::value_of(t)
                     .ok()
@@ -432,7 +444,8 @@ pub fn removal(
             });
             (new, empty)
         } else if path == paths.hooks_file {
-            let new = remove_hooks(&text, entry)?;
+            let new =
+                remove_hooks(setup, &text, entry).map_err(|e| crate::install::in_file(&path, e))?;
             // Empty: nothing but the `"version"` install wrote.
             let empty = new.as_deref().is_some_and(|t| {
                 jsonedit::value_of(t).ok().is_some_and(|v| {
@@ -460,14 +473,24 @@ pub fn removal(
                 }
                 Ok(None) => None,
             };
-            // Empty: nothing but our front matter.
-            let empty = new
+            // Empty: nothing but our front matter (this file is ours by its name, so it goes
+            // even when an install whose record is lost created it).
+            let only_ours = new
                 .as_deref()
                 .is_some_and(|t| t.trim().is_empty() || t.trim() == FRONT_MATTER.trim());
-            (new, empty)
+            // Text the user added stays, under a front matter that no longer names
+            // graphersal-memory (still always applied, as their text was).
+            let new = match new {
+                Some(t) if !only_ours && t.starts_with(FRONT_MATTER) => {
+                    Some(format!("{KEPT_FRONT_MATTER}{}", &t[FRONT_MATTER.len()..]))
+                }
+                other => other,
+            };
+            (new, only_ours)
         };
         if let Some(new) = new {
-            let delete = created_by_us && empty && !develop_only;
+            let delete =
+                (created_by_us || (empty && path == paths.rules_file)) && empty && !develop_only;
             out.push((
                 Change {
                     path: path.clone(),
@@ -491,6 +514,7 @@ pub fn removal(
 /// `mcp.json` without our servers (and the `mcpServers` object install created, when empty
 /// then); `develop_only`: without the develop server only.
 fn remove_servers(
+    setup: &Setup,
     text: &str,
     entry: Option<&serde_json::Map<String, Value>>,
     develop_only: bool,
@@ -504,7 +528,7 @@ fn remove_servers(
     let mut current = text.to_string();
     let mut changed = false;
     for name in names {
-        if is_our_entry(&parsed["mcpServers"][name])
+        if setup.ours().entry(&parsed["mcpServers"][name])
             && let Some(new) = jsonedit::remove_member(&current, &["mcpServers"], name)?
         {
             current = new;
@@ -528,6 +552,7 @@ fn remove_servers(
 
 /// `hooks.json` without our entries (and the containers install created, when empty then).
 fn remove_hooks(
+    setup: &Setup,
     text: &str,
     entry: Option<&serde_json::Map<String, Value>>,
 ) -> Result<Option<String>, String> {
@@ -539,7 +564,9 @@ fn remove_hooks(
     let mut current = text.to_string();
     let mut changed = false;
     for (event, _) in HOOK_EVENTS {
-        if let Some(new) = jsonedit::remove_elements(&current, &["hooks", event], &is_our_hook)? {
+        if let Some(new) = jsonedit::remove_elements(&current, &["hooks", event], &|h: &Value| {
+            setup.ours().hook(h)
+        })? {
             current = new;
             changed = true;
             let dotted = format!("hooks.{event}");
@@ -595,7 +622,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
         let entry = &config["mcpServers"][name];
         if entry.is_null() {
             PartState::Missing
-        } else if !is_our_entry(entry) {
+        } else if !setup.ours().entry(entry) {
             PartState::Conflict("another program's entry has this name".to_string())
         } else if *entry == mcp_entry(setup, profile) {
             PartState::Installed
@@ -612,7 +639,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
         .map(|(event, sub)| {
             let ours: Vec<&Value> = hooks_json["hooks"][*event]
                 .as_array()
-                .map(|entries| entries.iter().filter(|e| is_our_hook(e)).collect())
+                .map(|entries| entries.iter().filter(|e| setup.ours().hook(e)).collect())
                 .unwrap_or_default();
             let state = match ours.as_slice() {
                 [] => PartState::Missing,
@@ -813,9 +840,9 @@ mod tests {
         );
         assert_eq!(
             hook_command_for(&setup, "session-end", false),
-            r#""C:\Users\O'Neil\gm\graphersal-memory.exe" hook session-end --data-dir "C:\d $x" --harness cursor"#
+            r"'C:\Users\O'\''Neil\gm\graphersal-memory.exe' hook session-end --data-dir 'C:\d $x' --harness cursor"
         );
-        assert!(is_our_command(&hook_command_for(
+        assert!(crate::install::is_our_command(&hook_command_for(
             &setup,
             "session-start",
             true

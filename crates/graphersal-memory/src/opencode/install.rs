@@ -23,7 +23,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::agents::{Agent, Kind, is_our_entry};
+use crate::agents::{Agent, Kind};
 use crate::install::{
     Change, DEVELOP_SERVER, Finding, PartState, Setup, State, Step, USE_SERVER, block_separator,
     find_block_in, ok, problem, read_json, read_text, wrap_block,
@@ -143,13 +143,14 @@ fn at<'a>(value: &'a Value, path: &[&str]) -> &'a Value {
 /// Our entry `name` in the 1.x shape (`mcp.<name>`) where 2.x is installed: to be moved.
 fn legacy_ours<'a>(setup: &Setup, config: &'a Value, name: &str) -> Option<&'a Value> {
     let entry = &config["mcp"][name];
-    (setup.opencode.major() == Major::V2 && is_our_entry(entry)).then_some(entry)
+    (setup.opencode.major() == Major::V2 && setup.ours().entry(entry)).then_some(entry)
 }
 
 /// Whether a configuration holds any part of ours (either shape, or our `instructions`).
 fn has_our_parts(setup: &Setup, config: &Value) -> bool {
     [USE_SERVER, DEVELOP_SERVER].iter().any(|name| {
-        is_our_entry(&config["mcp"][*name]) || is_our_entry(&config["mcp"]["servers"][*name])
+        setup.ours().entry(&config["mcp"][*name])
+            || setup.ours().entry(&config["mcp"]["servers"][*name])
     }) || config["instructions"]
         .as_array()
         .is_some_and(|items| items.iter().any(|item| is_our_instruction(setup, item)))
@@ -200,7 +201,9 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
     // into the file 2.x reads below).
     for (stale, text) in stale_with_ours(setup) {
         let entry = state.file(&stale);
-        if let Some(new) = remove_from_config(setup, &stale, &text, entry, false)? {
+        if let Some(new) = remove_from_config(setup, &stale, &text, entry, false)
+            .map_err(|e| crate::install::in_file(&stale, e))?
+        {
             let empty = only_schema(&new);
             let created_by_us =
                 entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(false)));
@@ -225,7 +228,10 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
     let path = &paths.config_file;
     let servers = paths.servers_path();
     let before = read_text(path)?;
-    let mut text = before.clone().unwrap_or_else(new_config);
+    let mut text = match &before {
+        Some(text) if !text.trim().is_empty() => text.clone(),
+        _ => new_config(),
+    };
     let parsed = jsonedit::value_of(&text)
         .map_err(|err| format!("{} is not valid JSON(C): {err}", path.display()))?;
     let mut created = Vec::new();
@@ -236,7 +242,7 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
         (DEVELOP_SERVER, "develop", develop),
     ] {
         let existing = &at(&parsed, servers)[name];
-        if !existing.is_null() && !is_our_entry(existing) {
+        if !existing.is_null() && !setup.ours().entry(existing) {
             conflicts.push(format!(
                 "{}: {place}.{name} exists and is not ours; kept. Remove it and run install again.",
                 path.display()
@@ -248,14 +254,17 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
         }
         let mut moved = false;
         if legacy_ours(setup, &parsed, name).is_some()
-            && let Some(new) = jsonedit::remove_member(&text, &["mcp"], name)?
+            && let Some(new) = jsonedit::remove_member(&text, &["mcp"], name)
+                .map_err(|e| crate::install::in_file(path, e))?
         {
             text = new;
             moved = true;
         }
         let entry = mcp_entry(setup, profile, enabled);
         let state_word = if enabled { "enabled" } else { "disabled" };
-        match jsonedit::set_member(&text, servers, name, &entry)? {
+        match jsonedit::set_member(&text, servers, name, &entry)
+            .map_err(|e| crate::install::in_file(path, e))?
+        {
             Some((new, made)) => {
                 lines.push(format!(
                     "{name} ({profile} profile): {} ({state_word})",
@@ -283,7 +292,8 @@ pub fn plan(setup: &Setup, language: Language, develop: bool) -> Result<Plan, St
         if listed {
             lines.push(format!("instructions: {rules} already listed"));
         } else {
-            let (new, made) = jsonedit::append_element(&text, &["instructions"], &json!(rules))?;
+            let (new, made) = jsonedit::append_element(&text, &["instructions"], &json!(rules))
+                .map_err(|e| crate::install::in_file(path, e))?;
             text = new;
             created.extend(made);
             lines.push(format!(
@@ -453,12 +463,18 @@ pub fn removal(
         let Some(bytes) = fsutil::read_optional(&path)? else {
             continue;
         };
+        // An empty file holds nothing of ours (and is no JSON to parse).
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
         let entry = state.file(&path);
         let fp = fsutil::fingerprint(&bytes);
         let untouched = entry.is_some_and(|e| {
             e.get("written").and_then(Value::as_str) == Some(fp.as_str())
                 && e.get("backup_valid") == Some(&Value::Bool(true))
         });
+        // A backup that holds our parts (an install that ran twice at once) is never put back.
+        let untouched = untouched && !crate::install::backup_holds_ours(entry);
         let existed = entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(true)));
         if untouched && !develop_only {
             let after = if existed {
@@ -495,7 +511,8 @@ pub fn removal(
         let created_by_us = entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(false)));
         let config_file = path == paths.config_file || paths.stale_config_files.contains(&path);
         let new = if config_file {
-            remove_from_config(setup, &path, &text, entry, develop_only)?
+            remove_from_config(setup, &path, &text, entry, develop_only)
+                .map_err(|e| crate::install::in_file(&path, e))?
         } else if path == paths.rules_file {
             match find_block(&text, Language::English) {
                 Ok(Some(found)) if found.intact => {
@@ -611,7 +628,7 @@ fn remove_from_config(
             (&["mcp"][..], Major::V1),
         ] {
             let develop = &at(&parsed, place)[DEVELOP_SERVER];
-            if is_our_entry(develop)
+            if setup.ours().entry(develop)
                 && enabled(develop)
                 && let Some((new, _)) = jsonedit::set_member(
                     &current,
@@ -628,8 +645,9 @@ fn remove_from_config(
     }
     for name in [USE_SERVER, DEVELOP_SERVER] {
         for place in [&["mcp", "servers"][..], &["mcp"][..]] {
-            if is_our_entry(&at(&parsed, place)[name])
-                && let Some(new) = jsonedit::remove_member(&current, place, name)?
+            if setup.ours().entry(&at(&parsed, place)[name])
+                && let Some(new) = jsonedit::remove_member(&current, place, name)
+                    .map_err(|e| crate::install::in_file(path, e))?
             {
                 current = new;
                 changed = true;
@@ -641,7 +659,8 @@ fn remove_from_config(
             let dotted = [parent, &[key]].concat().join(".");
             if created.contains(&dotted.as_str())
                 && jsonedit::is_empty_container(&current, &[parent, &[key]].concat())
-                && let Some(new) = jsonedit::remove_member(&current, parent, key)?
+                && let Some(new) = jsonedit::remove_member(&current, parent, key)
+                    .map_err(|e| crate::install::in_file(path, e))?
             {
                 current = new;
             }
@@ -654,7 +673,8 @@ fn remove_from_config(
         changed = true;
         if created.contains(&"instructions")
             && jsonedit::is_empty_container(&current, &["instructions"])
-            && let Some(new) = jsonedit::remove_member(&current, &[], "instructions")?
+            && let Some(new) = jsonedit::remove_member(&current, &[], "instructions")
+                .map_err(|e| crate::install::in_file(path, e))?
         {
             current = new;
         }
@@ -718,7 +738,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
                     enabled(old),
                 );
             }
-            if in_stale(&|v| is_our_entry(&v["mcp"][name])) {
+            if in_stale(&|v| setup.ours().entry(&v["mcp"][name])) {
                 return (
                     PartState::Outdated(format!(
                         "in {stale_names}, which opencode {} does not read; install moves it",
@@ -728,7 +748,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
                 );
             }
             (PartState::Missing, false)
-        } else if !is_our_entry(entry) {
+        } else if !setup.ours().entry(entry) {
             (
                 PartState::Conflict("another program's entry has this name".to_string()),
                 false,

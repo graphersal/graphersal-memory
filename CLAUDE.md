@@ -89,8 +89,11 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     (marker at its top: change both); `GRAPHERSAL_MEMORY_HF_ENDPOINT`, `HF_TOKEN`;
   - `src/export.rs`: memories back into the harness's file memory (per project `MEMORY.md` +
     `<slug>.md` as the import reads them (pinned ones under `## Pinned`), global ones into the agent's global memory file;
-    identical files skipped, differing memory files kept with `<slug>.graphersal.md` beside
-    them, a differing `MEMORY.md` kept with the missing index lines appended; opencode, Codex
+    identical files (or the same meaning, `import::meaning`) skipped, a file unchanged since its
+    import (the import state's fingerprint) rewritten with the graph's version keeping others'
+    front-matter keys, other differing memory files kept with `<slug>.graphersal.md` beside
+    them, superseded memories written with a `SUPERSEDED by` first line and left out of
+    `MEMORY.md`, open conflicts with a `CONFLICT with` line, a differing `MEMORY.md` kept with the missing index lines appended; opencode, Codex
     and Cursor: the same files as Markdown under `~/graphersal-memory-export/<harness>/`);
   - `src/install.rs`: the wizard (`Current` = the current answers, `default_answers` for
     `--yes`/no terminal, `ask` for the interactive steps, `plan_install`, `install`), the
@@ -101,7 +104,15 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `$CLAUDE_CONFIG_DIR`), the plan and apply of `install` (MCP members, hook groups, the managed
     rule block `RULE_BLOCK` with its fingerprinted begin line), the state and backups in
     `<data dir>/install/`, `uninstall` (restore an untouched file from its backup, else remove our
-    parts structurally), `inspect`/`status_lines`/`doctor`. The develop server is off by not being
+    parts structurally; a backup that holds our parts is never put back, `backup_holds_ours`),
+    `inspect`/`status_lines`/`doctor`; `InstallLock` (`<data dir>/install/install.lock`: one
+    install or uninstall at a time); `Ours` (`Setup::ours`: our MCP entries and hooks by the
+    program's name, this binary or one a state file recorded; `split_program` reads a command's
+    program word); `apply_with_retries` (plan again right before writing, refuse read-only files,
+    plan again when a file changed meanwhile, roll back everything on another failure);
+    `plan_hook_event`/`remove_hook_groups` (our hook also inside a group shared with the user's);
+    `way_out`/`in_file` (errors name the file and `--harness`); hook commands quote with single
+    quotes for `sh`, double quotes on Windows; The develop server is off by not being
     registered (Claude Code has no global disabled state). The hook form (`HookForm` in `Setup`:
     `posix` in tests, `here` from the machine): on Windows Claude Code's hook groups are the exec
     form (`command` + `args`, no shell), the other harnesses' commands the `plain` words when
@@ -122,7 +133,10 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/import.rs`: the Claude Code file-memory import (parse `MEMORY.md` + memory files, resolve
     the project from transcripts or by decoding the directory name, plan new/changed by
     fingerprint in `<data dir>/import/claude-code.json`, write through `remember`, the import lock;
-    `## Pinned` lines become `pinned`, the index position the memory's `order`, both sent only
+    `<slug>.graphersal.md` files skipped, the export's first-line notes taken off, folded YAML
+    descriptions read, `from_file.dir` sent so memories of one directory are not `unchecked`
+    against each other, `migrate_sources` once at the daemon's start for memories imported before
+    M12; `## Pinned` lines become `pinned`, the index position the memory's `order`, both sent only
     when the file's line changed since this import set them);
   - `src/client.rs`: a small MCP client; `connect` opens a `use` connection to the daemon (the
     product's own calls go through the daemon, the single writer);
@@ -207,10 +221,14 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `stores/<name>.maintenance.json`; the `status` lines and the `doctor` WAL finding);
   - `src/maintenance_tests.rs`: the automatic checkpoint at a small threshold, the prune with an
     injected clock, the copy lock, a bench fork that opens after a prune;
-  - `src/fsutil.rs`: atomic writes and the FNV-1a fingerprint;
+  - `src/fsutil.rs`: atomic writes (through a symbolic link to its final target, the link kept:
+    `write_target`; unique temporary names; a read-only file refused: `not_writable`;
+    `write_atomic_checked` stops when the file changed meanwhile, `CHANGED_MEANWHILE`) and the
+    FNV-1a fingerprint;
   - `src/ipc.rs`: the run directory (`--run-dir`, `GRAPHERSAL_MEMORY_RUN_DIR`, `<data dir>/run`
     for an explicit data directory, the platform's default), its files (`daemon.sock`,
-    `daemon.pid`, `daemon.start.lock`, `daemon.log`), the socket types per platform (std on
+    `daemon.pid`, `daemon.start.lock`, `daemon.log`; a default whose socket path is too long
+    becomes `short_run_dir`, `/tmp/graphersal-memory-<fingerprint of the data dir>`), the socket types per platform (std on
     Unix, `uds_windows` on Windows), `LockFile` (`fd-lock`);
   - `src/protocol.rs`: the shim <-> daemon handshake and control lines, refusal codes, version
     order, `StartContextMode` (the handshake's optional `start_context`: `full` | `short` (Claude
@@ -243,7 +261,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/engine.rs`: the pinned engine version (`engine_version!`, shown by `--version`), and
     tests that exercise the engine crates and check the pin;
   - `src/store.rs`: the data directory (`--data-dir`, `GRAPHERSAL_MEMORY_DIR`, the platform's
-    per-user directory) and the default store `<data dir>/stores/default`, created on first use;
+    per-user directory; `OUR_ENTRIES`, the only entries purge deletes; `foreign_data_dir`, which
+    install refuses) and the default store `<data dir>/stores/default`, created on first use;
   - `src/catalog.rs` + `src/catalog/`: the product catalog built into the binary: `schema.json`,
     `queries.json` (name, description, parameters of each memory function) and one
     `<name>.rhai` body per function (`pin` sets `pinned`/`order`) (folder `memory`, `meta` `{"origin": "product", "catalog":
@@ -326,7 +345,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   (`fact_kind` decision | correction | outcome | open_thread), all with the session's `project`;
   `session -contains-> turn|fact`. They are written only by the internal catalog functions
   (`src/catalog/internal.json`: `indexed_sessions`, `index_session`, `index_turns`,
-  `set_summary`; plus `merge_project`, `export_memories`, `start_context` and `open_conflicts`), which the daemon runs on the
+  `set_summary`; plus `merge_project`, `export_memories`, `start_context`, `open_conflicts` and
+  `migrate_import_sources`), which the daemon runs on the
   store's session thread (`catalog::call`); they are never tools of the `use` server (its tool
   list is `FUNCTIONS`).
 - **No LLM call without consent**: summaries run only when `summaries.enabled` is true, only

@@ -44,6 +44,11 @@ The daemon's files live in a per-user run directory: macOS
 (else `~/.local/state/graphersal-memory/run`), Windows `%LOCALAPPDATA%\graphersal-memory\run`.
 `--run-dir DIR` or `GRAPHERSAL_MEMORY_RUN_DIR` moves it; a data directory chosen with `--data-dir`
 or `GRAPHERSAL_MEMORY_DIR` gets `<data dir>/run`, so each data directory has a daemon of its own.
+When the socket path in that directory would be longer than local sockets allow (104 bytes on
+macOS: a long home directory), the run directory is `/tmp/graphersal-memory-<12 hex digits>` instead,
+derived from the data directory, so every process of that data directory finds the same one;
+only you can open it (`0700`). An explicit `--run-dir` that is too long is refused before
+anything changes.
 
 | File | What it is |
 |---|---|
@@ -317,8 +322,12 @@ candidates; the agent's own model decides (no model call of graphersal-memory's,
   hit with an open conflict names the other memory; `memory(slug)` lists both sides.
 - **Imported memories.** The import passes each file to `remember`: the memory's `source` is the
   file, `imported_at` the time of the import, and `updated_at` the file's last change (when the
-  rule was decided, not when it was imported). An imported memory with similar memories is
-  marked `unchecked` until an agent settles it. The import's report, `status`, `doctor` and the
+  rule was decided, not when it was imported). An imported memory with similar memories of
+  another source (another memory directory, another harness, or `remember`) is marked
+  `unchecked` until an agent settles it; the files of one memory directory already stood side by
+  side in your setup, so they are not checked against each other. Memories imported before this
+  marking existed get their file and import time once, from the import's records, when the
+  daemon next starts. The import's report, `status`, `doctor` and the
   start context name the file of every open conflict, and every answer that supersedes, settles
   or forgets an imported memory tells the agent to have the user edit or delete that file: a
   file the harness loads into the context still holds the old rule. An unchanged file never
@@ -387,8 +396,14 @@ The export back (`uninstall`, `export --to-files`) asks the daemon for every mem
 them in the format the import reads: per project `MEMORY.md` and `<slug>.md` with the front matter
 `name`, `description`, `metadata.type` in the project's memory directory, the global memories into
 one file the harness loads in every project (Claude Code: `~/.claude/rules/graphersal-memory-global.md`).
-A file that already holds the same text is left alone; a file that differs is kept and the
-graph's version written beside it as `<name>.graphersal.md`; nothing is deleted. Importing an
+A file that already holds the same text, or says the same in other formatting (CRLF, blank
+lines, a folded description, metadata keys of others), is left alone; a file whose text is still
+what the import read (its fingerprint in `import/claude-code.json`) gets the graph's version, with
+the front-matter keys the export does not write kept; a file edited since is kept and the graph's
+version written beside it as `<name>.graphersal.md`, which the import never reads; nothing is
+deleted. A superseded memory is written with a first line "SUPERSEDED by <slug> on <date>" and
+left out of `MEMORY.md`; a memory in an open conflict starts with "CONFLICT with <slug>"; the
+import takes both lines off again. Importing an
 export gives the same memories back (a test checks it); links the body does not show get a
 `Related: [[slug]]` line.
 

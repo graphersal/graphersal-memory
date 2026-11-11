@@ -17,6 +17,74 @@ pub const DATA_DIR_ENV: &str = "GRAPHERSAL_MEMORY_DIR";
 /// The directory name under the platform's data directory.
 const APP_DIR: &str = "graphersal-memory";
 
+/// The entries graphersal-memory creates in its data directory, and the only ones
+/// `uninstall --purge` deletes there (a data directory chosen inside a folder that holds other
+/// files keeps them).
+pub const OUR_ENTRIES: [&str; 10] = [
+    "stores",
+    "registry.json",
+    "config.json",
+    "install",
+    "import",
+    "projects.json",
+    "run",
+    "models",
+    "sessions",
+    "bench",
+];
+
+/// Entries the operating system puts into any folder (never a reason to call it someone
+/// else's).
+const SYSTEM_ENTRIES: [&str; 2] = [".DS_Store", "desktop.ini"];
+
+/// The entries of `dir` that are neither ours ([`OUR_ENTRIES`]) nor the system's, by name
+/// (empty when `dir` does not exist).
+pub fn foreign_entries(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !OUR_ENTRIES.contains(&name.as_str()))
+        .filter(|name| !SYSTEM_ENTRIES.contains(&name.as_str()))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Why `dir` cannot be graphersal-memory's data directory: a file, or a folder that holds
+/// other files and none of ours (install would mix its data with them). `None` when it is
+/// missing, empty, or ours.
+pub fn foreign_data_dir(dir: &Path) -> Option<String> {
+    if dir.exists() && !dir.is_dir() {
+        return Some(format!(
+            "the data directory {} is a file, not a folder; choose another with --data-dir \
+             (or {DATA_DIR_ENV})",
+            dir.display()
+        ));
+    }
+    let foreign = foreign_entries(dir);
+    let ours = OUR_ENTRIES.iter().any(|name| dir.join(name).exists());
+    if foreign.is_empty() || ours {
+        return None;
+    }
+    let shown: Vec<&str> = foreign.iter().take(3).map(String::as_str).collect();
+    Some(format!(
+        "the data directory {} already holds other files ({}{}) and no graphersal-memory data; \
+         nothing was changed. Choose a new or empty folder, for example {} (--data-dir or \
+         {DATA_DIR_ENV})",
+        dir.display(),
+        shown.join(", "),
+        if foreign.len() > 3 {
+            format!(" and {} more", foreign.len() - 3)
+        } else {
+            String::new()
+        },
+        dir.join(APP_DIR).display()
+    ))
+}
+
 /// The platform family that decides the default data directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {

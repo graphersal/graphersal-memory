@@ -23,10 +23,10 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::agents::{Agent, Kind, is_our_entry};
+use crate::agents::{Agent, Kind};
 use crate::install::{
     Change, DEVELOP_SERVER, Finding, PartState, Setup, State, Step, USE_SERVER, block_separator,
-    find_block_in, is_our_hook_group, ok, problem, read_json, read_text, wrap_block,
+    find_block_in, ok, problem, read_json, read_text, wrap_block,
 };
 use crate::language::Language;
 use crate::{fsutil, jsonedit, tomledit};
@@ -310,7 +310,7 @@ pub fn plan(
         if existing.is_null() || in_block(name) {
             continue;
         }
-        if is_our_entry(existing) {
+        if setup.ours().entry(existing) {
             // Ours, outside the block (its marker comments were lost): taken out, written anew.
             if let Some(new) = tomledit::remove_table(&text, &format!("mcp_servers.{name}")) {
                 text = new;
@@ -361,7 +361,9 @@ pub fn plan(
     let mut memories = None;
     if memories_on(&doc) {
         if memories_off {
-            match tomledit::set_bool(&text, "features", "memories", false)? {
+            match tomledit::set_bool(&text, "features", "memories", false)
+                .map_err(|e| crate::install::in_file(path, e))?
+            {
                 Some(new) => {
                     text = new;
                     memories = Some(true);
@@ -383,7 +385,8 @@ pub fn plan(
             lines.push("[features] memories: off (switched off by install)".to_string());
         } else {
             if doc["features"]["memories"] == false
-                && let Some(new) = tomledit::set_bool(&text, "features", "memories", true)?
+                && let Some(new) = tomledit::set_bool(&text, "features", "memories", true)
+                    .map_err(|e| crate::install::in_file(path, e))?
             {
                 text = new;
             }
@@ -410,35 +413,27 @@ pub fn plan(
     // hooks.json: the session start and end hooks.
     let path = &paths.hooks_file;
     let before = read_text(path)?;
-    let mut text = before.clone().unwrap_or_else(|| "{\n}\n".to_string());
-    let parsed = jsonedit::value_of(&text)
+    let mut text = crate::install::json_start(&before, "{\n}\n");
+    jsonedit::value_of(&text)
         .map_err(|err| format!("{} is not valid JSON: {err}", path.display()))?;
     let mut created = Vec::new();
     let mut lines = Vec::new();
+    let ours = setup.ours();
     for (event, sub) in crate::install::HOOK_EVENTS {
         let group = hook_group(setup, sub);
-        let ours: Vec<&Value> = parsed["hooks"][event]
-            .as_array()
-            .map(|groups| groups.iter().filter(|g| is_our_hook_group(g)).collect())
-            .unwrap_or_default();
-        if ours.len() == 1 && *ours[0] == group {
-            lines.push(format!("{event}: already installed"));
-            continue;
-        }
-        if !ours.is_empty()
-            && let Some(new) =
-                jsonedit::remove_elements(&text, &["hooks", event], &is_our_hook_group)?
-        {
-            text = new;
-        }
-        let (new, made) = jsonedit::append_element(&text, &["hooks", event], &group)?;
+        let (new, made, step) = crate::install::plan_hook_event(&ours, &text, event, &group)
+            .map_err(|e| crate::install::in_file(path, e))?;
         text = new;
         created.extend(made);
-        lines.push(format!(
-            "{event}: {} `{}`",
-            if ours.is_empty() { "add" } else { "update to" },
-            hook_command(setup, sub)
-        ));
+        lines.push(match step {
+            crate::install::HookStep::Installed => format!("{event}: already installed"),
+            crate::install::HookStep::Added => {
+                format!("{event}: add `{}`", hook_command(setup, sub))
+            }
+            crate::install::HookStep::Updated => {
+                format!("{event}: update to `{}`", hook_command(setup, sub))
+            }
+        });
     }
     lines.push(hook_approval_line());
     steps.push(Step {
@@ -461,7 +456,7 @@ pub fn plan(
     let path = &paths.instruction_file;
     let before = read_text(path)?;
     let current = before.clone().unwrap_or_default();
-    let block = wrap_block(rule_block(language));
+    let block = crate::install::line_ends_like(&current, &wrap_block(rule_block(language)));
     let mut separator = None;
     let (after, line) = match find_block(&current, language) {
         Err(err) => {
@@ -552,12 +547,18 @@ pub fn removal(
         let Some(bytes) = fsutil::read_optional(&path)? else {
             continue;
         };
+        // An empty file holds nothing of ours (and is no JSON to parse).
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
         let entry = state.file(&path);
         let fp = fsutil::fingerprint(&bytes);
         let untouched = entry.is_some_and(|e| {
             e.get("written").and_then(Value::as_str) == Some(fp.as_str())
                 && e.get("backup_valid") == Some(&Value::Bool(true))
         });
+        // A backup that holds our parts (an install that ran twice at once) is never put back.
+        let untouched = untouched && !crate::install::backup_holds_ours(entry);
         let existed = entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(true)));
         if untouched && !develop_only {
             let after = if existed {
@@ -593,11 +594,13 @@ pub fn removal(
             .map_err(|_| format!("{} is not UTF-8 text", path.display()))?;
         let created_by_us = entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(false)));
         let (new, empty) = if path == paths.config_file {
-            let new = remove_from_config(setup, state, &path, &text, develop_only, conflicts)?;
+            let new = remove_from_config(setup, state, &path, &text, develop_only, conflicts)
+                .map_err(|e| crate::install::in_file(&path, e))?;
             let empty = new.as_deref().is_some_and(|t| t.trim().is_empty());
             (new, empty)
         } else if path == paths.hooks_file {
-            let new = remove_hooks(&text, entry)?;
+            let new =
+                remove_hooks(setup, &text, entry).map_err(|e| crate::install::in_file(&path, e))?;
             let empty = new.as_deref().is_some_and(|t| {
                 jsonedit::value_of(t)
                     .ok()
@@ -673,7 +676,7 @@ fn remove_from_config(
     let block = tomledit::find(text).map_err(|err| format!("{}: {err}", path.display()))?;
     if develop_only {
         let develop = &doc["mcp_servers"][DEVELOP_SERVER];
-        if !(is_our_entry(develop) && enabled(develop)) {
+        if !(setup.ours().entry(develop) && enabled(develop)) {
             return Ok(None);
         }
         return match block {
@@ -706,7 +709,7 @@ fn remove_from_config(
         )),
         None => {
             for name in [USE_SERVER, DEVELOP_SERVER] {
-                if is_our_entry(&doc["mcp_servers"][name])
+                if setup.ours().entry(&doc["mcp_servers"][name])
                     && let Some(new) =
                         tomledit::remove_table(&current, &format!("mcp_servers.{name}"))
                 {
@@ -727,7 +730,8 @@ fn remove_from_config(
         .is_some();
     if recorded
         && doc["features"]["memories"] == false
-        && let Some(new) = tomledit::set_bool(&current, "features", "memories", true)?
+        && let Some(new) = tomledit::set_bool(&current, "features", "memories", true)
+            .map_err(|e| crate::install::in_file(path, e))?
     {
         current = new;
         changed = true;
@@ -737,6 +741,7 @@ fn remove_from_config(
 
 /// `hooks.json` without our groups (and the containers install created, when empty then).
 fn remove_hooks(
+    setup: &Setup,
     text: &str,
     entry: Option<&serde_json::Map<String, Value>>,
 ) -> Result<Option<String>, String> {
@@ -745,31 +750,7 @@ fn remove_hooks(
         .and_then(Value::as_array)
         .map(|c| c.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    let mut current = text.to_string();
-    let mut changed = false;
-    for (event, _) in crate::install::HOOK_EVENTS {
-        if let Some(new) =
-            jsonedit::remove_elements(&current, &["hooks", event], &is_our_hook_group)?
-        {
-            current = new;
-            changed = true;
-            let dotted = format!("hooks.{event}");
-            if created.contains(&dotted.as_str())
-                && jsonedit::is_empty_container(&current, &["hooks", event])
-                && let Some(new) = jsonedit::remove_member(&current, &["hooks"], event)?
-            {
-                current = new;
-            }
-        }
-    }
-    if changed
-        && created.contains(&"hooks")
-        && jsonedit::is_empty_container(&current, &["hooks"])
-        && let Some(new) = jsonedit::remove_member(&current, &[], "hooks")?
-    {
-        current = new;
-    }
-    Ok(changed.then_some(current))
+    crate::install::remove_hook_groups(&setup.ours(), text, &created)
 }
 
 /// What is installed in Codex.
@@ -823,7 +804,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
         let entry = &config["mcp_servers"][name];
         if entry.is_null() {
             (PartState::Missing, false)
-        } else if !is_our_entry(entry) {
+        } else if !setup.ours().entry(entry) {
             (
                 PartState::Conflict("another program's entry has this name".to_string()),
                 false,
@@ -852,7 +833,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
             .map(|g| {
                 g.iter()
                     .enumerate()
-                    .filter(|(_, g)| is_our_hook_group(g))
+                    .filter(|(_, g)| setup.ours().hook_group(g))
                     .collect()
             })
             .unwrap_or_default();
@@ -1060,13 +1041,9 @@ pub fn doctor(setup: &Setup) -> Vec<Finding> {
         if inspection.hooks_trusted {
             findings.push(ok("Codex: the hooks are trusted (/hooks)"));
         } else {
-            findings.push(problem(
-                format!(
-                    "Codex: the two graphersal-memory hooks are not approved yet, so Codex does \
-                     not run them ({HOOK_APPROVAL_WITHOUT})"
-                ),
-                HOOK_APPROVAL_HOW,
-            ));
+            // Not a fault: the user's own step, shown as in `status` (highlighted, and repeated
+            // as the last line of the output).
+            findings.push(ok(hook_approval_line()));
         }
     }
     check(
@@ -1102,7 +1079,7 @@ mod tests {
             mcp_entry(&setup, "develop", false)
         );
         assert_eq!(doc["mcp_servers"][DEVELOP_SERVER]["enabled"], false);
-        assert!(is_our_entry(&doc["mcp_servers"][USE_SERVER]));
+        assert!(crate::agents::is_our_entry(&doc["mcp_servers"][USE_SERVER]));
         let on = tomledit::parse(&block_body(&setup, true)).unwrap();
         assert!(on["mcp_servers"][DEVELOP_SERVER]["enabled"].is_null());
     }

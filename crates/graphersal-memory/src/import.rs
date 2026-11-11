@@ -115,7 +115,10 @@ impl MemoryFile {
             "title": self.title,
             "hook": self.hook,
             "links": self.links,
-            "from_file": {"path": self.path.display().to_string(), "modified_at": self.modified_at},
+            "from_file": {"path": self.path.display().to_string(), "modified_at": self.modified_at,
+                          "dir": self.path.parent().map(|dir| format!("{}{}", dir.display(),
+                                                                       std::path::MAIN_SEPARATOR))
+                                                    .unwrap_or_default()},
         })
     }
 }
@@ -213,6 +216,11 @@ pub fn read_dir(dir: &Path, project: Option<String>) -> MemoryDir {
                 path.is_file()
                     && path.extension().is_some_and(|ext| ext == "md")
                     && path.file_name().is_some_and(|name| name != "MEMORY.md")
+                    // The export's own copies beside a file that differed (`<slug>.graphersal.md`)
+                    // are the graph's text, never a memory of their own.
+                    && !path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().ends_with(".graphersal.md"))
             })
             .collect(),
         Err(err) => {
@@ -352,7 +360,7 @@ fn parse_file(
         Some(kind) if KINDS.contains(&kind.as_str()) => (kind, false),
         _ => ("project".to_string(), true),
     };
-    let body = body.trim().to_string();
+    let body = strip_export_note(body.trim()).to_string();
     let mut summary = field(front, "description").unwrap_or_default();
     if summary.is_empty() {
         summary = body
@@ -418,9 +426,26 @@ fn split_front_matter(text: &str) -> (&str, &str) {
     ("", text)
 }
 
-/// A front-matter field (top-level or nested one level, as `metadata.type`), unquoted.
+/// The first paragraph the export puts above the body of a superseded memory or one in an open
+/// conflict ([`crate::export::SUPERSEDED_NOTE`], [`crate::export::CONFLICT_NOTE`]): taken off
+/// again, so an export imported back gives the same memory.
+fn strip_export_note(body: &str) -> &str {
+    let first = body.split("\n\n").next().unwrap_or_default();
+    let ours = (first.starts_with("SUPERSEDED by ") || first.starts_with("CONFLICT with "))
+        && first.ends_with(crate::export::NOTE_END)
+        && !first.contains('\n');
+    if ours {
+        body[first.len()..].trim_start()
+    } else {
+        body
+    }
+}
+
+/// A front-matter field (top-level or nested one level, as `metadata.type`), unquoted; a
+/// folded or literal block (`>`, `>-`, `|`, `|-`) joined from its indented lines.
 fn field(front: &str, key: &str) -> Option<String> {
-    front.lines().find_map(|line| {
+    let lines: Vec<&str> = front.lines().collect();
+    lines.iter().enumerate().find_map(|(at, line)| {
         let (name, value) = line.trim().split_once(':')?;
         if name.trim() != key {
             return None;
@@ -429,8 +454,61 @@ fn field(front: &str, key: &str) -> Option<String> {
         if value.is_empty() {
             return None;
         }
+        if matches!(value, ">" | ">-" | ">+" | "|" | "|-" | "|+") {
+            let indent = line.len() - line.trim_start().len();
+            let block: Vec<&str> = lines[at + 1..]
+                .iter()
+                .take_while(|next| {
+                    next.trim().is_empty() || next.len() - next.trim_start().len() > indent
+                })
+                .map(|next| next.trim())
+                .collect();
+            let separator = if value.starts_with('>') { " " } else { "\n" };
+            let joined = block.join(separator).trim().to_string();
+            return (!joined.is_empty()).then_some(joined);
+        }
         Some(unquote(value))
     })
+}
+
+/// What a memory file says, for the export's comparison: its kind, summary and body (after
+/// the front matter, line ends and blank lines normalized). Two files that say the same give
+/// the same value whatever their formatting (CRLF, a blank line more, folded YAML, metadata
+/// keys of others).
+pub fn meaning(text: &str) -> (String, String, String) {
+    let normalized = text.replace("\r\n", "\n");
+    let (front, body) = split_front_matter(&normalized);
+    // As the import reads it: an unknown kind is `project`, a missing description the body's
+    // first line.
+    let kind = field(front, "type")
+        .map(|kind| kind.to_ascii_lowercase())
+        .filter(|kind| KINDS.contains(&kind.as_str()))
+        .unwrap_or_else(|| "project".to_string());
+    let mut summary = field(front, "description").unwrap_or_default();
+    if summary.is_empty() {
+        summary = body
+            .lines()
+            .map(|line| line.trim().trim_start_matches('#').trim())
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .chars()
+            .take(200)
+            .collect();
+    }
+    let mut lines: Vec<&str> = Vec::new();
+    for line in body.trim().lines().map(str::trim_end) {
+        if line.is_empty() && lines.last().is_some_and(|l| l.is_empty()) {
+            continue;
+        }
+        lines.push(line);
+    }
+    // A blank line between the why and how-to-apply lines (or none) says the same.
+    let body = lines
+        .join("\n")
+        .replace("\n\n**How to apply:**", "\n**How to apply:**")
+        .replace("**Why:**\n", "**Why:** ")
+        .replace("**How to apply:**\n", "**How to apply:** ");
+    (kind, summary, body)
 }
 
 fn unquote(value: &str) -> String {
@@ -624,6 +702,26 @@ impl ImportState {
         Ok(Self { files })
     }
 
+    /// The fingerprint of `file`'s text when this import last read it (`None`: never imported).
+    pub fn content_of(&self, file: &Path) -> Option<&str> {
+        self.files
+            .get(&file.display().to_string())
+            .and_then(|entry| entry["content"].as_str())
+    }
+
+    /// Every recorded file with its slug, project and import time (for the one-time migration
+    /// of memories imported before the import marked them, `migrate_sources`).
+    pub fn records(&self) -> Vec<Value> {
+        self.files
+            .iter()
+            .filter(|(_, entry)| entry["forgotten"] != Value::Bool(true))
+            .map(|(path, entry)| {
+                json!({"path": path, "slug": entry["slug"], "project": entry["project"],
+                       "imported_at": entry["imported_at"]})
+            })
+            .collect()
+    }
+
     /// Writes the state.
     pub fn save(&self, data_dir: &Path) -> Result<(), String> {
         let path = Self::path(data_dir);
@@ -661,6 +759,12 @@ impl ImportState {
         if let Some(entry) = self.files.get_mut(&file.path.display().to_string()) {
             entry["forgotten"] = Value::Bool(true);
         }
+    }
+
+    /// [`ImportState::record`] for tests in other modules.
+    #[cfg(test)]
+    pub fn record_for_test(&mut self, file: &MemoryFile, project: &str) {
+        self.record(file, project);
     }
 
     fn record(&mut self, file: &MemoryFile, project: &str) {
@@ -986,6 +1090,37 @@ pub fn conflict_report(listed: &Value) -> (Vec<String>, Vec<String>) {
         })
         .collect();
     (conflicts, stale)
+}
+
+/// The marker of the one-time source migration ([`migrate_sources`]).
+const MIGRATED_FILE: &str = "sources-migrated";
+
+/// Once per data directory: memories imported before the import marked them (source `user`,
+/// no `imported_at`) get the file they came from as `source` and their import time from the
+/// import's records, so conflicts name their files. A marker file in `<data dir>/import/`
+/// keeps it from running again (an agent's later `remember` of such a memory must not be
+/// marked again). Returns how many memories it changed.
+pub fn migrate_sources(
+    data_dir: &Path,
+    call: &dyn Fn(&str, Value) -> Result<Value, String>,
+) -> Result<u64, String> {
+    let marker = data_dir.join(STATE_DIR).join(MIGRATED_FILE);
+    if marker.exists() {
+        return Ok(0);
+    }
+    let records = ImportState::load(data_dir)?.records();
+    let migrated = if records.is_empty() {
+        0
+    } else {
+        call("migrate_import_sources", json!({"records": records}))?["migrated"]
+            .as_u64()
+            .unwrap_or(0)
+    };
+    let dir = data_dir.join(STATE_DIR);
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+    fsutil::write_atomic(&marker, format!("{migrated}\n").as_bytes())?;
+    Ok(migrated)
 }
 
 /// Runs `work` holding the import lock of `data_dir`, taken within `wait`; `Ok(None)` when
