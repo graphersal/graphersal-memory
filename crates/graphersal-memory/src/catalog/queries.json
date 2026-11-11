@@ -64,7 +64,7 @@
   },
   {
     "name": "remember",
-    "description": "Store or replace the memory <slug> of this project (scope \"global\": of every project). kind: user|feedback|project|reference; summary: one line; body: markdown; why/how_to_apply appended as **Why:**/**How to apply:**; title+hook: its index line; pinned/order: load at every session start, priority (omit: keep); links: related memory slugs; about: vertex ids. Check memories(text) first.",
+    "description": "Store or replace the memory <slug> of this project (scope \"global\": of every project). kind: user|feedback|project|reference; summary: one line; body: markdown; why/how_to_apply appended; title+hook: its index line; pinned/order: start-context pin, priority (omit: keep); links: related slugs; about: vertex ids; supersedes: older slugs this decision replaces. Answer: nearest memories + check.",
     "params": [
       {
         "name": "slug",
@@ -170,6 +170,28 @@
         "default": []
       },
       {
+        "name": "supersedes",
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+$"
+          }
+        },
+        "default": []
+      },
+      {
+        "name": "from_file",
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "import only: {path, modified_at} of the memory file"
+        },
+        "default": null
+      },
+      {
         "name": "scope",
         "schema": {
           "type": "string",
@@ -236,6 +258,68 @@
           ]
         },
         "default": null
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  },
+  {
+    "name": "conflicts",
+    "description": "What waits for a decision among this project's and the global memories: open conflicts (both versions, their files), imported memories not yet checked (k, with their nearest memories), project memories that narrow a global one. Settle each with settle.",
+    "params": [
+      {
+        "name": "k",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "default": 5
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  },
+  {
+    "name": "settle",
+    "description": "Record a decision between the memory <slug> and <other>: compatible (both hold; without other: <slug> checked), narrows (project <slug> narrows the global <other>), supersedes (<slug> is the later decision), conflict (they contradict within one scope: ask the user which holds).",
+    "params": [
+      {
+        "name": "slug",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        }
+      },
+      {
+        "name": "decision",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "compatible",
+            "narrows",
+            "supersedes",
+            "conflict"
+          ]
+        }
+      },
+      {
+        "name": "other",
+        "schema": {
+          "type": "string",
+          "pattern": "^([a-z0-9-]+)?$"
+        },
+        "default": ""
       },
       {
         "name": "project",

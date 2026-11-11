@@ -4,7 +4,8 @@ fn merge_project(from, into) {
     // `into` has a memory of the same slug, the more recently updated one stays), then the old
     // one is dropped. Sessions, turns and facts only change their `project`.
     let keys = ["name", "kind", "summary", "body", "embed_text", "origin", "visibility", "source",
-                "updated_at", "why", "how_to_apply", "title", "hook", "index_order", "pinned", "order"];
+                "updated_at", "why", "how_to_apply", "title", "hook", "index_order", "pinned", "order",
+                "imported_at", "unchecked"];
     let renamed = #{};
     let moved = 0;
     let replaced = 0;
@@ -35,22 +36,26 @@ fn merge_project(from, into) {
     for id in renamed.keys() {
         let target = renamed[id];
         if target == "" { continue; }
-        let out = g.v(id).out_e().project("l", "to", "o", "s", "v").by(T.label).by(__.in_v().id())
+        let out = g.v(id).out_e().project("l", "to", "o", "s", "v", "at").by(T.label).by(__.in_v().id())
             .by(__.coalesce(__.values("origin"), __.constant(""))).by(__.coalesce(__.values("source"), __.constant("")))
-            .by(__.coalesce(__.values("visibility"), __.constant("private"))).to_list();
+            .by(__.coalesce(__.values("visibility"), __.constant("private"))).by(__.values("at").fold()).to_list();
         for e in out {
             let to = if renamed.contains(e.to) { renamed[e.to] } else { e.to };
             if to == "" || to == target { continue; }
+            let ep = #{origin: e.o, source: e.s, visibility: e.v};
+            if e.at.len() > 0 { ep.at = e.at[0]; }
             g.merge_e(#{"T.label": e.l, "Direction.OUT": target, "Direction.IN": to})
-                .option(Merge.onCreate, #{origin: e.o, source: e.s, visibility: e.v}).iterate();
+                .option(Merge.onCreate, ep).iterate();
         }
-        let inc = g.v(id).in_e().project("l", "from", "o", "s", "v").by(T.label).by(__.out_v().id())
+        let inc = g.v(id).in_e().project("l", "from", "o", "s", "v", "at").by(T.label).by(__.out_v().id())
             .by(__.coalesce(__.values("origin"), __.constant(""))).by(__.coalesce(__.values("source"), __.constant("")))
-            .by(__.coalesce(__.values("visibility"), __.constant("private"))).to_list();
+            .by(__.coalesce(__.values("visibility"), __.constant("private"))).by(__.values("at").fold()).to_list();
         for e in inc {
             if renamed.contains(e.from) { continue; }
+            let ep = #{origin: e.o, source: e.s, visibility: e.v};
+            if e.at.len() > 0 { ep.at = e.at[0]; }
             g.merge_e(#{"T.label": e.l, "Direction.OUT": e.from, "Direction.IN": target})
-                .option(Merge.onCreate, #{origin: e.o, source: e.s, visibility: e.v}).iterate();
+                .option(Merge.onCreate, ep).iterate();
         }
     }
     for id in renamed.keys() { g.v(id).drop().iterate(); }

@@ -306,6 +306,16 @@ pub fn run_with_context(
                             CLAUDE_CODE_CONTEXT_CHARS.saturating_sub(line.chars().count() + 2);
                         match fetch(dir.as_deref(), room) {
                             Ok(context) => {
+                                // The conflict note only when it still fits the cap (the
+                                // start context itself names the conflicts too).
+                                let noted = format!("{line}{}", context.start_note());
+                                let line = if noted.chars().count() + 2 + context.chars()
+                                    <= CLAUDE_CODE_CONTEXT_CHARS
+                                {
+                                    noted
+                                } else {
+                                    line
+                                };
                                 outcome.line = Some(claude_start_output(&line, &context.text));
                             }
                             Err(err) => outcome
@@ -1013,7 +1023,48 @@ mod tests {
             shown: 1,
             total: 1,
             budget: 8000,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_start_line_names_open_memory_conflicts() {
+        let home = crate::mcp_tests::TempDir::new("hookconf");
+        let paths = ClaudePaths::resolve(&|name| {
+            (name == "HOME").then(|| home.path().display().to_string())
+        })
+        .unwrap();
+        let fetch: StartFetch = Box::new(|_, _| {
+            let mut context = context_of("## Open conflicts\n- a CONFLICTS WITH b");
+            context.conflicts = vec!["a (remember) vs b (file /m/b.md)".into()];
+            context.unchecked = 3;
+            Ok(context)
+        });
+        let mut out = Vec::new();
+        run_with_context(
+            HookEvent::SessionStart,
+            Ok(paths),
+            home.path().to_path_buf(),
+            Box::new(|_| Err("not called".to_string())),
+            None,
+            Some(fetch),
+            std::io::Cursor::new(br#"{"cwd": "/w/app"}"#.to_vec()),
+            &mut out,
+            &mut Vec::new(),
+        );
+        let answer: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        let context = answer["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        let line = context.lines().next().unwrap();
+        assert!(
+            line.ends_with(
+                " 1 open memory conflict (ask the user which memory holds, then settle it); 3 \
+                 imported memories to check: conflicts()."
+            ),
+            "{line}"
+        );
+        assert!(context.contains("CONFLICTS WITH"), "{context}");
     }
 
     #[test]

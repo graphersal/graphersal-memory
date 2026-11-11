@@ -4038,3 +4038,177 @@ fn an_import_keeps_the_memory_md_order_and_a_graph_order_until_the_line_moves() 
     assert!(out.contains("0 new, 0 changed, 6 unchanged"), "{out}");
     memory.close();
 }
+
+/// A Claude Code memory directory for `project` with the memory files `(stem, kind, summary)`
+/// listed in `MEMORY.md` in that order, and a transcript naming the project.
+fn conflict_fixture(home: &Path, project: &Path, files: &[(&str, &str, &str)]) -> PathBuf {
+    let name = import::claude_slug(&project.display().to_string());
+    let dir = home.join(".claude").join("projects").join(&name);
+    let memory = dir.join("memory");
+    std::fs::create_dir_all(&memory).unwrap();
+    std::fs::write(
+        dir.join("0001.jsonl"),
+        format!(
+            "{}\n",
+            json!({"cwd": project.display().to_string(), "type": "user"})
+        ),
+    )
+    .unwrap();
+    let mut index = String::from("# Index\n");
+    for (stem, kind, summary) in files {
+        index.push_str(&format!("- [{stem}]({stem}.md) — {summary}\n"));
+        std::fs::write(
+            memory.join(format!("{stem}.md")),
+            format!("---\nname: {stem}\ndescription: {summary}\ntype: {kind}\n---\n\n{summary}.\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(memory.join("MEMORY.md"), index).unwrap();
+    memory
+}
+
+fn import_text(setup: &Setup, memory: &Memory) -> String {
+    let mut connect = memory.connector();
+    let mut out = Vec::new();
+    let code = crate::commands::run_import(setup, false, &mut connect, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(code, 0, "{out}");
+    out
+}
+
+#[test]
+fn an_import_reports_conflicts_and_files_and_never_brings_back_a_settled_memory() {
+    let home = TempDir::new("conf-home");
+    let data = TempDir::new("conf-data");
+    let work = TempDir::new("conf-work");
+    let project_dir = mcp::canonical(work.path());
+    std::fs::create_dir_all(project_dir.join(".git")).unwrap();
+    let files = [
+        (
+            "use-npm",
+            "feedback",
+            "Install dependencies with npm install",
+        ),
+        ("use-yarn", "feedback", "Install dependencies with yarn"),
+        ("release-friday", "project", "Releases go out on Fridays"),
+    ];
+    let memory_dir = conflict_fixture(home.path(), &project_dir, &files);
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let project = project_dir.display().to_string();
+    let npm_file = memory_dir.join("use-npm.md").display().to_string();
+    let yarn_file = memory_dir.join("use-yarn.md").display().to_string();
+
+    // The first import: every memory with similar ones waits for the agent's check.
+    let out = import_text(&setup, &memory);
+    assert!(out.contains("(3 new, 0 updated)"), "{out}");
+    assert!(
+        out.contains("have similar memories to check for conflicts (your agent: conflicts())"),
+        "{out}"
+    );
+    let listed = memory.call(&project, "conflicts", json!({"k": 5}));
+    assert!(listed["unchecked_total"].as_u64().unwrap() >= 2, "{listed}");
+    let read = memory.call(&project, "memory", json!({"slug": "use-npm"}));
+    assert_eq!(read["source"], npm_file.as_str(), "{read}");
+    assert!(read["imported_at"].is_string(), "{read}");
+
+    // The agent finds the two install rules contradict: the import report names both files.
+    let opened = memory.call(
+        &project,
+        "settle",
+        json!({"slug": "use-yarn", "decision": "conflict", "other": "use-npm"}),
+    );
+    assert_eq!(opened["open_conflicts"], 1, "{opened}");
+    let found = memory.call(
+        &project,
+        "memories",
+        json!({"text": "install dependencies", "k": 3}),
+    );
+    assert!(found.to_string().contains("open_conflict_with"), "{found}");
+    std::fs::write(
+        memory_dir.join("release-friday.md"),
+        "---\nname: release-friday\ndescription: Releases go out on Fridays at noon\ntype: project\n---\n\nNoon.\n",
+    )
+    .unwrap();
+    let out = import_text(&setup, &memory);
+    assert!(out.contains("open memory conflicts: 1"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "use-yarn (file {yarn_file}) vs use-npm (file {npm_file})"
+        )),
+        "{out}"
+    );
+
+    // The user decides for pnpm: both old rules are superseded, their files named to edit.
+    let newer = memory.call(
+        &project,
+        "remember",
+        json!({"slug": "pnpm-instead-of-npm", "kind": "feedback",
+               "summary": "We install dependencies with pnpm instead of npm or yarn",
+               "body": "Use pnpm install.", "supersedes": ["use-npm", "use-yarn"]}),
+    );
+    let edit = newer["edit_files"].to_string();
+    assert!(
+        edit.contains(&npm_file) && edit.contains(&yarn_file),
+        "{newer}"
+    );
+    let listed = memory.call(&project, "conflicts", json!({"k": 5}));
+    assert_eq!(
+        listed["open"],
+        json!([]),
+        "superseding settles the conflict: {listed}"
+    );
+
+    // Unchanged files bring nothing back: the old rules stay marked.
+    let out = import_text(&setup, &memory);
+    assert!(out.contains("0 new, 0 changed, 3 unchanged"), "{out}");
+    let read = memory.call(&project, "memory", json!({"slug": "use-npm"}));
+    assert_eq!(
+        read["superseded_by"][0]["slug"], "pnpm-instead-of-npm",
+        "{read}"
+    );
+
+    // A memory forgotten in the graph stays forgotten when only its MEMORY.md line moves; a
+    // moved line of a superseded memory keeps its mark and names its file as stale.
+    memory.call(&project, "forget", json!({"slug": "release-friday"}));
+    let index = std::fs::read_to_string(memory_dir.join("MEMORY.md")).unwrap();
+    let mut lines: Vec<&str> = index.lines().collect();
+    lines[1..].reverse();
+    std::fs::write(memory_dir.join("MEMORY.md"), lines.join("\n") + "\n").unwrap();
+    let out = import_text(&setup, &memory);
+    assert!(
+        out.contains("1 forgotten in the memory and unchanged"),
+        "{out}"
+    );
+    assert!(
+        out.contains("files that still hold a superseded memory: 2"),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "use-npm (superseded by pnpm-instead-of-npm): {npm_file}"
+        )),
+        "{out}"
+    );
+    let gone = memory.call(&project, "memory", json!({"slug": "release-friday"}));
+    assert!(gone.to_string().contains("no memory"), "{gone}");
+    let read = memory.call(&project, "memory", json!({"slug": "use-yarn"}));
+    assert_eq!(
+        read["superseded_by"][0]["slug"], "pnpm-instead-of-npm",
+        "{read}"
+    );
+    assert!(read.get("unchecked").is_none(), "{read}");
+    // Re-importing the same state again is a no-op.
+    let out = import_text(&setup, &memory);
+    assert!(out.contains("0 new, 0 changed, 3 unchanged"), "{out}");
+
+    // The file's text changes: the user wrote it again, so it is imported again.
+    std::fs::write(
+        memory_dir.join("release-friday.md"),
+        "---\nname: release-friday\ndescription: Releases go out on Thursdays\ntype: project\n---\n\nThursday.\n",
+    )
+    .unwrap();
+    let out = import_text(&setup, &memory);
+    assert!(out.contains("(1 new, 0 updated)"), "{out}");
+    memory.close();
+}

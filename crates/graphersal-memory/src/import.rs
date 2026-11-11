@@ -22,7 +22,14 @@
 //! - Idempotent: every file is written through the memory function `remember` (replace by slug,
 //!   never a duplicate), and `<data dir>/import/claude-code.json` remembers each imported file's
 //!   fingerprint, so a later import sends only new and changed files. A memory forgotten in the
-//!   graph is not brought back while its file is unchanged.
+//!   graph is not brought back while its file's text is unchanged (a moved `MEMORY.md` line
+//!   alone does not: the state records the text's own fingerprint, `content`, and `forgotten`);
+//!   a superseded one stays marked (an import never removes the `supersedes` edge).
+//! - Conflicts (M12): `remember` gets the file as `from_file` (the memory's `source`, its
+//!   `imported_at`, and the file's modification time as its `updated_at`, the decision time);
+//!   a memory with similar existing memories is marked `unchecked` until an agent settles it.
+//!   After each project the report reads `conflicts()`: the open conflicts and the files that
+//!   still hold a superseded memory, named so the user can edit them.
 //! - The files are only read, never changed or deleted. Rules in `CLAUDE.md` files are not
 //!   imported in this version.
 
@@ -85,6 +92,11 @@ pub struct MemoryFile {
     pub pinned: bool,
     /// The fingerprint of what is imported (the file and its index line).
     pub fingerprint: String,
+    /// The fingerprint of the file's text alone (a change of only its index line keeps it).
+    pub content: String,
+    /// When the file last changed (`YYYY-MM-DDTHH:MM:SSZ`; empty when unknown): the memory's
+    /// decision time.
+    pub modified_at: String,
 }
 
 impl MemoryFile {
@@ -103,6 +115,7 @@ impl MemoryFile {
             "title": self.title,
             "hook": self.hook,
             "links": self.links,
+            "from_file": {"path": self.path.display().to_string(), "modified_at": self.modified_at},
         })
     }
 }
@@ -382,6 +395,13 @@ fn parse_file(
         listed: false,
         pinned: false,
         fingerprint,
+        content: fsutil::fingerprint(text.as_bytes()),
+        modified_at: std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| crate::daemon::utc_timestamp(since.as_secs()))
+            .unwrap_or_default(),
     })
 }
 
@@ -624,9 +644,29 @@ impl ImportState {
             .and_then(|entry| entry["fingerprint"].as_str())
     }
 
+    /// Whether `file`'s memory was forgotten in the graph after this import wrote it and its
+    /// text has not changed since: only its index line moved, which must not bring it back.
+    fn forgotten_unless_changed(&self, file: &MemoryFile) -> Option<bool> {
+        let entry = self.files.get(&file.path.display().to_string())?;
+        if entry["content"].as_str() != Some(file.content.as_str()) {
+            return None;
+        }
+        Some(entry["forgotten"] == Value::Bool(true))
+    }
+
+    /// Records that `file`'s memory is gone from the graph although its text is unchanged:
+    /// the import does not bring it back until the file's text changes.
+    fn record_forgotten(&mut self, file: &MemoryFile, project: &str) {
+        self.record(file, project);
+        if let Some(entry) = self.files.get_mut(&file.path.display().to_string()) {
+            entry["forgotten"] = Value::Bool(true);
+        }
+    }
+
     fn record(&mut self, file: &MemoryFile, project: &str) {
-        let mut entry = json!({"fingerprint": file.fingerprint, "slug": file.slug,
-                               "project": project, "imported_at": crate::daemon::now_utc()});
+        let mut entry = json!({"fingerprint": file.fingerprint, "content": file.content,
+                               "slug": file.slug, "project": project,
+                               "imported_at": crate::daemon::now_utc()});
         if file.pinned {
             entry["pinned"] = Value::Bool(true);
         }
@@ -767,6 +807,17 @@ pub struct ImportReport {
     pub warnings: Vec<String>,
     /// Whether the deadline stopped the import early.
     pub timed_out: bool,
+    /// Memories written that wait for their conflict check (their nearest memories are for the
+    /// agent to judge: `conflicts()`).
+    pub unchecked: usize,
+    /// Files whose memory was forgotten in the graph and whose text did not change: not
+    /// imported again (only their index line moved).
+    pub kept_forgotten: usize,
+    /// The open conflicts of the projects written to, one line each naming both memories and
+    /// their files.
+    pub conflicts: Vec<String>,
+    /// Files that still hold a superseded memory, one line each (edit or delete them).
+    pub stale_files: Vec<String>,
 }
 
 /// Runs `plans`: every new or changed file goes through `remember` (in index order, then a
@@ -809,6 +860,28 @@ pub fn apply(
                 report.timed_out = true;
                 break;
             }
+            // A memory forgotten in the graph whose file only moved in MEMORY.md stays
+            // forgotten; one whose file text is unchanged is checked in the graph first.
+            match state.forgotten_unless_changed(file) {
+                Some(true) => {
+                    state.record_forgotten(file, project);
+                    report.kept_forgotten += 1;
+                    continue;
+                }
+                Some(false) => {
+                    if let Ok(found) = caller.call("memory", json!({"slug": file.slug}))
+                        && found
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .is_some_and(|e| e.starts_with("no memory"))
+                    {
+                        state.record_forgotten(file, project);
+                        report.kept_forgotten += 1;
+                        continue;
+                    }
+                }
+                None => {}
+            }
             let pinned = state.pinned_arg(file);
             let order = state.order_arg(file);
             match caller.call(
@@ -823,6 +896,9 @@ pub fn apply(
                     }
                     if file.kind_defaulted {
                         report.kind_defaulted += 1;
+                    }
+                    if answer["unchecked"] == Value::Bool(true) {
+                        report.unchecked += 1;
                     }
                     state.record(file, project);
                     let missing: Vec<&str> = answer["missing_targets"]
@@ -850,6 +926,23 @@ pub fn apply(
                     .push(format!("{}: {err}", file.path.display()));
             }
         }
+        // What waits for a decision in this project now: open conflicts and files that still
+        // hold a superseded memory, named with their files.
+        if !report.timed_out
+            && let Ok(listed) = caller.call("conflicts", json!({"k": 1}))
+        {
+            let (conflicts, stale) = conflict_report(&listed);
+            for line in conflicts {
+                if !report.conflicts.contains(&line) {
+                    report.conflicts.push(line);
+                }
+            }
+            for line in stale {
+                if !report.stale_files.contains(&line) {
+                    report.stale_files.push(line);
+                }
+            }
+        }
         report.projects.insert(project.clone());
         if let Err(err) = state.save(data_dir) {
             report.problems.push(err);
@@ -859,6 +952,40 @@ pub fn apply(
         }
     }
     report
+}
+
+/// The lines of a `conflicts()` answer: the open conflicts (both memories with their files)
+/// and the files that still hold a superseded memory.
+pub fn conflict_report(listed: &Value) -> (Vec<String>, Vec<String>) {
+    let side = |m: &Value| {
+        let slug = m["slug"].as_str().unwrap_or_default();
+        match m["source"].as_str() {
+            Some(source) if source != "remember" && !source.is_empty() => {
+                format!("{slug} (file {source})")
+            }
+            _ => format!("{slug} (remember)"),
+        }
+    };
+    let conflicts = listed["open"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| format!("{} vs {}", side(&row["a"]), side(&row["b"])))
+        .collect();
+    let stale = listed["stale_files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| {
+            format!(
+                "{} (superseded by {}): {}",
+                row["slug"].as_str().unwrap_or_default(),
+                row["superseded_by"].as_str().unwrap_or_default(),
+                row["file"].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    (conflicts, stale)
 }
 
 /// Runs `work` holding the import lock of `data_dir`, taken within `wait`; `Ok(None)` when

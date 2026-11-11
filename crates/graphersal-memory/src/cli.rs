@@ -312,9 +312,26 @@ fn parse_model(text: &str) -> Result<String, String> {
     }
 }
 
-/// What `bench questions` does.
+/// What `bench questions` and `bench rule-changes` do.
 #[derive(Debug, Subcommand, PartialEq)]
 pub enum BenchAction {
+    /// Does the next session follow a rule that changed? Built-in rule changes (never your
+    /// memory) in three arms: both memories unlinked, the newer one superseding the old one,
+    /// and that with the old rule left in a loaded memory file (Claude Code's `claude -p`).
+    RuleChanges {
+        /// How often every question is asked per arm.
+        #[arg(long, value_name = "R", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=10))]
+        repeats: u32,
+        /// The most this run may spend, USD at list price.
+        #[arg(long, value_name = "USD", default_value_t = 3.0, value_parser = parse_budget)]
+        budget: f64,
+        /// Plan the run and build the sandboxes, with a fake harness that calls no model.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Generate a new question set from your raw transcripts (asks before spending; your own
     /// questions are kept and their missing references looked up), with --review show the
     /// current one and confirm it, or add your own questions (`add`, `import`, `remove`).
@@ -815,6 +832,27 @@ mod tests {
         }
         assert!(parse(&["bench", "--questions", "61"]).is_err());
         assert!(parse(&["bench", "--budget", "-1"]).is_err());
+    }
+
+    #[test]
+    fn bench_rule_changes_parses() {
+        match parse(&["bench", "rule-changes", "--dry-run", "--repeats", "2", "-y"])
+            .unwrap()
+            .command
+        {
+            Command::Bench {
+                action:
+                    Some(BenchAction::RuleChanges {
+                        repeats,
+                        budget,
+                        dry_run,
+                        yes,
+                    }),
+                ..
+            } => assert_eq!((repeats, budget, dry_run, yes), (2, 3.0, true, true)),
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["bench", "rule-changes", "--repeats", "11"]).is_err());
     }
 
     #[test]

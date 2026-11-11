@@ -166,6 +166,32 @@ lookup of the references of your own questions) and asks. A run whose estimate i
 `--max-budget-usd` cap; and the run stops, with a partial report, when its real spend would pass
 the budget. `--dry-run` builds everything with a fake harness that calls no model.
 
+### Rule changes (`bench rule-changes`)
+
+A separate, smaller bench asks whether the next session follows a rule that changed. It uses
+five built-in scenarios, never your memory: an old rule written in one session (npm, Redux,
+Node 18, Heroku, 70 % coverage) and a newer one replacing it in the next. A question then needs
+the rule, for example "What exact command do I run to install this project's dependencies?".
+
+- **Arms.** Each arm has a store of its own in the run directory, one project per scenario, with
+  eight unrelated memories beside the two rules. **plain** holds both memories with nothing
+  linking them, as graphersal-memory was before M12. **marked** writes the newer one with
+  `supersedes: [old]`, so every search marks the old one "SUPERSEDED by <new> on <date>:".
+  **file** is marked, and the old rule also sits in a memory file loaded into the context: the
+  case of a file nobody edited.
+- **Calls.** Each call runs through your `claude -p` in a sandbox like the graph arm's
+  (`mcp --no-daemon` over the arm's store, only the read tools memories/memory/recall, no
+  settings, hooks or files of yours). There is no judge call: the answer's words decide whether
+  it follows the new rule, the old one, both or neither (`pnpm` against `npm install`, for
+  example).
+- **Cost guard.** As for `bench`: the estimate comes first (5 scenarios x 3 arms x `--repeats`
+  answers, about $0.05 each), a run above `--budget` is refused, every call is capped, and
+  `--dry-run` calls no model. The report is `report.md` and `report.json` in
+  `<data dir>/bench/<timestamp>-rule-changes/`.
+- **Before it was built** (M12 experiment, 2026-11-12, Claude Haiku, 6 scenarios x 3 runs, by
+  hand): 17/18 answers followed the new rule with plain memories, 18/18 marked, 13/18 when the
+  old rule was also in a loaded file. Small samples, synthetic scenarios.
+
 ## A first run of the built-in bench
 
 The first real run of `bench`, on 2026-11-10, made to check the command end to end, not to

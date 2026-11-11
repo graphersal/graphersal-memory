@@ -1001,3 +1001,130 @@ fn the_start_context_mode_of_a_harness_avoids_double_delivery() {
         StartContextMode::Full
     );
 }
+
+#[test]
+fn remember_answers_nearest_and_check_and_conflicts_settle_round_trip_in_both_profiles() {
+    let data = TempDir::new("conflicts");
+    for profile in [ProfileKind::Use, ProfileKind::Develop] {
+        let project = if profile == ProfileKind::Use {
+            "/work/use"
+        } else {
+            "/work/develop"
+        };
+        let mut client = Client::start(data.path(), profile, project);
+        let names = client.tool_names();
+        assert!(
+            names.contains(&"conflicts".to_string()) && names.contains(&"settle".to_string()),
+            "{names:?}"
+        );
+        let first = json_of(&client.ok(
+            "remember",
+            json!({"slug": "tabs", "kind": "project", "summary": "Indent the code with tabs",
+                   "body": "Tabs."}),
+        ));
+        assert!(first.get("check").is_none(), "{first}");
+        let second = json_of(&client.ok(
+            "remember",
+            json!({"slug": "spaces", "kind": "project",
+                   "summary": "Indent the code with four spaces", "body": "Spaces."}),
+        ));
+        assert_eq!(second["nearest"][0]["slug"], "tabs", "{second}");
+        assert!(
+            second["check"]
+                .as_str()
+                .unwrap()
+                .contains("settle(\"spaces\", \"conflict\""),
+            "{second}"
+        );
+        let opened = json_of(&client.ok(
+            "settle",
+            json!({"slug": "spaces", "decision": "conflict", "other": "tabs"}),
+        ));
+        assert_eq!(opened["open_conflicts"], 1, "{opened}");
+        let listed = json_of(&client.ok("conflicts", json!({})));
+        assert_eq!(listed["open"][0]["a"]["slug"], "spaces", "{listed}");
+        let closed = json_of(&client.ok(
+            "settle",
+            json!({"slug": "spaces", "decision": "supersedes", "other": "tabs"}),
+        ));
+        assert_eq!(closed["open_conflicts"], 0, "{closed}");
+        let read = json_of(&client.ok("memory", json!({"slug": "tabs"})));
+        assert!(
+            read["summary"]
+                .as_str()
+                .unwrap()
+                .starts_with("SUPERSEDED by spaces on "),
+            "{read}"
+        );
+        assert_eq!(read["chain"], json!(["tabs", "spaces"]));
+        client.close();
+    }
+}
+
+#[test]
+fn the_instructions_say_that_remember_returns_nearest_and_check() {
+    let text = mcp::use_instructions(crate::language::Language::default());
+    for word in ["nearest", "check", "settle(", "SUPERSEDED", "conflicts()"] {
+        assert!(text.contains(word), "{word}: {text}");
+    }
+    assert!(mcp::DEVELOP_INSTRUCTIONS.contains("conflicts_with"));
+}
+
+#[test]
+fn the_start_context_leaves_out_superseded_memories_and_shows_open_conflicts() {
+    let data = TempDir::new("startconf");
+    let mut a = Client::start(data.path(), ProfileKind::Use, "/work/a");
+    remember_kind(&mut a, "use-npm", "feedback", "project", json!({}));
+    remember_kind(
+        &mut a,
+        "use-pnpm",
+        "feedback",
+        "project",
+        json!({"supersedes": ["use-npm"]}),
+    );
+    remember_kind(&mut a, "tabs", "feedback", "project", json!({}));
+    remember_kind(&mut a, "spaces", "feedback", "project", json!({}));
+    a.ok(
+        "settle",
+        json!({"slug": "spaces", "decision": "conflict", "other": "tabs"}),
+    );
+    a.close();
+    let context = start_context_of(data.path(), "/work/a", crate::start_context::DEFAULT_CHARS);
+    assert!(
+        !context.text.contains("(memory: use-npm)"),
+        "{}",
+        context.text
+    );
+    assert!(
+        context.text.contains("(memory: use-pnpm)"),
+        "{}",
+        context.text
+    );
+    assert!(
+        context.text.contains("## Open conflicts"),
+        "{}",
+        context.text
+    );
+    assert!(
+        context
+            .text
+            .contains("(memory: spaces, always loaded)\n  CONFLICTS WITH "),
+        "{}",
+        context.text
+    );
+    assert!(context.text.contains("conflicts()"), "{}", context.text);
+    assert_eq!(
+        context.conflicts,
+        ["spaces (remember) vs tabs (remember)"],
+        "{context:?}"
+    );
+    assert!(context.start_note().contains("1 open memory conflict"));
+    let lines = context.conflict_lines();
+    assert!(
+        lines[0].starts_with("memory conflicts: 1 open"),
+        "{lines:?}"
+    );
+    // The daemon's answer carries them to status and doctor.
+    let round = crate::start_context::StartContext::from_json(&context.to_json()).unwrap();
+    assert_eq!(round.conflicts, context.conflicts);
+}
