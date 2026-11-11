@@ -64,7 +64,7 @@
   },
   {
     "name": "remember",
-    "description": "Store or replace the memory <slug> of this project (scope \"global\": of every project). kind: user|feedback|project|reference; summary: one line; body: markdown; why/how_to_apply appended as **Why:**/**How to apply:**; title+hook: its index line; pinned: load at every session start; links: related memory slugs; about: vertex ids. Check memories(text) first to replace, not duplicate.",
+    "description": "Store or replace the memory <slug> of this project (scope \"global\": of every project). kind: user|feedback|project|reference; summary: one line; body: markdown; why/how_to_apply appended as **Why:**/**How to apply:**; title+hook: its index line; pinned/order: load at every session start, priority (omit: keep); links: related memory slugs; about: vertex ids. Check memories(text) first.",
     "params": [
       {
         "name": "slug",
@@ -132,6 +132,16 @@
         "schema": {
           "type": [
             "boolean",
+            "null"
+          ]
+        },
+        "default": null
+      },
+      {
+        "name": "order",
+        "schema": {
+          "type": [
+            "integer",
             "null"
           ]
         },

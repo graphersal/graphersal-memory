@@ -6,7 +6,8 @@
 //!   (`~/.claude/projects/<encoded root>/memory/`): one `<slug>.md` per memory with the front
 //!   matter `name`, `description`, `metadata.type` and the body (its `**Why:**` /
 //!   `**How to apply:**` tail included), and `MEMORY.md`, the index (`- [Title](slug.md) —
-//!   hook`, in list order). This is the format `crate::import` reads, so importing an export
+//!   hook`, by `order`, then list position; the pinned memories under a `## Pinned` heading at
+//!   the end, so a pin survives the round trip). This is the format `crate::import` reads, so importing an export
 //!   gives the same memories back; links the body does not show as `[[slug]]` get a
 //!   `Related: [[a]], [[b]]` line before the tail.
 //! - The global memories (no project) go into one file every session of every project loads:
@@ -47,6 +48,8 @@ pub struct Row {
     pub hook: String,
     /// The slugs it relates to.
     pub links: Vec<String>,
+    /// Whether it is pinned (listed under `## Pinned` in `MEMORY.md`).
+    pub pinned: bool,
 }
 
 impl Row {
@@ -72,6 +75,7 @@ impl Row {
                 .filter_map(Value::as_str)
                 .map(str::to_string)
                 .collect(),
+            pinned: value["pinned"] == Value::Bool(true),
         })
     }
 }
@@ -162,8 +166,44 @@ fn index_title(row: &Row) -> String {
     title.replace(['[', ']', '\n'], " ")
 }
 
-/// The `MEMORY.md` of a project's rows (in their order).
+/// The heading of the pinned memories in `MEMORY.md` (`crate::import` reads it back).
+pub const PINNED_HEADING: &str = "## Pinned";
+
+/// The `MEMORY.md` of a project's rows (in their order): the index lines, the pinned ones under
+/// a `## Pinned` heading at the end (as the import reads them).
 pub fn index_text(rows: &[&Row]) -> String {
+    let plain: Vec<&Row> = rows.iter().copied().filter(|row| !row.pinned).collect();
+    let pinned: Vec<&Row> = rows.iter().copied().filter(|row| row.pinned).collect();
+    let mut text = index_lines(&plain);
+    if !pinned.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(PINNED_HEADING);
+        text.push('\n');
+        text.push_str(&index_lines(&pinned));
+    }
+    text
+}
+
+/// Whether the last heading of a `MEMORY.md` text is `## Pinned` (lines appended after it
+/// would be read as pinned).
+fn ends_in_pinned_section(text: &str) -> bool {
+    text.lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('#'))
+        .is_some_and(|line| {
+            let line = line.trim();
+            line.starts_with("## ")
+                && line
+                    .trim_start_matches('#')
+                    .trim()
+                    .eq_ignore_ascii_case("pinned")
+        })
+}
+
+/// The index lines `- [Title](slug.md) — hook` of `rows`.
+fn index_lines(rows: &[&Row]) -> String {
     let mut text = String::new();
     for row in rows {
         let hook = if row.hook.is_empty() {
@@ -324,7 +364,18 @@ fn put_index(path: &Path, rows: &[&Row], report: &mut Report) -> Result<(), Stri
     if !new.is_empty() && !new.ends_with('\n') {
         new.push('\n');
     }
-    new.push_str(&index_text(&missing));
+    // The unpinned lines must not land in a `## Pinned` section the file ends with; the pinned
+    // ones get a heading of their own (`index_text`).
+    let plain: Vec<&Row> = missing.iter().copied().filter(|row| !row.pinned).collect();
+    let pinned: Vec<&Row> = missing.iter().copied().filter(|row| row.pinned).collect();
+    if !plain.is_empty() && ends_in_pinned_section(&new) {
+        new.push_str("\n## Memories\n");
+    }
+    new.push_str(&index_lines(&plain));
+    if !pinned.is_empty() {
+        new.push_str(&format!("\n{PINNED_HEADING}\n"));
+        new.push_str(&index_lines(&pinned));
+    }
     crate::fsutil::write_atomic(path, new.as_bytes())?;
     report.appended.push((path.to_path_buf(), missing.len()));
     Ok(())
@@ -403,6 +454,7 @@ mod tests {
             title: "Package manager".into(),
             hook: "pnpm, not npm".into(),
             links: vec!["other".into()],
+            pinned: false,
         }
     }
 

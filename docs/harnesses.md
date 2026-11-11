@@ -47,6 +47,15 @@ gets to the model, per harness (documentation checked on 2026-11-11):
 | Codex | the MCP server's `instructions`; the SessionStart hook keeps printing the short start line | Codex gives a server's instructions to the model as the description of its tool namespace ([`codex-mcp/src/rmcp_client.rs`](https://github.com/openai/codex/blob/main/codex-rs/codex-mcp/src/rmcp_client.rs)); hooks run only after the user trusted them, so the instructions are the channel that always works. Its hook output would reach the model as well ("Plain text on `stdout` is added as extra developer context", [hooks](https://learn.chatgpt.com/docs/hooks)), so the hook does not repeat it. |
 | Cursor | the sessionStart hook's `additional_context`, and the MCP server's `instructions` | `additional_context` is documented as "Additional context to add to the conversation's initial system context" ([hooks](https://cursor.com/docs/hooks)); whether Cursor gives MCP instructions to the model is not documented. Both carry it until a live check shows whether Cursor reads the instructions (then the text reaches the model twice; see [cursor-live-check.md](cursor-live-check.md)). |
 
+**Claude Code without the hook needs v2.1.296 or newer** for the start context to arrive through
+the instructions: graphersal-memory fits them to 4,096 characters, the limit since v2.1.296; older
+versions cut server instructions at 2,048 characters, which the `use` instructions alone almost
+fill (about 1,500), so little or none of the start context gets through. On an older version keep
+the SessionStart hook installed (install adds it), or raise the limit with
+`CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` (v2.1.280 and newer; [MCP](https://code.claude.com/docs/en/mcp)).
+With the hook, any version that supports SessionStart's `additionalContext` gets the whole text
+(up to the hook's 10,000-character cap).
+
 Not verified live: the Claude Code path is tested against the documented output contract, the
 others against their documentation and source; no harness has been watched receiving it yet.
 

@@ -88,7 +88,7 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/download.rs`: the Model2Vec download, COPIED from graphersal-cli's `embed_model.rs`
     (marker at its top: change both); `GRAPHERSAL_MEMORY_HF_ENDPOINT`, `HF_TOKEN`;
   - `src/export.rs`: memories back into the harness's file memory (per project `MEMORY.md` +
-    `<slug>.md` as the import reads them, global ones into the agent's global memory file;
+    `<slug>.md` as the import reads them (pinned ones under `## Pinned`), global ones into the agent's global memory file;
     identical files skipped, differing memory files kept with `<slug>.graphersal.md` beside
     them, a differing `MEMORY.md` kept with the missing index lines appended; opencode, Codex
     and Cursor: the same files as Markdown under `~/graphersal-memory-export/<harness>/`);
@@ -121,7 +121,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     rewrites the whole file;
   - `src/import.rs`: the Claude Code file-memory import (parse `MEMORY.md` + memory files, resolve
     the project from transcripts or by decoding the directory name, plan new/changed by
-    fingerprint in `<data dir>/import/claude-code.json`, write through `remember`, the import lock);
+    fingerprint in `<data dir>/import/claude-code.json`, write through `remember`, the import lock;
+    `## Pinned` lines become `pinned`, the index position the memory's `order`, both sent only
+    when the file's line changed since this import set them);
   - `src/client.rs`: a small MCP client; `connect` opens a `use` connection to the daemon (the
     product's own calls go through the daemon, the single writer);
   - `src/hook.rs`: `hook session-start|session-end`: time-boxed import of the session project's

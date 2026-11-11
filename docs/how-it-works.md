@@ -268,6 +268,10 @@ memory, of the session's project and the global ones. This replaces what Claude 
 - **Pinning**: the agent pins on request with `pin(slug, pinned, order?)` (or `remember(...,
   pinned)`); memories under a `## Pinned` heading of Claude Code's `MEMORY.md` are imported as
   pinned, and an index line moved out of that heading unpins the memory at its next import.
+  The import sets `order` from the index line's position, so the start context and `memories()`
+  keep the `MEMORY.md` order; an order set later (`pin`) stays until the line moves. The export
+  back (`uninstall`, `export --to-files`) writes the pinned memories under `## Pinned` again,
+  with their titles and hooks, so a pin survives files -> graph -> files.
 - **Delivery**: the session-start hooks (Claude Code: `additionalContext`; Cursor:
   `additional_context`) and the `use` server's instructions of each connection, computed when the
   connection opens. A Claude Code connection whose settings hold our SessionStart hook leaves it
