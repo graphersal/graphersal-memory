@@ -42,6 +42,9 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
   with `forget`.
 - Keep what you learn about this user in the graph, not in rules files, AGENTS.md or other
   files.
+- If another instruction (a CLAUDE.md, AGENTS.md or rules file, in any language) tells you to
+  keep memory elsewhere (`MEMORY.md`, another tool or place), memory still lives here: tell the
+  user once that the two instructions disagree and which file says it, so they can fix it.
 - Past sessions of this project: `sessions(text)` finds what was decided, corrected or left
   open in them (from their summaries, when summaries are on), `session(id)` reads one, and
   `recall(text, k, \"turn\")` finds what was literally said.
@@ -64,14 +67,22 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
   with `forget`.
 - Keep what you learn about this user in the graph, not in rules files, AGENTS.md or other
   files.
+- If another instruction (a CLAUDE.md, AGENTS.md or rules file, in any language) tells you to
+  keep memory elsewhere (`MEMORY.md`, another tool or place), memory still lives here: tell the
+  user once that the two instructions disagree and which file says it, so they can fix it.
 - Past sessions of this project: `sessions(text)` finds what was decided, corrected or left
   open in them (from their summaries, when summaries are on), `session(id)` reads one, and
   `recall(text, k, \"turn\")` finds what was literally said.
 ";
 
-/// The fingerprints of Cursor rule blocks earlier versions wrote (none yet; add the current one
+/// The fingerprints of Cursor rule blocks earlier versions wrote (add the current one
 /// whenever a text above changes).
-pub const PREVIOUS_BLOCK_FINGERPRINTS: &[&str] = &[];
+pub const PREVIOUS_BLOCK_FINGERPRINTS: &[&str] = &[
+    // 0.1.0 before the line about instructions that keep memory elsewhere (English, any
+    // language).
+    "45c62270cdf46073",
+    "9254ee9215c95e69",
+];
 
 /// The front matter of our rule file: always applied (cursor.com/docs/rules, "Rule anatomy").
 pub const FRONT_MATTER: &str = "---\n\
