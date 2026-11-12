@@ -1766,7 +1766,7 @@ pub fn status_text_for(
     let mut general = vec![
         daemon,
         format!("data directory: {}", data_dir.display()),
-        format!("run directory: {}", in_data(run_dir)),
+        format!("run directory: {}", run_dir.display()),
     ];
     general.push(match Config::load(data_dir) {
         Ok(settings) => {
