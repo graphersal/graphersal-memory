@@ -785,11 +785,18 @@ impl Daemon {
     fn start_context(&self, line: &[u8]) -> Result<serde_json::Value, String> {
         let request: serde_json::Value =
             serde_json::from_slice(line).map_err(|err| err.to_string())?;
-        let root = request["project"].as_str().unwrap_or_default();
-        let project = if root.is_empty() {
-            String::new()
-        } else {
-            self.resolve_project(root)
+        // `project_id` (the browser UI): a stable id as `projects.json` lists it, used as it
+        // is (no lookup, nothing recorded); else `project`, a root resolved to its id.
+        let project = match request["project_id"].as_str() {
+            Some(id) => id.to_string(),
+            None => {
+                let root = request["project"].as_str().unwrap_or_default();
+                if root.is_empty() {
+                    String::new()
+                } else {
+                    self.resolve_project(root)
+                }
+            }
         };
         let mut budget = Config::load(&self.options.data_dir)?.start_context_chars();
         if let Some(max) = request["max_chars"].as_u64() {
@@ -799,7 +806,17 @@ impl Daemon {
         let context = store
             .start_context(&project, budget)
             .inspect_err(|_| self.check_alive(&store))?;
-        Ok(context.to_json())
+        let mut answer = context.to_json();
+        // `entries` (the browser UI): every always-loaded memory in the selection order, each
+        // marked shown or cut for lack of room.
+        if request["entries"] == true {
+            let entries = store
+                .start_entries(&project)
+                .inspect_err(|_| self.check_alive(&store))?;
+            answer["entries"] = crate::start_context::entries_json(entries, context.shown);
+            answer["project_id"] = serde_json::Value::String(project);
+        }
+        Ok(answer)
     }
 
     /// `export_memories`: every memory (or one project's and the global ones) with what the
@@ -1025,6 +1042,39 @@ impl Daemon {
                 }
                 return;
             }
+            Ok(Opening::Relay(frame)) => {
+                let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _doing = doing(format!(
+                        "relaying {} {}",
+                        frame.method,
+                        path_of(&frame.target)
+                    ));
+                    self.relay(&frame, &mut reader)
+                }));
+                let (head, body) = match answered {
+                    Ok(Ok((status, headers, body))) => (
+                        crate::relay::answer_line(status, &headers, body.len()),
+                        body,
+                    ),
+                    Ok(Err((kind, message))) => (protocol::refusal(kind, &message), Vec::new()),
+                    Err(_) => (
+                        protocol::refusal(
+                            Refusal::Internal,
+                            &format!(
+                                "the daemon failed while answering the UI (a bug); see {}",
+                                self.log_file().display()
+                            ),
+                        ),
+                        Vec::new(),
+                    ),
+                };
+                let _ = writer
+                    .write_all(head.as_bytes())
+                    .and_then(|()| writer.write_all(b"\n"))
+                    .and_then(|()| writer.write_all(&body))
+                    .and_then(|()| writer.flush());
+                return;
+            }
             Ok(Opening::Handshake(handshake)) => handshake,
         };
         if let Some(theirs) = &handshake.data_dir {
@@ -1099,6 +1149,41 @@ impl Daemon {
         }
         drop(reader);
         drop(writer);
+    }
+
+    /// Answers one relayed HTTP request of the browser UI (`crate::relay`): its body read, then
+    /// the default store's relay context. The answer is the status, headers and body, or the
+    /// refusal to send.
+    fn relay(
+        &self,
+        frame: &crate::relay::Frame,
+        reader: &mut BufReader<Stream>,
+    ) -> Result<RelayAnswer, (Refusal, String)> {
+        let body = crate::relay::read_body(reader, frame.body_length)
+            .map_err(|err| (Refusal::BadHandshake, err))?;
+        if self.lock_state().stopping {
+            return Err((
+                Refusal::Stopping,
+                "the daemon is stopping; start the UI again".to_string(),
+            ));
+        }
+        let store = self.store_for("").map_err(|err| (Refusal::Store, err))?;
+        let mut request = graphersal_serve::Request::new(
+            graphersal_serve::Method::parse(&frame.method),
+            &frame.target,
+            body.as_slice(),
+        )
+        .with_body_length(Some(body.len()));
+        for (name, value) in &frame.headers {
+            request = request.with_header(name, value);
+        }
+        let response = store
+            .relay(frame.port, request)
+            .map_err(|err| (Refusal::Store, err))?;
+        if response.status() >= 500 {
+            self.check_alive(&store);
+        }
+        Ok(response.into_parts())
     }
 
     /// After a failed call: when the store's session thread no longer runs (it ended by a
@@ -1216,6 +1301,14 @@ impl Daemon {
         state.connections += 1;
         Some(Registered(self))
     }
+}
+
+/// A relayed answer: status, headers, body.
+type RelayAnswer = (u16, Vec<(String, String)>, Vec<u8>);
+
+/// The path of a request target, without its query (the log never shows parameters).
+fn path_of(target: &str) -> &str {
+    target.split('?').next().unwrap_or(target)
 }
 
 /// The indexing's writes: each project's store, its catalog function run on the store's session

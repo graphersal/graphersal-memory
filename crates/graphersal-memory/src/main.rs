@@ -48,6 +48,7 @@ mod projects;
 mod prompt;
 mod protocol;
 mod registry;
+mod relay;
 mod session_sync;
 mod sessions;
 mod shim;
@@ -56,6 +57,8 @@ mod store;
 mod summaries;
 mod tomledit;
 mod transcript;
+mod ui;
+mod ui_assets;
 mod winshell;
 
 use std::process::ExitCode;

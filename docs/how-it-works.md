@@ -5,7 +5,7 @@
 > policy, the daemon with the shim, the socket, the handshake, start on demand, idle exit, upgrade
 > and crash recovery, the settings file, the project records, the installation into Claude Code
 > with its hooks, the import of the file memory, and the background indexing of past sessions
-> with opt-in summaries, and the built-in A/B ([Measuring it](ab-testing.md)). Not yet: the `ui` command, isolated project stores; see the
+> with opt-in summaries, and the built-in A/B ([Measuring it](ab-testing.md)). The browser UI (`graphersal-memory ui`, see [The browser UI](#the-browser-ui)). Not yet: isolated project stores; see the
 > [status table](../README.md#status).
 
 ## Processes
@@ -13,7 +13,7 @@
 ```text
 harness ──stdio──> shim (graphersal-memory mcp --profile use) ──socket──┐
                                                                         v
-browser ──http───> ui (graphersal-memory ui; develop)        ──socket──> daemon (graphersal-memory daemon)
+browser ──http───> ui (graphersal-memory ui)                 ──socket──> daemon (graphersal-memory daemon)
                                                                           owns the stores, socket only;
                                                                           per store: one session thread
                                                                           + background job workers
@@ -28,9 +28,10 @@ browser ──http───> ui (graphersal-memory ui; develop)        ──soc
   background work and no `ui` command for two hours by default, which is configurable. It listens
   on the local socket only and opens no network port. If two shims start at the same moment, a
   start lock file decides which one spawns the daemon.
-- **UI** (`graphersal-memory ui`, develop mode). It runs while its terminal runs, serves the
-  browser UI on loopback and talks to the daemon over the same socket. A forgotten browser tab
-  does not keep the daemon alive.
+- **UI** (`graphersal-memory ui`, for every user). It serves the browser UI on loopback and
+  talks to the daemon over the same socket; it runs until Ctrl+C, or until no browser tab has
+  been open for 15 minutes. While it runs, the daemon stays; a forgotten browser tab keeps
+  neither alive for long.
 
 Several agent sessions, in several terminals or harnesses, can use the memory at the same time.
 They all talk to one daemon, which is the single writer of each store. Calls of different sessions
@@ -348,6 +349,50 @@ candidates; the agent's own model decides (no model call of graphersal-memory's,
   in a loaded file. Caveats: one labeller, a synthetic corpus apart from one real case, single
   turns rather than a live tool loop, small samples. `graphersal-memory bench rule-changes`
   repeats the last measurement (arms plain / marked / file) through your `claude -p`.
+
+## The browser UI
+
+`graphersal-memory ui` opens your memory in the browser: what every session starts with, the
+memories, the conflicts and the past sessions. It is for every user, and it changes nothing
+unless you click: every change goes through the same memory functions your agent uses
+(`remember`, `forget`, `pin`, `settle`), recorded as written by the UI (`source` "ui"), so the
+conflict checks, the history and the start context work exactly as for the agent.
+
+- **Overview**: how many memories (by kind, project and global), what is always loaded and how
+  many characters it takes, open conflicts and imported memories still to check, indexed
+  sessions, and the lines `status` and `doctor` print.
+- **Memory**: the list (filters: kind, project or global, written by the agent / here /
+  imported file / other memory tool, replaced ones), search by meaning (the same search your
+  agent gets), a memory in full, and create, edit, pin and forget (forget always asks). A memory
+  imported from a file is read-only here: edit its file instead (pin, order and conflict
+  decisions work). Before an edit is saved, the memory is read again: when an agent changed it
+  meanwhile, nothing is saved.
+- **Always loaded**: exactly what a session of a project starts with, in delivery order and
+  grouped as the agent sees it, the budget bar, the literal text, what is cut for lack of room,
+  pin/unpin, move up/down, edit a memory's start line, and the budget
+  (`memory.start_context_chars`). Warnings: a budget too small for the pinned memories, a pinned
+  memory in an open conflict or replaced.
+- **Conflicts**: open conflicts side by side (which one replaces the other, both hold, forget
+  one, later), and imported memories still to check, one by one.
+- **Sessions** (read-only): the newest sessions by day, search of their decisions and other
+  facts by meaning, a session in full with its conversation on demand.
+
+A project switcher shows one project (its memories and the global ones), the global memories
+alone, or all projects.
+
+How it is guarded: `ui` listens on `127.0.0.1` only (a random port, `--port` to choose); every
+API request needs a token of 256 random bits that only the opened tab has (it reaches the
+browser through a launch file in the run directory, never through a command line, and lives in
+the tab's session storage); requests from another site are refused (Host and Origin checks, no
+cross-origin headers); `GET` never changes anything. The daemon stays socket-only: `ui` hands
+each request over the socket to the daemon, which answers only the memory functions and the
+UI's own read and reorder functions (`overview`, `memory_list`, `set_order`, `session_list`),
+never the internal ones (indexing, merge, export, migrations), under the same access policy as
+the agent's `use` server.
+
+The page is Graphersal's playground with the `memory` profile, and it loads its libraries (Vue
+and others) from public CDNs, each pinned with a checksum (SRI): the UI needs internet, and the
+CDN sees that the page was opened; no memory data is sent there.
 
 ## Profiles: the two MCP servers
 

@@ -19,7 +19,7 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects`, `start-context` and the
     hidden `hook` work on Claude Code, opencode, Codex and Cursor (`Setup` from the environment, with the model download
     `Source`; `bench_options` for `bench`; `DaemonSource` reads the memories for the export);
-    `ui` and `export` without `--to-files` report their planned stage and exit with code 2
+    `ui` runs the browser UI (`crate::ui`); `export` without `--to-files` reports its planned stage and exits with code 2
     (`--harness codex` and `--harness cursor` work wherever `claude-code` and `opencode` do;
     a Claude Code hook whose input is Cursor's, `cursor_version`, does nothing); the
     wizard is interactive when stdin and stdout are terminals;
@@ -184,7 +184,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     user) of a project and the global ones, `sort` (pinned, feedback, user; `order`, newest),
     `render` within the budget (groups like `MEMORY.md`, "N more not shown"), `StartContext`
     (`status_line`, the control-line JSON), `request`/`request_running` (the daemon's
-    `start_context` control line);
+    `start_context` control line; `project_id` uses an id as it is, `entries` adds the
+    always-loaded memories in selection order with tier, group and shown, `entries_json`);
   - `src/config.rs`: `<data dir>/config.json` (`daemon.idle`, `memory.language`,
     `memory.start_context_chars`,
     `embedding.model`, `summaries.enabled|harness_command|monthly_budget_usd|since`,
@@ -256,6 +257,29 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `daemon.pid`, `daemon.start.lock`, `daemon.log`; a default whose socket path is too long
     becomes `short_run_dir`, `/tmp/graphersal-memory-<fingerprint of the data dir>`), the socket types per platform (std on
     Unix, `uds_windows` on Windows), `LockFile` (`fd-lock`);
+  - `src/ui.rs`: `graphersal-memory ui` (stage UI): the loopback HTTP server (`tiny_http`, port 0 or
+    `--port`), the per-run token (256 bits, `ring`, header only, constant-time compare), the
+    Host/Origin check (`graphersal_serve::HostCheck`, loopback, this port), the launch file
+    `ui-<pid>.html` in the run directory (0600; removed at the first heartbeat and on exit; older
+    ones swept at start), the browser opened on the file's path only, the heartbeat exit
+    (`HEARTBEAT_TIMEOUT` 15 min, hidden `--heartbeat-timeout` for tests), one `use` handshake
+    held open so the daemon stays (reconnects), `/api/ui/*` answered itself (`status` with the
+    `status`/`doctor` lines from `commands::ui_report`, `projects`, `start-context` (the control
+    line with `project_id` + `entries`), `settings` GET/POST of `memory.start_context_chars`
+    only, `heartbeat`), every other `/api/` relayed (`crate::relay`), static files: the
+    profile's (`crate::ui_assets`) first, then the embedded playground (`Ui::embedded`, its
+    `index.html` with `/memory-ui/boot.js` added);
+  - `src/relay.rs`: the relay frame (opening `{"protocol", "relay": "http", "port", "method",
+    "target", "headers", "body_length"}` + body; answer line + body; only `FORWARDED_HEADERS`,
+    never the token; bodies up to serve's `MAX_BODY_BYTES`), `send` (the `ui` side) and
+    `selection` (the memory functions + `catalog::UI_FUNCTIONS`, never an internal one);
+  - `src/ui_assets.rs` + `ui/`: the `memory` profile built into the binary (`profile.json`: tabs
+    Overview, Memory, Always loaded, Conflicts, Sessions as modules, cards `memory`, `session`,
+    `fact`; `boot.js` takes the token from `#token=` into sessionStorage, adds the header to the
+    page's `/api/` fetches and sends the heartbeat; `model.js` the pure logic, tested by
+    `node --test crates/graphersal-memory/ui/tests/*.test.mjs`; `shared.js` the project switcher,
+    calls per selection ("All projects" = once per project + global once), the memory form with
+    the "changed meanwhile" check and the nearest check; one module per tab);
   - `src/protocol.rs`: the shim <-> daemon handshake and control lines, refusal codes, version
     order, `StartContextMode` (the handshake's optional `start_context`: `full` | `short` (Claude
     Code without our hook: within `CLAUDE_CODE_INSTRUCTIONS_CHARS`) | `none` (Claude Code with
@@ -292,12 +316,16 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     install refuses) and the default store `<data dir>/stores/default`, created on first use;
   - `src/catalog.rs` + `src/catalog/`: the product catalog built into the binary: `schema.json`,
     `queries.json` (name, description, parameters of each memory function) and one
-    `<name>.rhai` body per function (`pin` sets `pinned`/`order`) (folder `memory`, `meta` `{"origin": "product", "catalog":
+    `<name>.rhai` body per function (`pin` sets `pinned`/`order`), `ui.json` the browser UI's
+    functions (`UI_FUNCTIONS`: `overview`, `memory_list`, `set_order`, `session_list`; no tools of
+    any MCP server, `ui_policy` adds their effects) (folder `memory`, `meta` `{"origin": "product", "catalog":
     <fingerprint>}`); `apply` writes it to a store whose product queries carry another
     fingerprint; `use_policy` builds the `use` access policy from the functions' inferred effects;
   - `src/mcp.rs` + `src/mcp/{use,develop}.md`: the two profiles (configuration, instructions,
     tool lists), the project of a session (`--project`, else the git root of the cwd),
-    `StoreRuntime` (one open store: `graphersal-serve`'s session thread, one `Context` per
+    `StoreRuntime` (one open store; `relay`: the UI's relay context per `ui` port, allow-list
+    mode with `relay::selection` and `ui_policy`, the profile from `ui_assets`, at most
+    `MAX_RELAYS`; `graphersal-serve`'s session thread, one `Context` per
     profile over it sharing one `Mcp` endpoint, `serve_with` (the connection's memory language and
     start context, `Connection`: the instructions end with the project's start context, computed
     when the connection opens), `start_context` (the internal function, rendered),
@@ -306,7 +334,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     before the fill), the job ticker (`JobTicker`, stopped by `close`,
     which then waits for `background_runs` to reach 0 before it closes the store), `serve` of one
     connection through `graphersal-mcp`'s `serve_lines` with the connection's project bound by
-    the engine (`Profile::with_bound_params`: `project` is hidden in `tools/list`, set on every
+    the engine (`Profile::with_bound_params`: `project` and `source` (= `AGENT_SOURCE`, so an agent
+    never writes as the UI) are hidden in `tools/list`, set on every
     call of a saved query that declares it, left out of the answer's `call:` line), `close`),
     and `serve` (`--no-daemon`);
   - `src/mcp_tests.rs`: MCP round trips over in-memory pipes with temporary data directories
@@ -338,6 +367,12 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     temporary home with fixture transcripts (their time set a day back) and a fake `claude`
     shell script that records its calls; asserts zero calls without consent (Unix only: the
     fake harnesses are shell scripts, as in the summaries tests of `src/sessions.rs`).
+  - `tests/ui_tests.rs`: the real binary's `ui --no-browser --port 0` and its daemon on temporary
+    directories over plain HTTP (std `TcpStream`): token 401, Host/Origin 403, no CORS headers,
+    GETs leave the commit position unchanged, the relay refuses internal functions, a round trip
+    create -> list -> edit -> pin -> set_order -> preview -> budget -> settle -> forget, imported
+    memories refused, the launch file (0600, gone at the first heartbeat), the heartbeat exit with
+    the daemon kept alive meanwhile.
   - `tests/bench_tests.rs`: the real binary's `bench` with a fake `claude` on `PATH` that records
     its calls (dry run: zero calls; a run through the harness: the flags of every call, the live
     store and the sources unchanged, the spend in the report; Unix only, shell-script fakes).
@@ -360,7 +395,10 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   `memory:<slug>@<project>` (project) and `memory:<slug>` (global); `memory`, `forget` and
   `links` look in the project first, then in the global memory. `pinned` (bool) and `order`
   (int) select and order the start context (`crate::start_context`); `remember`'s `pinned`
-  default `null` keeps the memory's pin; `pin` is a `use` tool.
+  default `null` keeps the memory's pin; `pin` is a `use` tool. `remember`/`forget` take `source`
+  (`remember` | `ui`; bound to `remember` on MCP connections): the UI's memories are stored with
+  `source` "ui" and reported as "ui" (never as a file); `source` "ui" refuses to edit or forget an
+  imported memory.
 - Conflicts (M12, `docs/how-it-works.md#conflicts-between-memories`): `remember` answers
   `nearest` (the `recall` scoring on its slug + summary, k=5, without itself and superseded ones)
   and a `check` text only when something is near; `remember(supersedes: [slug])` and

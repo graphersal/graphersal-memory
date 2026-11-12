@@ -12,7 +12,12 @@ graphersal-memory is designed so that nothing leaves your machine unless you ask
   `$XDG_DATA_HOME/graphersal-memory`, Windows `%LOCALAPPDATA%\graphersal-memory`). It is not in
   your repository, so it is not committed by accident.
 - **No server and no ports.** The daemon listens on a local socket that only your OS user can
-  open. The optional browser UI listens on loopback, and only while you run `graphersal-memory ui`.
+  open. The optional browser UI listens on loopback (`127.0.0.1`), and only while you run
+  `graphersal-memory ui`; its API needs a per-run token only the opened tab has.
+- **The browser UI loads libraries from public CDNs** (cdnjs.cloudflare.com and
+  cdn.jsdelivr.net: Vue and the playground's other libraries, each checked against a pinned
+  checksum). The CDN sees that the page was opened and from which address; no memory data, token
+  or file of yours is sent there. A version without CDNs is planned.
 - **Isolated stores** (planned) keep a project's memory in a store of its own, which you can hand
   over or delete on its own.
 
@@ -25,6 +30,7 @@ graphersal-memory is designed so that nothing leaves your machine unless you ask
 | The A/B (`bench`) | only when you run `graphersal-memory bench` and accept its estimate (see below) | through **your own harness**, like the summaries |
 | Embedding model download | once, during `install`, for the model you choose (the default is a download; choose "Built-in" or `--model builtin` for none) | a download from Hugging Face (`https://huggingface.co`, or the mirror in `GRAPHERSAL_MEMORY_HF_ENDPOINT`) of the model's files, card and licence; nothing is uploaded, and `HF_TOKEN`, when set, is sent to that host only. This is the one network access of install. |
 | Binary install or update | when you run the installer | GitHub Releases or crates.io |
+| The browser UI's libraries | each time you open `graphersal-memory ui` in the browser | the page's scripts from cdnjs.cloudflare.com and cdn.jsdelivr.net (a download; your memory stays on your machine) |
 
 - **No telemetry**, no usage statistics and no crash reports are sent anywhere.
 - **No API keys of ours, and no service of ours.** Summaries never run through an API key that
