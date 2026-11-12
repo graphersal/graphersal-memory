@@ -1266,3 +1266,111 @@ fn a_long_line_with_store_and_memory_far_apart_is_not_an_instruction() {
         .collect();
     assert_eq!(found, vec![2, 3]);
 }
+
+#[test]
+fn an_instruction_wrapped_over_lines_is_read_as_one_paragraph() {
+    // Found in the user's real CLAUDE.local.md: line 43 alone mentions MEMORY.md, but the list
+    // item it belongs to starts with "Do not" and names graphersal-memory.
+    let text = "## Memory\n\
+        \n\
+        - Do not write memories into graphersal-kb any more. Its `memory:*` vertices and `session:*`\n  \
+        index (folder `memory`, `ai/graph/memory/sync.py`) are the\n  \
+        history up to 2026-11-11, readable as a fallback; `MEMORY.md` is still their export, imported\n  \
+        into graphersal-memory at session start. Do not edit files in the memory directory.\n\
+        - Never use tabs. Save every decision\n  \
+        into the memory of mem0 right away.\n\
+        - Update\n  \
+        MEMORY.md after each task.\n\
+        \n\
+        ```\n\
+        keep memory in ~/notes\n\
+        ```\n\
+        | where | Keep memory in Notion |\n";
+    let names = vec!["mem0".to_string()];
+    let found: Vec<(usize, Option<String>)> = coexist::mentions_in(text, &names)
+        .into_iter()
+        .map(|(line, _, target)| (line, target))
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            (7, Some("mem0".to_string())),
+            (9, Some("MEMORY.md".to_string())),
+            (13, None),
+            (15, None),
+        ]
+    );
+    // A mere mention of the file is not an instruction.
+    assert!(coexist::mentions_in("`MEMORY.md` is the export of the KB.\n", &[]).is_empty());
+}
+
+#[test]
+fn claude_md_is_also_loaded_by_opencode_and_by_a_codex_fallback() {
+    let home = TempDir::new("co-load-home");
+    let data = TempDir::new("co-load-data");
+    let work = TempDir::new("co-load-work");
+    let h = home.path();
+    std::fs::create_dir_all(h.join(".claude")).unwrap();
+    std::fs::write(
+        h.join(".claude/CLAUDE.md"),
+        "- Keep all memory in Notion.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        work.path().join("CLAUDE.md"),
+        "- Store memories in notes/.\n",
+    )
+    .unwrap();
+    let setup = setup_in(h, data.path());
+    let loaded = |setup: &Setup| -> Vec<(String, Vec<Kind>)> {
+        coexist::instruction_files(setup, Some(work.path()))
+            .into_iter()
+            .map(|(p, kinds)| (p.display().to_string(), kinds))
+            .collect()
+    };
+    let user_md = h.join(".claude/CLAUDE.md").display().to_string();
+    let project_md = work.path().join("CLAUDE.md").display().to_string();
+    // No opencode on the machine: Claude Code only.
+    let files = loaded(&setup);
+    assert!(
+        files.contains(&(user_md.clone(), vec![Kind::ClaudeCode])),
+        "{files:?}"
+    );
+    // opencode without its own AGENTS.md reads both CLAUDE.md files.
+    std::fs::create_dir_all(h.join(".config/opencode")).unwrap();
+    let files = loaded(&setup);
+    let both = vec![Kind::ClaudeCode, Kind::OpenCode];
+    assert!(
+        files.contains(&(user_md.clone(), both.clone())),
+        "{files:?}"
+    );
+    assert!(
+        files.contains(&(project_md.clone(), both.clone())),
+        "{files:?}"
+    );
+    // With its own AGENTS.md files it no longer reads them.
+    std::fs::write(h.join(".config/opencode/AGENTS.md"), "# mine\n").unwrap();
+    let files = loaded(&setup);
+    assert!(
+        files.contains(&(user_md.clone(), vec![Kind::ClaudeCode])),
+        "{files:?}"
+    );
+    // Codex reads the project's CLAUDE.md when its config names it as a fallback.
+    std::fs::create_dir_all(h.join(".codex")).unwrap();
+    std::fs::write(
+        h.join(".codex/config.toml"),
+        "project_doc_fallback_filenames = [\"CLAUDE.md\"]\n",
+    )
+    .unwrap();
+    let files = loaded(&setup);
+    let entry = files.iter().find(|(p, _)| *p == project_md).unwrap();
+    assert!(entry.1.contains(&Kind::Codex), "{files:?}");
+    // The line is found once, naming every agent that loads it.
+    let found = coexist::detect(&setup, Some(work.path()));
+    let mention = found
+        .mentions
+        .iter()
+        .find(|m| m.file == work.path().join("CLAUDE.md"))
+        .unwrap();
+    assert!(mention.loaded_by.contains(&Kind::Codex));
+}

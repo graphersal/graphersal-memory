@@ -1070,6 +1070,32 @@ pub fn instruction_files(setup: &Setup, project: Option<&Path>) -> Vec<(PathBuf,
         };
         add(path, Kind::OpenCode);
     }
+    // opencode also loads Claude Code's files where it has none of its own (its "Claude Code
+    // compatibility"): ~/.claude/CLAUDE.md when it has no global AGENTS.md, unless switched off
+    // by OPENCODE_DISABLE_CLAUDE_CODE(_PROMPT).
+    let opencode_reads_claude = setup.opencode.config_dir.is_dir()
+        && std::env::var_os("OPENCODE_DISABLE_CLAUDE_CODE").is_none();
+    if opencode_reads_claude
+        && std::env::var_os("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT").is_none()
+        && !setup.opencode.config_dir.join("AGENTS.md").is_file()
+    {
+        add(setup.paths.instructions.clone(), Kind::OpenCode);
+    }
+    // Codex: the extra file names of `project_doc_fallback_filenames` (CLAUDE.md, for example).
+    let codex_fallbacks: Vec<String> = std::fs::read_to_string(&setup.codex.config_file)
+        .ok()
+        .and_then(|text| crate::tomledit::parse(&text).ok())
+        .map(|config| {
+            config["project_doc_fallback_filenames"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|name| !name.contains(['/', '\\']) && !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     // Cursor: user rules other than ours.
     for file in md_in(&setup.cursor.cursor_dir.join("rules"), "mdc") {
         if file != setup.cursor.rules_file {
@@ -1087,6 +1113,17 @@ pub fn instruction_files(setup: &Setup, project: Option<&Path>) -> Vec<(PathBuf,
             add(root.join("AGENTS.md"), kind);
         }
         add(root.join("AGENTS.override.md"), Kind::Codex);
+        // opencode: the project's CLAUDE.md when the project has no AGENTS.md.
+        if opencode_reads_claude && !root.join("AGENTS.md").is_file() {
+            add(root.join("CLAUDE.md"), Kind::OpenCode);
+        }
+        // Codex: its fallback names, when the project has no AGENTS(.override).md.
+        if !root.join("AGENTS.md").is_file()
+            && !root.join("AGENTS.override.md").is_file()
+            && let Some(name) = codex_fallbacks.iter().find(|n| root.join(n).is_file())
+        {
+            add(root.join(name), Kind::Codex);
+        }
         add(root.join(".cursorrules"), Kind::Cursor);
         for file in md_in(&root.join(".cursor").join("rules"), "mdc") {
             add(file, Kind::Cursor);
@@ -1130,15 +1167,63 @@ const KEEP_VERBS: &[&str] = &[
     "keep", "store", "save", "write", "put", "record", "persist", "log", "use", "lives", "goes",
 ];
 
-/// The lines of `text` that tell the agent to keep memory elsewhere; `names` are the other
-/// tools found (a line naming one counts). Lines inside graphersal-memory's managed block, and
-/// lines naming graphersal-memory, are ours.
+/// Verbs of an instruction about a memory file (`MEMORY.md`): a sentence that only mentions the
+/// file ("MEMORY.md is still their export") tells the agent nothing.
+const FILE_VERBS: &[&str] = &[
+    "keep", "store", "save", "write", "put", "record", "persist", "log", "use", "update", "add",
+    "append", "edit", "maintain", "create", "read", "check", "load", "follow", "consult",
+];
+
+/// The places of `text` that tell the agent to keep memory elsewhere, as (line, sentence,
+/// target); `names` are the other tools found (a sentence naming one counts). The text is read
+/// as Markdown: the lines of one paragraph or list item are joined (an instruction wrapped over
+/// several lines is one instruction, with its negation and its subject) and split into
+/// sentences; the line is where the sentence starts. Lines inside graphersal-memory's managed
+/// block, code blocks and table rows stand alone; sentences naming graphersal-memory are ours.
 pub fn mentions_in(text: &str, names: &[String]) -> Vec<(usize, String, Option<String>)> {
     let mut out = Vec::new();
-    let mut in_block = false;
-    for (n, line) in text.lines().enumerate() {
+    for unit in units(text) {
+        // The joined text and where each line starts in it.
+        let mut joined = String::new();
+        let mut starts: Vec<(usize, usize)> = Vec::new();
+        for (n, line) in &unit {
+            if !joined.is_empty() {
+                joined.push(' ');
+            }
+            starts.push((joined.len(), *n));
+            joined.push_str(line.trim());
+        }
+        for (offset, sentence) in sentences(&joined) {
+            let line = starts
+                .iter()
+                .rev()
+                .find(|(start, _)| *start <= offset)
+                .map_or(unit[0].0, |(_, n)| *n);
+            if let Some(target) = sentence_target(sentence, names) {
+                out.push((line, clip(sentence.trim(), 160), target));
+            }
+        }
+    }
+    out
+}
+
+/// The Markdown units of `text`: paragraphs and list items as their (1-based line, text) lines;
+/// headings, table rows, code-block lines and the managed block's lines are units of one line
+/// (the managed block's own lines are left out).
+fn units(text: &str) -> Vec<Vec<(usize, &str)>> {
+    fn flush<'a>(current: &mut Vec<(usize, &'a str)>, units: &mut Vec<Vec<(usize, &'a str)>>) {
+        if !current.is_empty() {
+            units.push(std::mem::take(current));
+        }
+    }
+    let mut units: Vec<Vec<(usize, &str)>> = Vec::new();
+    let mut current: Vec<(usize, &str)> = Vec::new();
+    let (mut in_block, mut in_code) = (false, false);
+    for (i, line) in text.lines().enumerate() {
+        let n = i + 1;
         let trimmed = line.trim();
         if trimmed.starts_with(crate::install::BLOCK_BEGIN) {
+            flush(&mut current, &mut units);
             in_block = true;
             continue;
         }
@@ -1149,59 +1234,137 @@ pub fn mentions_in(text: &str, names: &[String]) -> Vec<(usize, String, Option<S
         if in_block {
             continue;
         }
-        let lower = trimmed.to_lowercase();
-        if lower.contains("graphersal-memory")
-            || lower.contains("graphersal memory")
-            || NOT_AGENT_MEMORY.iter().any(|w| lower.contains(w))
-            || NEGATIONS.iter().any(|w| lower.contains(w))
-        {
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            flush(&mut current, &mut units);
+            in_code = !in_code;
             continue;
         }
-        let words: Vec<&str> = lower
-            .split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_' || c == '.'))
-            .filter(|w| !w.is_empty())
-            .collect();
-        let memory_word = words.iter().any(|w| {
-            w.starts_with("memory") || w.starts_with("memories") || w.starts_with("remember")
-        });
-        let target = if lower.contains("memory.md") {
-            Some("MEMORY.md".to_string())
-        } else if let Some(tool) = TOOLS
+        if in_code || trimmed.starts_with('#') || trimmed.starts_with('|') {
+            flush(&mut current, &mut units);
+            if !trimmed.is_empty() {
+                units.push(vec![(n, line)]);
+            }
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush(&mut current, &mut units);
+            continue;
+        }
+        if starts_list_item(trimmed) || trimmed.starts_with('>') {
+            flush(&mut current, &mut units);
+        }
+        current.push((n, line));
+    }
+    flush(&mut current, &mut units);
+    units
+}
+
+/// Whether a trimmed line starts a list item (`- `, `* `, `+ `, `1. `, `1) `).
+fn starts_list_item(trimmed: &str) -> bool {
+    if ["- ", "* ", "+ "].iter().any(|m| trimmed.starts_with(m)) {
+        return true;
+    }
+    let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && (trimmed[digits..].starts_with(". ") || trimmed[digits..].starts_with(") "))
+}
+
+/// The sentences of `text` with their byte offsets: split after `.`, `!`, `?` followed by a
+/// space and an upper-case letter, a backtick or a list marker, and after `;` (a file name like
+/// `MEMORY.md` or "e.g. this" does not split).
+fn sentences(text: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        let split = match c {
+            b';' => true,
+            b'.' | b'!' | b'?' => {
+                bytes.get(i + 1) == Some(&b' ')
+                    && text[i + 2..]
+                        .chars()
+                        .next()
+                        .is_some_and(|n| n.is_uppercase() || n == '`' || n == '*' || n == '"')
+            }
+            _ => false,
+        };
+        if split {
+            out.push((start, &text[start..=i]));
+            start = i + 1;
+            while start < bytes.len() && bytes[start] == b' ' {
+                start += 1;
+            }
+            i = start;
+            continue;
+        }
+        i += 1;
+    }
+    if start < text.len() {
+        out.push((start, &text[start..]));
+    }
+    out
+}
+
+/// What a sentence says to keep memory in, when it tells the agent to keep memory elsewhere:
+/// `Some(target)` (`MEMORY.md`, another tool, or `None` for a place without a name).
+fn sentence_target(sentence: &str, names: &[String]) -> Option<Option<String>> {
+    let lower = sentence.to_lowercase();
+    if lower.contains("graphersal-memory")
+        || lower.contains("graphersal memory")
+        || NOT_AGENT_MEMORY.iter().any(|w| lower.contains(w))
+        || NEGATIONS.iter().any(|w| lower.contains(w))
+    {
+        return None;
+    }
+    let words: Vec<&str> = lower
+        .split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_' || c == '.'))
+        .map(|w| w.trim_end_matches('.'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let memory_word = words
+        .iter()
+        .any(|w| w.starts_with("memory") || w.starts_with("memories") || w.starts_with("remember"));
+    let verb = words.iter().any(|w| KEEP_VERBS.contains(w));
+    // A word of `set` at most `before` words before or `after` words after word `i`.
+    let near = |i: usize, set: &[&str], before: usize, after: usize| {
+        words[i.saturating_sub(before)..i]
             .iter()
-            .find(|tool| tool.tokens.iter().any(|token| words.contains(token)))
-        {
-            Some(tool.tokens[0].to_string())
-        } else {
+            .chain(&words[i + 1..words.len().min(i + 1 + after)])
+            .any(|w| set.contains(w))
+    };
+    // `MEMORY.md` counts only as the object of an instruction ("write a MEMORY.md entry",
+    // "update MEMORY.md"), not as a mention.
+    let memory_file = words
+        .iter()
+        .enumerate()
+        .any(|(i, w)| *w == "memory.md" && near(i, FILE_VERBS, 4, 3));
+    if memory_file {
+        return Some(Some("MEMORY.md".to_string()));
+    }
+    let tool = TOOLS
+        .iter()
+        .find(|tool| tool.tokens.iter().any(|token| words.contains(token)))
+        .map(|tool| tool.tokens[0].to_string())
+        .or_else(|| {
             names
                 .iter()
                 .filter(|name| !name_is_generic(name))
                 .find(|name| words.contains(&name.to_lowercase().as_str()))
                 .cloned()
-        };
-        let verb = words.iter().any(|w| KEEP_VERBS.contains(w));
-        // Without a named target the line must read as one instruction: a keep verb at most
-        // four words before "memory"/"memories" and a place word at most four words after it
-        // ("keep all memory in the KB"), not the words scattered over a long line ("the Store
-        // over `StoreDir` (directory, single file, memory)").
-        let instruction = words.iter().enumerate().any(|(i, w)| {
-            matches!(*w, "memory" | "memories")
-                && words[i.saturating_sub(4)..i]
-                    .iter()
-                    .any(|v| KEEP_VERBS.contains(v))
-                && words[i + 1..words.len().min(i + 5)]
-                    .iter()
-                    .any(|p| ["in", "into", "to", "via", "using", "with", "under"].contains(p))
         });
-        let hit = match &target {
-            Some(t) if t == "MEMORY.md" => true,
-            Some(_) => memory_word || verb,
-            None => instruction,
-        };
-        if hit {
-            out.push((n + 1, clip(trimmed, 160), target));
-        }
+    if let Some(tool) = tool {
+        return (memory_word || verb).then_some(Some(tool));
     }
-    out
+    // Without a named target the sentence must read as one instruction: a keep verb at most
+    // four words before "memory"/"memories" and a place word at most four words after it
+    // ("keep all memory in the KB"), not the words scattered over a long sentence ("the Store
+    // over `StoreDir` (directory, single file, memory)").
+    let places = ["in", "into", "to", "via", "using", "with", "under"];
+    let instruction = words.iter().enumerate().any(|(i, w)| {
+        matches!(*w, "memory" | "memories") && near(i, KEEP_VERBS, 4, 0) && near(i, &places, 0, 4)
+    });
+    instruction.then_some(None)
 }
 
 /// Whether a server name is a common word (`memory`), which says nothing in a text.
