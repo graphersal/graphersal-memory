@@ -221,8 +221,8 @@ Other memory
      - memory (Claude Code, ~/.claude.json): the reference memory server (@modelcontextprotocol/server-memory); stays, named read-only in the rule block (graphersal-memory is the main memory)
   9. Import the other memory tools' memories
      - memory (the reference memory server (@modelcontextprotocol/server-memory)): 2 memories in ~/kg/memory.jsonl, 2 new or changed: imported as global memories (the file is only read)
-  10. Instruction files that keep memory elsewhere (never changed by graphersal-memory)
-     - ~/.claude/CLAUDE.md:4: "- Keep all memory in the knowledge graph of the memory MCP server (create_entities)." (contradicts the rule block; `graphersal-memory doctor` suggests an edit)
+  10. Instruction files that mention other memory (never changed by graphersal-memory)
+     - ~/.claude/CLAUDE.md:4: "- Keep all memory in the knowledge graph of the memory MCP server (create_entities)." (mentions other memory: check it; never changed, `graphersal-memory doctor` suggests an edit)
 ```
 
 `status` and `doctor` afterwards:
@@ -239,7 +239,7 @@ Other memory:
   ok      Claude Code's auto-memory: off; 2 memory files in 1 project (~/.claude/projects)
   ok      memory (Claude Code, ~/.claude.json): the reference memory server (@modelcontextprotocol/server-memory); named read-only in the rule block (graphersal-memory is the main memory)
   note    ~/.claude/CLAUDE.md:4 says: "- Keep all memory in the knowledge graph of the memory MCP server (create_entities)."
-          it contradicts graphersal-memory's rule block, so the agent gets two answers. graphersal-memory never edits your instruction files: delete the line, or change it to "Memory lives in graphersal-memory (the MCP server `graphersal-memory`)."
+          if it tells the agent to keep memory there, it disagrees with graphersal-memory's rule block (the agent is told to point that out). graphersal-memory never edits your instruction files: delete the line, or change it to "Memory lives in graphersal-memory (the MCP server `graphersal-memory`)."
 ```
 
 These are notes, never problems or ACTION NEEDED lines: nothing here breaks graphersal-memory,

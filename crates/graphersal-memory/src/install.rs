@@ -86,6 +86,9 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
   with `forget`.
 - Do not write memory files (`MEMORY.md` and the files beside it) any more. Files written anyway
   are imported into the graph at the next session start.
+- If another instruction (a CLAUDE.md, AGENTS.md or rules file, in any language) tells you to
+  keep memory elsewhere (`MEMORY.md`, another tool or place), memory still lives here: tell the
+  user once that the two instructions disagree and which file says it, so they can fix it.
 - Past sessions of this project: `sessions(text)` finds what was decided, corrected or left
   open in them (from their summaries, when summaries are on), `session(id)` reads one, and
   `recall(text, k, \"turn\")` finds what was literally said.
@@ -107,6 +110,9 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
   with `forget`.
 - Do not write memory files (`MEMORY.md` and the files beside it) any more. Files written anyway
   are imported into the graph at the next session start.
+- If another instruction (a CLAUDE.md, AGENTS.md or rules file, in any language) tells you to
+  keep memory elsewhere (`MEMORY.md`, another tool or place), memory still lives here: tell the
+  user once that the two instructions disagree and which file says it, so they can fix it.
 - Past sessions of this project: `sessions(text)` finds what was decided, corrected or left
   open in them (from their summaries, when summaries are on), `session(id)` reads one, and
   `recall(text, k, \"turn\")` finds what was literally said.
@@ -130,6 +136,10 @@ pub const PREVIOUS_BLOCK_FINGERPRINTS: &[&str] = &[
     "e255edadf6bd5788",
     // 0.1.0 before the memory language (stages M5-M6): no language rule.
     "80779cc2f75cc8fc",
+    // 0.1.0 with the memory language, English and any language (stages M6-M15): no line about
+    // instructions that keep memory elsewhere.
+    "b5b70fbe26fde82a",
+    "5a6b75fa55b96838",
 ];
 
 /// Where Claude Code keeps its files.
@@ -2739,8 +2749,8 @@ fn plan_other_memory(
         .iter()
         .map(|m| {
             format!(
-                "{}:{}: \"{}\" (contradicts the rule block; `graphersal-memory doctor` \
-                 suggests an edit)",
+                "{}:{}: \"{}\" (mentions other memory: check it; never changed, \
+                 `graphersal-memory doctor` suggests an edit)",
                 m.file.display(),
                 m.line,
                 m.text
@@ -2749,7 +2759,7 @@ fn plan_other_memory(
         .collect();
     if !mentions.is_empty() {
         steps.push(Step {
-            title: "Instruction files that keep memory elsewhere (never changed by \
+            title: "Instruction files that mention other memory (never changed by \
                     graphersal-memory)"
                 .to_string(),
             lines: mentions,

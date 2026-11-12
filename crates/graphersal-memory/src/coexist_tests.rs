@@ -691,16 +691,17 @@ fn basic_memory_notes_are_imported_from_its_project_folders() {
 #[test]
 fn instruction_lines_about_memory_elsewhere_are_found_and_never_edited() {
     let names = vec!["mem0".to_string(), "memory".to_string()];
+    // Only names count, in any language; a paragraph naming graphersal-memory is ours.
     let text = "# Rules\n\
-        Write a MEMORY.md entry after each task.\n\
-        Save facts with mem0 when you learn them.\n\
-        Keep memory usage under 1 GB.\n\
-        Our in-memory cache keeps memory in RAM.\n\
-        Remember to run the tests.\n\
-        Do not write memories into the KB any more.\n\
-        Memory lives in graphersal-memory.\n\
+        - Write a MEMORY.md entry after each task.\n\
+        - Speichere Fakten mit mem0, sobald du sie lernst.\n\
+        - Keep memory usage under 1 GB.\n\
+        - Храни память в MCP-сервере memory (create_entities).\n\
+        - Remember to run the tests.\n\
+        - Do not write memories into the KB any more; memory lives in graphersal-memory\n  \
+          and MEMORY.md is only its export.\n\
         <!-- graphersal-memory:begin fingerprint=x -->\nKeep memory in MEMORY.md\n<!-- graphersal-memory:end -->\n\
-        Store memories in ~/notes/memory.txt.\n";
+        - Store memories in ~/notes/memory.txt.\n";
     let found: Vec<(usize, Option<String>)> = coexist::mentions_in(text, &names)
         .into_iter()
         .map(|(line, _, target)| (line, target))
@@ -710,7 +711,7 @@ fn instruction_lines_about_memory_elsewhere_are_found_and_never_edited() {
         vec![
             (2, Some("MEMORY.md".to_string())),
             (3, Some("mem0".to_string())),
-            (12, None)
+            (5, Some("create_entities".to_string())),
         ]
     );
     // A project's own files are read when the project is given, and never changed.
@@ -725,7 +726,7 @@ fn instruction_lines_about_memory_elsewhere_are_found_and_never_edited() {
     .unwrap();
     std::fs::write(
         work.path().join("AGENTS.md"),
-        "Store project memory in notes/.\n",
+        "Store project memory in notes/MEMORY.md.\n",
     )
     .unwrap();
     let setup = setup_in(home.path(), data.path());
@@ -764,7 +765,7 @@ fn instruction_lines_about_memory_elsewhere_are_found_and_never_edited() {
     assert_eq!(code, 0, "{out}");
     assert!(
         out.contains(
-            "Instruction files that keep memory elsewhere (never changed by graphersal-memory)"
+            "Instruction files that mention other memory (never changed by graphersal-memory)"
         ),
         "{out}"
     );
@@ -1252,25 +1253,9 @@ fn a_config_rewritten_while_install_waits_keeps_the_agents_write_and_the_switch_
 }
 
 #[test]
-fn a_long_line_with_store_and_memory_far_apart_is_not_an_instruction() {
-    // Found by the coordinator's final run on a real repository's CLAUDE.md: a line about a
-    // storage engine was shown as "keeps memory elsewhere".
-    let text = "- **Persistence** (`persist/CLAUDE.md`): streaming snapshots, WAL journal in its own \
-        hook slot, recovery, the Store over `StoreDir` (directory, single file, memory), verified \
-        backups.\n\
-        - Keep all memory in the knowledge graph of the memory MCP server (create_entities).\n\
-        Save project memories into notes/.\n";
-    let found: Vec<usize> = coexist::mentions_in(text, &[])
-        .into_iter()
-        .map(|(line, _, _)| line)
-        .collect();
-    assert_eq!(found, vec![2, 3]);
-}
-
-#[test]
 fn an_instruction_wrapped_over_lines_is_read_as_one_paragraph() {
     // Found in the user's real CLAUDE.local.md: line 43 alone mentions MEMORY.md, but the list
-    // item it belongs to starts with "Do not" and names graphersal-memory.
+    // item it belongs to names graphersal-memory.
     let text = "## Memory\n\
         \n\
         - Do not write memories into graphersal-kb any more. Its `memory:*` vertices and `session:*`\n  \
@@ -1278,30 +1263,28 @@ fn an_instruction_wrapped_over_lines_is_read_as_one_paragraph() {
         history up to 2026-11-11, readable as a fallback; `MEMORY.md` is still their export, imported\n  \
         into graphersal-memory at session start. Do not edit files in the memory directory.\n\
         - Never use tabs. Save every decision\n  \
-        into the memory of mem0 right away.\n\
-        - Update\n  \
-        MEMORY.md after each task.\n\
+        into mem0 right away.\n\
+        - 每次任务后更新\n  \
+        MEMORY.md。\n\
         \n\
         ```\n\
-        keep memory in ~/notes\n\
+        claude-mem start\n\
         ```\n\
-        | where | Keep memory in Notion |\n";
-    let names = vec!["mem0".to_string()];
-    let found: Vec<(usize, Option<String>)> = coexist::mentions_in(text, &names)
+        | where | basic-memory |\n\
+        A storage engine: the Store over `StoreDir` (directory, single file, memory).\n";
+    let found: Vec<(usize, Option<String>)> = coexist::mentions_in(text, &["mem0".to_string()])
         .into_iter()
         .map(|(line, _, target)| (line, target))
         .collect();
     assert_eq!(
         found,
         vec![
-            (7, Some("mem0".to_string())),
-            (9, Some("MEMORY.md".to_string())),
-            (13, None),
-            (15, None),
+            (8, Some("mem0".to_string())),
+            (10, Some("MEMORY.md".to_string())),
+            (13, Some("claude-mem".to_string())),
+            (15, Some("basic-memory".to_string())),
         ]
     );
-    // A mere mention of the file is not an instruction.
-    assert!(coexist::mentions_in("`MEMORY.md` is the export of the KB.\n", &[]).is_empty());
 }
 
 #[test]
@@ -1318,7 +1301,7 @@ fn claude_md_is_also_loaded_by_opencode_and_by_a_codex_fallback() {
     .unwrap();
     std::fs::write(
         work.path().join("CLAUDE.md"),
-        "- Store memories in notes/.\n",
+        "- Write decisions into MEMORY.md.\n",
     )
     .unwrap();
     let setup = setup_in(h, data.path());
