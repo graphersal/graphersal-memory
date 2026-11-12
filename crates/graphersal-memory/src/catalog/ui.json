@@ -1,0 +1,146 @@
+[
+  {
+    "name": "overview",
+    "description": "UI: counts of this project's and the global memories, open conflicts, unchecked imports, sessions and facts.",
+    "params": [
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  },
+  {
+    "name": "memory_list",
+    "description": "UI: one page of this project's and the global memories in start-context order; filters kind, scope (project|global), source_kind (agent|ui|file|other), superseded (include replaced ones).",
+    "params": [
+      {
+        "name": "kind",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "",
+            "user",
+            "feedback",
+            "project",
+            "reference"
+          ]
+        },
+        "default": ""
+      },
+      {
+        "name": "scope",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "",
+            "project",
+            "global"
+          ]
+        },
+        "default": ""
+      },
+      {
+        "name": "source_kind",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "",
+            "agent",
+            "ui",
+            "file",
+            "other"
+          ]
+        },
+        "default": ""
+      },
+      {
+        "name": "superseded",
+        "schema": {
+          "type": "boolean"
+        },
+        "default": false
+      },
+      {
+        "name": "offset",
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "default": 0
+      },
+      {
+        "name": "limit",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "default": 100
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  },
+  {
+    "name": "set_order",
+    "description": "UI: give the memories named, in this order, the priorities 10, 20, 30, ... (one unit; refuses a slug that is not a memory of this project or a global one).",
+    "params": [
+      {
+        "name": "slugs",
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+$"
+          },
+          "minItems": 1,
+          "maxItems": 500
+        }
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  },
+  {
+    "name": "session_list",
+    "description": "UI: this project's sessions that started before `before` (ISO time, \"\" = now), newest first, with their fact counts.",
+    "params": [
+      {
+        "name": "before",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      },
+      {
+        "name": "limit",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "default": 50
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  }
+]

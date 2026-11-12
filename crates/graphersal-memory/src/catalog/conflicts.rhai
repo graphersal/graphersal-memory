@@ -15,9 +15,9 @@ fn conflicts(k, project) {
             let m = g.v(pair[key]).project("slug", "scope", "kind", "summary", "source", "updated_at")
                 .by("name").by(__.coalesce(__.values("project").constant("project"), __.constant("global")))
                 .by("kind").by("summary")
-                .by(__.choose(__.has("imported_at"), __.coalesce(__.values("source"), __.constant("remember")), __.constant("remember")))
+                .by(__.choose(__.has("imported_at"), __.coalesce(__.values("source"), __.constant("remember")), __.choose(__.has("source", "ui"), __.constant("ui"), __.constant("remember"))))
                 .by(__.coalesce(__.values("updated_at").as_string(), __.constant(""))).next();
-            if m.source != "remember" { files.push(m.source); }
+            if m.source != "remember" && m.source != "ui" { files.push(m.source); }
             row[key] = m;
         }
         if files.len() > 0 { row.files = files; }
@@ -41,7 +41,7 @@ fn conflicts(k, project) {
             nearest.push(g.v(h.id).project("slug", "scope", "kind", "summary", "source", "updated_at")
                 .by("name").by(__.coalesce(__.values("project").constant("project"), __.constant("global")))
                 .by("kind").by("summary")
-                .by(__.choose(__.has("imported_at"), __.coalesce(__.values("source"), __.constant("remember")), __.constant("remember")))
+                .by(__.choose(__.has("imported_at"), __.coalesce(__.values("source"), __.constant("remember")), __.choose(__.has("source", "ui"), __.constant("ui"), __.constant("remember"))))
                 .by(__.coalesce(__.values("updated_at").as_string(), __.constant(""))).next());
         }
         m.nearest = nearest;

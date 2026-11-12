@@ -12,7 +12,10 @@ fn memory(slug, project) {
         .by("kind").by(__.coalesce(__.values("title"), __.values("name")))
         .by(__.coalesce(__.values("hook"), __.values("summary"))).by("summary")
         .by(__.coalesce(__.values("body"), __.constant(""))).by("updated_at")
-        .by(__.choose(__.has("imported_at"), __.coalesce(__.values("source"), __.constant("remember")), __.constant("remember"))).next();
+        .by(__.choose(__.has("imported_at"), __.coalesce(__.values("source"), __.constant("remember")), __.choose(__.has("source", "ui"), __.constant("ui"), __.constant("remember")))).next();
+    m.pinned = g.v(id).has("pinned", true).count().next() > 0;
+    let order = g.v(id).values("order").to_list();
+    if order.len() > 0 { m.order = order[0]; }
     let imported = g.v(id).values("imported_at").as_string().to_list();
     if imported.len() > 0 { m.imported_at = imported[0]; }
     if g.v(id).has("unchecked", true).count().next() > 0 { m.unchecked = true; }
@@ -65,7 +68,7 @@ fn memory(slug, project) {
         for r in rows {
             let c = g.v(r.id).project("slug", "scope", "summary", "source")
                 .by("name").by(__.coalesce(__.values("project").constant("project"), __.constant("global"))).by("summary")
-                .by(__.choose(__.has("imported_at"), __.coalesce(__.values("source"), __.constant("remember")), __.constant("remember"))).next();
+                .by(__.choose(__.has("imported_at"), __.coalesce(__.values("source"), __.constant("remember")), __.choose(__.has("source", "ui"), __.constant("ui"), __.constant("remember")))).next();
             c.since = if r.since.len() >= 10 { r.since.sub_string(0, 10) } else { r.since };
             conflicts.push(c);
         }

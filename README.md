@@ -430,7 +430,7 @@ Details: [docs/harnesses.md](docs/harnesses.md).
 
 | Feature | Status |
 |---|---|
-| Command-line skeleton (`--help`, command set) | available (commands of later stages report "not implemented yet": `ui`, the rule export of `export`) |
+| Command-line skeleton (`--help`, command set) | available (commands of later stages report "not implemented yet": the rule export of `export`) |
 | Memory core: store, memory tools, project and global memories, `use`/`develop` profiles, MCP over stdio | available (M1) |
 | Shared daemon + stdio shim, several sessions at once (`mcp`, `daemon`, the daemon part of `status`) | available (M2; Linux, macOS and Windows tested: the end-to-end daemon tests run in CI on all three, Windows over its `AF_UNIX` sockets) |
 | One-command install / uninstall for Claude Code, `status`, `doctor`, import of the file memory (`import`), the managed rule block, the session hooks, `config.json` | available (M3; Linux, macOS and Windows tested, the real binary's install/hook/uninstall included; no harness has been run live on Windows yet; on Windows Claude Code's hooks run without a shell, so Git Bash is not needed: [Windows](docs/harnesses.md#windows)) |
@@ -446,7 +446,8 @@ Details: [docs/harnesses.md](docs/harnesses.md).
 | Codex: install/uninstall (`--harness codex`), the hooks, past sessions, summaries through `codex exec`, `bench` with a local model | available (M7c), verified against Codex 0.167.0's source. Tested on temporary homes with hand-built rollout files and configurations and a fake `codex` binary; real smoke with Codex 0.167.0 and LM Studio (`qwen2.5-coder-14b-instruct`): registration, indexing and a summary through `codex exec --oss` worked; that model wrote its tool calls as text instead of calling them, so `remember`/`memories` through Codex are not yet shown with a local model |
 | Cursor: install/uninstall (`--harness cursor`), the hooks, past sessions from the transcripts the hooks name | available (M7d), checked against Cursor's documentation of 2026-11-10 and tested on temporary homes with hand-built files in the documented formats; not yet run with a live Cursor (needs a login): [docs/cursor-live-check.md](docs/cursor-live-check.md). Summaries and `bench` do not run through Cursor's CLI (no cost reported) |
 | Store maintenance: automatic checkpoints (`store.checkpoint_after`, default 16 MiB), pruning history older than `store.keep_history` (default 30 days), store sizes and WAL in `status`/`doctor` | available (M8; tested on temporary stores with an injected clock; start times measured in [How it works](docs/how-it-works.md#stores)) |
-| Browser UI, desktop app | planned (M7) |
+| Browser UI (`graphersal-memory ui`): overview, memories (search, create, edit, pin, forget), what every session starts with (order, budget, literal preview), conflicts, past sessions; for every user, on loopback with a per-run token | available (stage UI; tested end to end with the real binary on temporary directories and once in headless Chrome on macOS; not yet run on Linux or Windows). It loads its libraries (Vue and others) from public CDNs, so it needs internet; no memory data leaves your machine ([privacy](docs/privacy.md)) |
+| Desktop app | planned (M7) |
 
 ### Try it
 

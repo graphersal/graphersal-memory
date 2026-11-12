@@ -27,6 +27,14 @@ const QUERIES: &str = include_str!("catalog/queries.json");
 /// session indexing), never offered as tools of the `use` server.
 const INTERNAL: &str = include_str!("catalog/internal.json");
 
+/// Name, description and parameters of the browser UI's own functions (`graphersal-memory ui`):
+/// reads and the reordering the UI needs beside the memory functions, never offered as tools of
+/// the agent's servers (the daemon's relay context selects them, `crate::relay`).
+const UI: &str = include_str!("catalog/ui.json");
+
+/// The browser UI's functions, in the order of `catalog/ui.json`.
+pub const UI_FUNCTIONS: [&str; 4] = ["overview", "memory_list", "set_order", "session_list"];
+
 /// The internal functions, in the order of `catalog/internal.json`.
 pub const INTERNAL_FUNCTIONS: [&str; 9] = [
     "indexed_sessions",
@@ -77,6 +85,10 @@ pub const PROJECT_BOUND: [&str; 10] = [
 /// The name of the parameter bound to the connection's project (`crate::mcp`).
 pub const PROJECT_PARAM: &str = "project";
 
+/// The name of the parameter that says who writes (`remember`, `forget`): bound to the agent
+/// on every MCP connection (`crate::mcp::AGENT_SOURCE`), `"ui"` from the browser UI.
+pub const SOURCE_PARAM: &str = "source";
+
 /// The body of the memory function `name`.
 fn body(name: &str) -> Option<&'static str> {
     Some(match name {
@@ -90,6 +102,10 @@ fn body(name: &str) -> Option<&'static str> {
         "sessions" => include_str!("catalog/sessions.rhai"),
         "session" => include_str!("catalog/session.rhai"),
         "recall" => include_str!("catalog/recall.rhai"),
+        "overview" => include_str!("catalog/overview.rhai"),
+        "memory_list" => include_str!("catalog/memory_list.rhai"),
+        "set_order" => include_str!("catalog/set_order.rhai"),
+        "session_list" => include_str!("catalog/session_list.rhai"),
         "indexed_sessions" => include_str!("catalog/indexed_sessions.rhai"),
         "index_session" => include_str!("catalog/index_session.rhai"),
         "index_turns" => include_str!("catalog/index_turns.rhai"),
@@ -115,6 +131,11 @@ pub struct Function {
 /// The memory functions of this binary's catalog.
 pub fn functions() -> Result<Vec<Function>, String> {
     parse_functions(QUERIES)
+}
+
+/// The browser UI's functions of this binary's catalog.
+pub fn ui_functions() -> Result<Vec<Function>, String> {
+    parse_functions(UI)
 }
 
 /// The internal functions of this binary's catalog.
@@ -162,7 +183,12 @@ pub fn fingerprint() -> String {
     feed(SCHEMA);
     feed(QUERIES);
     feed(INTERNAL);
-    for name in FUNCTIONS.iter().chain(INTERNAL_FUNCTIONS.iter()) {
+    feed(UI);
+    for name in FUNCTIONS
+        .iter()
+        .chain(INTERNAL_FUNCTIONS.iter())
+        .chain(UI_FUNCTIONS.iter())
+    {
         feed(body(name).unwrap_or_default());
     }
     format!("{hash:016x}")
@@ -197,6 +223,7 @@ pub enum Applied {
 pub fn apply(session: &mut Session) -> Result<Applied, String> {
     let mut wanted = functions()?;
     wanted.extend(internal_functions()?);
+    wanted.extend(ui_functions()?);
     let current = fingerprint();
     let listed = session.list_queries(None).map_err(|err| err.to_string())?;
     let mut stored = Vec::new();
@@ -318,8 +345,24 @@ pub fn call(session: &mut Session, name: &str, args: &Value) -> Result<Value, St
 /// memory functions are inferred to make (their effects as the engine reports them). Fails
 /// when a memory function is missing, cannot run, or would write anything but data.
 pub fn use_policy(session: &Session) -> Result<AccessPolicy, String> {
+    policy_of(session, &FUNCTIONS)
+}
+
+/// The access policy of the browser UI's relay context (`crate::relay`): reading, plus the
+/// kinds of data writes the memory functions and the UI's functions are inferred to make.
+pub fn ui_policy(session: &Session) -> Result<AccessPolicy, String> {
+    let names: Vec<&str> = FUNCTIONS
+        .iter()
+        .chain(UI_FUNCTIONS.iter())
+        .copied()
+        .collect();
+    policy_of(session, &names)
+}
+
+/// Reading, plus the data writes the functions `names` are inferred to make.
+fn policy_of(session: &Session, names: &[&str]) -> Result<AccessPolicy, String> {
     let mut policy = AccessPolicy::read_only();
-    for name in FUNCTIONS {
+    for &name in names {
         let entry = session.get_query(name).map_err(|err| err.to_string())?;
         if entry.is_null() {
             return Err(format!(
@@ -983,6 +1026,308 @@ mod tests {
                 .unwrap()
                 .starts_with("20")
         );
+    }
+
+    #[test]
+    fn ui_functions_have_bodies_and_are_neither_tools_nor_internal() {
+        let ui = ui_functions().unwrap();
+        let names: Vec<&str> = ui.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, UI_FUNCTIONS);
+        for function in &ui {
+            let name = function.name.as_str();
+            assert!(!FUNCTIONS.contains(&name) && !INTERNAL_FUNCTIONS.contains(&name));
+            assert!(body(name).unwrap().starts_with(&format!("fn {name}(")));
+            let params: Vec<&str> = function.spec["params"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["name"].as_str().unwrap())
+                .collect();
+            // The UI passes the project itself (decision 3.5B): every one declares it.
+            assert!(params.contains(&PROJECT_PARAM), "{name}");
+        }
+        let mut session = Session::new();
+        apply(&mut session).unwrap();
+        for name in UI_FUNCTIONS {
+            let entry = session.get_query(name).unwrap();
+            assert_eq!(entry["status"], "ok", "{name}: {entry}");
+        }
+        let policy = ui_policy(&session).unwrap();
+        assert!(policy.allows(ActionKind::Update, ResourceKind::Data));
+        assert!(!policy.allows(ActionKind::Update, ResourceKind::Schema));
+    }
+
+    #[test]
+    fn memory_list_filters_pages_and_marks_sources() {
+        let mut session = conflict_store(&[("old", "project", "We use npm")]);
+        remember_in(
+            &mut session,
+            json!({"slug": "new", "summary": "We use pnpm now", "supersedes": ["old"], "kind": "feedback"}),
+        );
+        remember_in(
+            &mut session,
+            json!({"slug": "from-ui", "summary": "Written in the UI", "source": "ui", "scope": "global"}),
+        );
+        remember_in(
+            &mut session,
+            json!({"slug": "from-file", "summary": "Imported", "kind": "reference",
+                   "from_file": {"path": "/h/.claude/projects/p/memory/from-file.md"}}),
+        );
+        call_in(
+            &mut session,
+            "pin",
+            json!({"slug": "from-ui", "pinned": true, "order": 3}),
+        );
+        let list = |session: &mut Session, args: Value| {
+            let mut full = json!({"kind": "", "scope": "", "source_kind": "", "superseded": false,
+                                  "offset": 0, "limit": 100});
+            for (key, value) in args.as_object().unwrap() {
+                full[key] = value.clone();
+            }
+            call_in(session, "memory_list", full)
+        };
+        let all = list(&mut session, json!({}));
+        let slugs: Vec<&str> = all["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["slug"].as_str().unwrap())
+            .collect();
+        // Start-context order (pinned, feedback, the rest), the replaced one left out.
+        assert_eq!(slugs, ["from-ui", "new", "from-file"], "{all}");
+        assert_eq!(all["total"], 3);
+        let first = &all["rows"][0];
+        assert_eq!(first["source"], "ui");
+        assert_eq!(first["source_kind"], "ui");
+        assert_eq!(first["scope"], "global");
+        assert_eq!(first["project"], "");
+        assert_eq!(first["pinned"], true);
+        assert_eq!(first["order"], 3);
+        assert_eq!(first["always"], true);
+        assert_eq!(all["rows"][1]["source_kind"], "agent");
+        assert_eq!(all["rows"][1]["project"], "/p");
+        assert_eq!(all["rows"][2]["source_kind"], "file");
+        assert!(all["rows"][2]["imported_at"].is_string(), "{all}");
+        let with_old = list(&mut session, json!({"superseded": true}));
+        let old = with_old["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["slug"] == "old")
+            .unwrap();
+        assert_eq!(old["superseded_by"], "new");
+        assert_eq!(
+            old["summary"], "We use npm",
+            "plain, the UI marks it: {old}"
+        );
+        assert_eq!(
+            list(&mut session, json!({"source_kind": "file"}))["total"],
+            1
+        );
+        assert_eq!(list(&mut session, json!({"scope": "global"}))["total"], 1);
+        assert_eq!(list(&mut session, json!({"kind": "feedback"}))["total"], 1);
+        let page = list(&mut session, json!({"offset": 1, "limit": 1}));
+        assert_eq!(page["total"], 3);
+        assert_eq!(page["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(page["rows"][0]["slug"], "new");
+        let read = call_in(&mut session, "memory", json!({"slug": "from-ui"}));
+        assert_eq!(read["source"], "ui", "{read}");
+        assert_eq!(read["pinned"], true, "{read}");
+        assert_eq!(read["order"], 3, "{read}");
+        let read = call_in(&mut session, "memory", json!({"slug": "new"}));
+        assert_eq!(read["pinned"], false, "{read}");
+        assert!(read.get("order").is_none(), "{read}");
+    }
+
+    #[test]
+    fn the_ui_cannot_edit_or_forget_an_imported_memory_but_may_pin_it() {
+        let mut session = conflict_store(&[]);
+        remember_in(
+            &mut session,
+            json!({"slug": "imported", "summary": "From a file", "from_file": {"path": "/f/imported.md"}}),
+        );
+        let mut args = json!({"slug": "imported", "kind": "project", "summary": "edited",
+                              "body": "edited", "source": "ui", "project": "/p"});
+        let err = call(&mut session, "remember", &args).unwrap_err();
+        assert!(
+            err.contains("/f/imported.md") && err.contains("read-only"),
+            "{err}"
+        );
+        let err = call(
+            &mut session,
+            "forget",
+            &json!({"slug": "imported", "source": "ui", "project": "/p"}),
+        )
+        .unwrap_err();
+        assert!(err.contains("edit or delete that file"), "{err}");
+        let read = call_in(&mut session, "memory", json!({"slug": "imported"}));
+        assert_eq!(read["summary"], "From a file", "unchanged: {read}");
+        call_in(
+            &mut session,
+            "pin",
+            json!({"slug": "imported", "pinned": true}),
+        );
+        // The agent (source remember) may still rewrite and forget it, as before.
+        args["source"] = json!("remember");
+        call(&mut session, "remember", &args).unwrap();
+        assert_eq!(
+            call_in(&mut session, "forget", json!({"slug": "imported"}))["removed"],
+            true
+        );
+    }
+
+    #[test]
+    fn a_ui_memory_counts_as_written_in_the_graph_not_as_a_file() {
+        let mut session = conflict_store(&[("tabs", "project", "Indent with tabs")]);
+        remember_in(
+            &mut session,
+            json!({"slug": "spaces", "summary": "Indent with four spaces", "source": "ui"}),
+        );
+        call_in(
+            &mut session,
+            "settle",
+            json!({"slug": "spaces", "decision": "conflict", "other": "tabs"}),
+        );
+        let listed = call_in(&mut session, "conflicts", json!({"k": 5}));
+        let open = &listed["open"][0];
+        assert_eq!(open["a"]["source"], "ui", "{listed}");
+        assert!(open.get("files").is_none(), "no file to edit: {listed}");
+        // An imported memory near a UI memory waits for its check (another source).
+        let imported = remember_in(
+            &mut session,
+            json!({"slug": "indent-tabs", "summary": "Indent with tabs always",
+                   "from_file": {"path": "/d/indent-tabs.md", "dir": "/d"}}),
+        );
+        assert_eq!(imported["unchecked"], true, "{imported}");
+    }
+
+    #[test]
+    fn set_order_renumbers_in_one_unit_and_refuses_unknown_slugs() {
+        let mut session = conflict_store(&[
+            ("a", "project", "A"),
+            ("b", "project", "B"),
+            ("g", "global", "G"),
+        ]);
+        let done = call_in(&mut session, "set_order", json!({"slugs": ["b", "g", "a"]}));
+        assert_eq!(done["reordered"], 3, "{done}");
+        for (slug, order) in [("b", 10), ("g", 20), ("a", 30)] {
+            assert_eq!(
+                call_in(&mut session, "memory", json!({"slug": slug}))["order"],
+                order
+            );
+        }
+        let err = call(
+            &mut session,
+            "set_order",
+            &json!({"slugs": ["a", "missing", "b"], "project": "/p"}),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("missing") && err.contains("nothing was reordered"),
+            "{err}"
+        );
+        assert_eq!(
+            call_in(&mut session, "memory", json!({"slug": "a"}))["order"],
+            30
+        );
+        let err = call(
+            &mut session,
+            "set_order",
+            &json!({"slugs": ["a", "a"], "project": "/p"}),
+        )
+        .unwrap_err();
+        assert!(err.contains("twice"), "{err}");
+        // Another project's memory is not this project's.
+        let err = call(
+            &mut session,
+            "set_order",
+            &json!({"slugs": ["a"], "project": "/other"}),
+        )
+        .unwrap_err();
+        assert!(err.contains("no memory a"), "{err}");
+    }
+
+    #[test]
+    fn overview_and_session_list_count_what_the_ui_shows() {
+        let mut session = conflict_store(&[
+            ("tabs", "project", "Indent with tabs"),
+            ("spaces", "project", "Indent with spaces"),
+            ("g", "global", "Global rule"),
+        ]);
+        remember_in(
+            &mut session,
+            json!({"slug": "me", "kind": "user", "summary": "I am me"}),
+        );
+        call_in(&mut session, "pin", json!({"slug": "tabs"}));
+        call_in(
+            &mut session,
+            "settle",
+            json!({"slug": "spaces", "decision": "conflict", "other": "tabs"}),
+        );
+        let run = |session: &mut Session, script: &str| {
+            let answer: Value = serde_json::from_str(
+                &session.execute(script, &graphersal_session::RunOptions::default()),
+            )
+            .unwrap();
+            assert_eq!(answer["ok"], true, "{answer}");
+        };
+        for (id, at) in [
+            ("s1", "2026-11-10T10:00:00Z"),
+            ("s2", "2026-11-12T09:00:00Z"),
+        ] {
+            run(
+                &mut session,
+                &format!(
+                    "g.add_v(\"session\").property(T.id, \"session:{id}\").property(\"name\", \"headline {id}\").property(\"started_at\", \"{at}\").property(\"harness\", \"claude-code\").property(\"project\", \"/p\").iterate()"
+                ),
+            );
+        }
+        run(
+            &mut session,
+            "g.add_v(\"fact\").property(T.id, \"fact:s2:decision:0\").property(\"name\", \"d\").property(\"summary\", \"Decided x\").property(\"fact_kind\", \"decision\").property(\"project\", \"/p\").as(\"f\").V(\"session:s2\").add_e(\"contains\").to(\"f\").iterate()",
+        );
+        let counts = call_in(&mut session, "overview", json!({}));
+        assert_eq!(counts["memories"], 4, "{counts}");
+        assert_eq!(counts["project_memories"], 3, "{counts}");
+        assert_eq!(counts["global_memories"], 1, "{counts}");
+        assert_eq!(counts["user"], 1);
+        assert_eq!(counts["pinned"], 1);
+        assert_eq!(counts["open_conflicts"], 1);
+        assert_eq!(
+            counts["always_loaded"], 2,
+            "pinned tabs and the user memory: {counts}"
+        );
+        assert_eq!(counts["sessions"], 2);
+        assert_eq!(counts["facts"], 1);
+        let global = call(&mut session, "overview", &json!({"project": ""})).unwrap();
+        assert_eq!(global["memories"], 1, "{global}");
+        assert_eq!(global["sessions"], 0, "{global}");
+
+        let list = call_in(
+            &mut session,
+            "session_list",
+            json!({"before": "", "limit": 10}),
+        );
+        let rows = list.as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{list}");
+        assert_eq!(rows[0]["id"], "session:s2");
+        assert_eq!(rows[0]["decisions"], 1);
+        assert_eq!(rows[0]["harness"], "claude-code");
+        assert_eq!(rows[1]["decisions"], 0);
+        let older = call_in(
+            &mut session,
+            "session_list",
+            json!({"before": rows[0]["started_at"], "limit": 10}),
+        );
+        assert_eq!(older.as_array().unwrap().len(), 1, "{older}");
+        assert_eq!(older[0]["id"], "session:s1");
+        let other = call(
+            &mut session,
+            "session_list",
+            &json!({"before": "", "limit": 10, "project": "/q"}),
+        )
+        .unwrap();
+        assert_eq!(other, json!([]));
     }
 
     #[test]

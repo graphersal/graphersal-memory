@@ -18,7 +18,8 @@ graphersal-memory is built in stages, strictly in order. Each stage ships with t
 | **M7c** Done | OpenAI Codex CLI: MCP servers in `~/.codex/config.toml`, the rule block in `AGENTS.md`, SessionStart/SessionEnd hooks, past sessions from its rollout files, summaries through `codex exec`, bench with a local model, Codex's own memories switched off on request. |
 | **M7d** Done | Cursor: the MCP server in `~/.cursor/mcp.json`, a rule file of our own in `~/.cursor/rules`, sessionStart/sessionEnd hooks, past sessions from the transcripts the hooks name; no summaries or bench through Cursor's CLI. Tested against fixtures; the live check ([cursor-live-check.md](cursor-live-check.md)) is pending. |
 | **M8** Done | Store maintenance: automatic checkpoints after 16 MiB of WAL (a start replays at most about that), history older than 30 days pruned by the daemon (both in `config.json`), the default store opened at the daemon's start, store sizes and WAL in `status` and `doctor`, and the measured start time ([how it works](how-it-works.md#stores)). |
-| **M7** Later | The browser UI for develop mode; isolated project stores; a path for people who don't use a terminal, such as a desktop app and a Claude Desktop extension. |
+| **UI** Done | `graphersal-memory ui`: the browser UI for every user (overview, memories, what every session starts with, conflicts, past sessions), on loopback with a per-run token, every change through the memory functions. Still to come: the libraries without CDNs, a graph view, hygiene and settings beyond the start context budget. |
+| **M7** Later | Isolated project stores; a path for people who don't use a terminal, such as a desktop app and a Claude Desktop extension. |
 
 Ideas beyond M7: a code knowledge base as a second mode of the same tool, user-defined LLM tasks
 stored in the database (for example "extract open TODOs from sessions"), and sharing a successful

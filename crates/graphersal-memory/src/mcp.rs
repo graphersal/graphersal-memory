@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use graphersal::persist::Store;
 use graphersal_mcp::{Mcp, McpConfig, Profile};
-use graphersal_serve::{Context, Exposure, HostCheck, JobTicker, Runner};
+use graphersal_serve::{Context, Exposure, HostCheck, Job, JobTicker, Runner, Server};
 use graphersal_session::{Session, SessionPresets};
 use serde_json::{Value, json};
 
@@ -53,6 +53,13 @@ pub const DEVELOP_TOOLS: [&str; 14] = [
 /// How long [`StoreRuntime::close`] waits for scheduled-job runs still in progress before it
 /// closes the store anyway (a run finishing later drops its result).
 const BACKGROUND_PATIENCE: Duration = Duration::from_secs(30);
+
+/// The relay contexts a store keeps (one per `ui` port; the oldest goes first).
+const MAX_RELAYS: usize = 8;
+
+/// The value every MCP connection binds the memory functions' `source` parameter to: what an
+/// agent writes is recorded as the agent's (`"ui"` is the browser UI's, `crate::relay`).
+pub const AGENT_SOURCE: &str = "remember";
 
 /// The MCP configuration of a profile (what the agent sees), with the default memory language.
 #[cfg(test)]
@@ -279,6 +286,12 @@ pub struct StoreRuntime {
     /// The `use` profile's access policy (a connection with another language rebuilds the
     /// profile with it).
     use_policy: graphersal::auth::AccessPolicy,
+    /// The session's job queue (the relay contexts are built on it).
+    jobs: std::sync::mpsc::Sender<Job>,
+    /// The browser UI's access policy (`catalog::ui_policy`).
+    ui_policy: graphersal::auth::AccessPolicy,
+    /// The relay contexts of the browser UI, by the `ui` process's port (`StoreRuntime::relay`).
+    relays: Mutex<Vec<(u16, Arc<Server>)>>,
     /// The scheduled jobs' ticker ([`StoreRuntime::start_jobs`]), stopped by `close`.
     ticker: Mutex<Option<JobTicker>>,
     /// Held while the embedder switches (one switch at a time; the second sees the first's
@@ -304,14 +317,14 @@ impl StoreRuntime {
     ) -> Result<Self, String> {
         let store = store::open_or_create_with(dir, settings.store_options())?;
         let served = store.clone();
-        let (jobs, use_policy) = graphersal_serve::spawn_session(
+        let (jobs, (use_policy, ui_policy)) = graphersal_serve::spawn_session(
             SessionPresets::new(),
             move |session: &mut Session| -> Result<_, String> {
                 session
                     .attach_store(served, "memory")
                     .map_err(|err| err.to_string())?;
                 catalog::apply(session)?;
-                catalog::use_policy(session)
+                Ok((catalog::use_policy(session)?, catalog::ui_policy(session)?))
             },
             None,
         )
@@ -333,6 +346,9 @@ impl StoreRuntime {
             using: context(ProfileKind::Use)?,
             developing: context(ProfileKind::Develop)?,
             use_policy,
+            jobs,
+            ui_policy,
+            relays: Mutex::new(Vec::new()),
             store,
             ticker: Mutex::new(None),
             switching: Mutex::new(()),
@@ -445,6 +461,12 @@ impl StoreRuntime {
         ))
     }
 
+    /// The always-loaded memories of `project` (the catalog function `start_context`), unsorted.
+    pub fn start_entries(&self, project: &str) -> Result<Vec<crate::start_context::Entry>, String> {
+        let rows = self.call("start_context", json!({"project": project}))?;
+        Ok(crate::start_context::entries(&rows))
+    }
+
     /// [`Self::serve`] with the memory language rule and the start context of `connection` in
     /// the instructions (the start context as of the connection's start).
     pub fn serve_with(
@@ -485,13 +507,62 @@ impl StoreRuntime {
         };
         // The connection's project: hidden from the tool list, set on every call of a saved
         // query that declares it (the memory functions), whatever the client sent.
-        let profile = base.with_bound_params([(
-            catalog::PROJECT_PARAM.to_string(),
-            Value::String(project.to_string()),
-        )]);
+        // `source` likewise: what an agent writes is the agent's, never the browser UI's.
+        let profile = base.with_bound_params([
+            (
+                catalog::PROJECT_PARAM.to_string(),
+                Value::String(project.to_string()),
+            ),
+            (
+                catalog::SOURCE_PARAM.to_string(),
+                Value::String(AGENT_SOURCE.to_string()),
+            ),
+        ]);
         let connection = connection.with_profile(profile);
         graphersal_mcp::serve_lines(&connection, read, write)
             .map_err(|err| format!("the MCP stream failed: {}", err.message()))
+    }
+
+    /// Answers one relayed HTTP request of the browser UI whose `ui` process listens on `port`
+    /// (`crate::relay`): `graphersal-serve`'s `Server::handle` on this store's relay context in
+    /// allow-list mode (the memory functions and the UI's functions, under the UI's policy; its
+    /// `HostCheck` checks the forwarded `Host` and `Origin` for that port).
+    pub fn relay(
+        &self,
+        port: u16,
+        request: graphersal_serve::Request<'_>,
+    ) -> Result<graphersal_serve::Response, String> {
+        let server = self.relay_server(port)?;
+        Ok(server.handle(request))
+    }
+
+    /// The relay server of `port`, built on first use.
+    fn relay_server(&self, port: u16) -> Result<Arc<Server>, String> {
+        let mut relays = self
+            .relays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, server)) = relays.iter().find(|(p, _)| *p == port) {
+            return Ok(server.clone());
+        }
+        let url = format!("http://127.0.0.1:{port}/");
+        let context = Context::builder(
+            Runner::Session(self.jobs.clone()),
+            HostCheck::new(Exposure::Loopback, port, &url),
+        )
+        .store(Some(self.store.clone()))
+        .ui_profile(crate::ui_assets::profile()?)
+        .api_allow_list(crate::relay::selection(), self.ui_policy.clone())
+        .build();
+        let server = Arc::new(Server::new());
+        server
+            .ready(context)
+            .map_err(|err| format!("the UI's relay of {} cannot start: {err}", self.name))?;
+        if relays.len() >= MAX_RELAYS {
+            relays.remove(0);
+        }
+        relays.push((port, server.clone()));
+        Ok(server)
     }
 
     /// Runs the catalog function `name` (an internal one: the session indexing) with `args` on

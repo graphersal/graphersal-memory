@@ -31,7 +31,7 @@ const LONG_VERSION: &str = concat!(
         PRE-RELEASE: `install`, `uninstall`, `status`, `doctor`, `import`, `summaries` and \
         `bench` (for Claude Code, opencode 1.x and 2.x, and Codex; Cursor without summaries and \
         bench), `mcp` (the stdio server a harness starts; it shares one background daemon \
-        with every other session) and `daemon` work. Every other command says which stage delivers it; \
+        with every other session), `daemon` and `ui` (the browser UI) work. Every other command says which stage delivers it; \
         the plan is in docs/roadmap.md.",
     after_help = "Start with `graphersal-memory install`. \
         Docs: https://github.com/graphersal/graphersal-memory",
@@ -160,8 +160,20 @@ pub enum Command {
         #[arg(long, hide = true, value_name = "VERSION")]
         version_as: Option<String>,
     },
-    /// Open the memory in the browser (develop mode); runs while this terminal runs.
-    Ui,
+    /// Open your memory in the browser: see and manage what every session starts with, the
+    /// memories, conflicts and past sessions. Runs until Ctrl+C, or 15 minutes after its last
+    /// browser tab closed.
+    Ui {
+        /// Do not open the browser (open the printed address yourself).
+        #[arg(long)]
+        no_browser: bool,
+        /// The port on 127.0.0.1 to listen on (default: a free one).
+        #[arg(long, value_name = "PORT", default_value_t = 0)]
+        port: u16,
+        /// Exit after this long without a heartbeat of a browser tab (tests).
+        #[arg(long, hide = true, value_name = "DURATION", value_parser = parse_idle)]
+        heartbeat_timeout: Option<std::time::Duration>,
+    },
     /// Measure whether the memory helps: the built-in A/B on your own data (through
     /// `summaries.harness_command`: Claude Code's `claude -p`, opencode's `opencode run` or
     /// Codex's `codex exec --oss` with a local model).

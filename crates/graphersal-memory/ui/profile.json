@@ -1,0 +1,68 @@
+{
+  "name": "memory",
+  "title": "graphersal-memory",
+  "startTab": "overview",
+  "can": { "theme": true },
+  "files": "/memory-ui/",
+  "tabs": [
+    { "id": "overview", "title": "Overview", "module": "overview.js" },
+    { "id": "memory", "title": "Memory", "module": "memory.js" },
+    { "id": "always", "title": "Always loaded", "module": "always.js" },
+    { "id": "conflicts", "title": "Conflicts", "module": "conflicts.js" },
+    { "id": "sessions", "title": "Sessions", "module": "sessions.js" }
+  ],
+  "cards": {
+    "memory": {
+      "title": ["title", "slug"],
+      "subtitle": ["kind", "where", "source_text", { "field": "updated_at", "format": "date" }],
+      "badges": [
+        { "field": "pinned", "text": "pinned", "tone": "accent" },
+        { "field": "always", "text": "always loaded", "tone": "ok" },
+        { "field": "superseded_by", "prefix": "replaced by ", "tone": "warn" },
+        { "field": "has_conflict", "text": "conflict", "tone": "danger" },
+        { "field": "unchecked", "text": "to check", "tone": "warn" },
+        { "field": "imported", "text": "read-only" }
+      ],
+      "body": "body",
+      "excerpt": 140,
+      "fields": [
+        { "field": "slug", "title": "Name" },
+        { "field": "summary", "title": "Summary" },
+        { "field": "hook", "title": "Start line" },
+        { "field": "links", "title": "Links" },
+        { "field": "linked_from", "title": "Linked from" },
+        { "field": "about", "title": "About" },
+        { "field": "chain_text", "title": "Decision history" },
+        { "field": "conflict_text", "title": "Open conflict with" },
+        { "field": "note", "title": "Note" },
+        { "field": "file", "title": "File" },
+        { "field": "imported_at", "title": "Imported", "format": "datetime" }
+      ],
+      "actions": [
+        { "id": "edit", "text": "Edit", "unless": "imported" },
+        { "id": "pin", "text": "Pin", "unless": "pinned", "title": "Load it at the start of every session" },
+        { "id": "unpin", "text": "Unpin", "when": "pinned" },
+        { "id": "forget", "text": "Forget", "kind": "danger", "unless": "imported" }
+      ]
+    },
+    "session": {
+      "title": ["headline", "title", "id"],
+      "subtitle": [{ "field": "started_at", "format": "datetime" }, "harness", { "field": "turns", "prefix": "turns " }],
+      "badges": [
+        { "field": "decisions", "prefix": "decisions ", "tone": "accent" },
+        { "field": "corrections", "prefix": "corrections ", "tone": "warn" },
+        { "field": "open_threads", "prefix": "open threads ", "tone": "danger" }
+      ],
+      "fields": []
+    },
+    "fact": {
+      "title": "fact",
+      "badges": [
+        { "field": "kind", "tone": { "decision": "accent", "correction": "warn", "outcome": "ok", "open_thread": "danger" } }
+      ],
+      "subtitle": [{ "field": "at", "format": "date" }, "headline", "project_name"],
+      "body": "why",
+      "fields": []
+    }
+  }
+}

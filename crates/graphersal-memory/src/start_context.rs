@@ -529,6 +529,35 @@ pub fn render_with(
     }
 }
 
+/// The always-loaded memories of `entries` in the selection order ([`sort`]) as the browser UI
+/// shows them: each with its `tier` (`pinned`, `feedback`, `user`: the order groups `set_order`
+/// renumbers), its `group` in the text (the heading it is listed under) and whether the text
+/// shows it (the first `shown` ones) or cuts it for lack of room.
+pub fn entries_json(mut entries: Vec<Entry>, shown: usize) -> Value {
+    sort(&mut entries);
+    let rows: Vec<Value> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let tier = match rank(e) {
+                0 => "pinned",
+                1 => "feedback",
+                2 => "user",
+                _ => "other",
+            };
+            let group = GROUPS
+                .iter()
+                .find(|(_, belongs)| belongs(e))
+                .map_or("", |(heading, _)| heading.trim_start_matches("## "));
+            serde_json::json!({"slug": e.slug, "scope": e.scope, "kind": e.kind,
+                               "pinned": e.pinned, "order": e.order, "title": e.title,
+                               "hook": e.hook, "updated_at": e.updated_at, "tier": tier,
+                               "group": group, "shown": i < shown, "line": line(e)})
+        })
+        .collect();
+    Value::Array(rows)
+}
+
 /// The control line asking the daemon for the start context of the project root `project`
 /// (`""`: the global memories only), at most `max_chars` characters when given.
 pub fn control_line(project: &str, max_chars: Option<usize>) -> Value {

@@ -203,6 +203,17 @@
         "default": "project"
       },
       {
+        "name": "source",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "remember",
+            "ui"
+          ]
+        },
+        "default": "remember"
+      },
+      {
         "name": "project",
         "schema": {
           "type": "string"
@@ -221,6 +232,17 @@
           "type": "string",
           "pattern": "^[a-z0-9-]+$"
         }
+      },
+      {
+        "name": "source",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "remember",
+            "ui"
+          ]
+        },
+        "default": "remember"
       },
       {
         "name": "project",

@@ -1128,3 +1128,165 @@ fn the_start_context_leaves_out_superseded_memories_and_shows_open_conflicts() {
     let round = crate::start_context::StartContext::from_json(&context.to_json()).unwrap();
     assert_eq!(round.conflicts, context.conflicts);
 }
+
+/// One request to a store's relay context of the browser UI on port 4100 (`crate::relay`):
+/// its status and JSON body.
+fn relay(
+    runtime: &mcp::StoreRuntime,
+    method: &str,
+    target: &str,
+    host: &str,
+    body: Option<Value>,
+) -> (u16, Value) {
+    let bytes = body.map(|b| b.to_string()).unwrap_or_default().into_bytes();
+    let mut request = graphersal_serve::Request::new(
+        graphersal_serve::Method::parse(method),
+        target,
+        bytes.as_slice(),
+    )
+    .with_body_length(Some(bytes.len()))
+    .with_header("Host", host);
+    if !bytes.is_empty() {
+        request = request.with_header("Content-Type", "application/json");
+    }
+    let response = runtime.relay(4100, request).unwrap();
+    let body = serde_json::from_slice(response.body()).unwrap_or(Value::Null);
+    (response.status(), body)
+}
+
+/// `POST /api/query` of the relay: the status and the answer.
+fn ui_query(runtime: &mcp::StoreRuntime, name: &str, params: Value) -> (u16, Value) {
+    relay(
+        runtime,
+        "POST",
+        "/api/query",
+        "127.0.0.1:4100",
+        Some(json!({"name": name, "params": params})),
+    )
+}
+
+fn open_runtime(data: &Path) -> mcp::StoreRuntime {
+    mcp::StoreRuntime::open(
+        "default",
+        &crate::store::default_store_dir(data),
+        std::sync::Arc::new(mcp::endpoint()),
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_relay_answers_only_the_memory_and_ui_functions_behind_the_host_check() {
+    let data = TempDir::new("relay");
+    let runtime = open_runtime(data.path());
+    let (status, info) = relay(&runtime, "GET", "/api/info", "127.0.0.1:4100", None);
+    assert_eq!(status, 200, "{info}");
+    assert_eq!(info["apiMode"], "allow-list", "{info}");
+    assert_eq!(info["uiProfile"]["name"], "memory", "{info}");
+    let (status, _) = relay(&runtime, "GET", "/api/changes", "127.0.0.1:4100", None);
+    assert_eq!(status, 200);
+    for (method, target) in [
+        ("GET", "/api/graph"),
+        ("POST", "/api/execute"),
+        ("GET", "/api/schema"),
+    ] {
+        let (status, body) = relay(&runtime, method, target, "127.0.0.1:4100", None);
+        assert_eq!(status, 403, "{method} {target}: {body}");
+    }
+    // Another port's or host's request is refused before anything runs (the engine's loopback
+    // rules: `localhost` on the same port is the same machine).
+    let (status, _) = relay(&runtime, "GET", "/api/info", "localhost:4100", None);
+    assert_eq!(status, 200);
+    for host in [
+        "127.0.0.1:4101",
+        "evil.example:4100",
+        "localhost.evil.example:4100",
+    ] {
+        let (status, body) = relay(&runtime, "GET", "/api/info", host, None);
+        assert_eq!(status, 403, "{host}: {body}");
+    }
+    for name in crate::catalog::INTERNAL_FUNCTIONS {
+        let (status, body) = ui_query(&runtime, name, json!({}));
+        assert_eq!(status, 403, "{name}: {body}");
+    }
+    let (status, body) = ui_query(&runtime, "no_such_function", json!({}));
+    assert_eq!(status, 403, "{body}");
+    let (status, body) = ui_query(&runtime, "overview", json!({"project": ""}));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(body["results"][0]["memories"], 0, "{body}");
+    runtime.close().unwrap();
+}
+
+#[test]
+fn the_ui_writes_as_the_ui_and_an_agent_never_can() {
+    let data = TempDir::new("source");
+    let mut agent = Client::start(data.path(), ProfileKind::Use, "/work/a");
+    for tool in agent.tools() {
+        assert!(
+            tool["inputSchema"]["properties"].get("source").is_none(),
+            "{}: the source is bound, not offered",
+            tool["name"]
+        );
+    }
+    // An agent claiming to be the UI is recorded as the agent.
+    agent.ok(
+        "remember",
+        json!({"slug": "by-agent", "kind": "project", "summary": "s", "body": "b", "source": "ui"}),
+    );
+    let read = json_of(&agent.ok("memory", json!({"slug": "by-agent"})));
+    assert_eq!(read["source"], "remember", "{read}");
+    agent.ok(
+        "remember",
+        json!({"slug": "imported", "kind": "project", "summary": "from a file", "body": "b",
+               "from_file": {"path": "/f/imported.md"}}),
+    );
+    agent.close();
+    let project = crate::projects::resolve(data.path(), "/work/a").unwrap().id;
+    let runtime = open_runtime(data.path());
+    let (status, saved) = ui_query(
+        &runtime,
+        "remember",
+        json!({"slug": "by-ui", "kind": "feedback", "summary": "s", "body": "b",
+               "source": "ui", "project": project}),
+    );
+    assert_eq!(status, 200, "{saved}");
+    let (_, read) = ui_query(
+        &runtime,
+        "memory",
+        json!({"slug": "by-ui", "project": project}),
+    );
+    assert_eq!(read["results"][0]["source"], "ui", "{read}");
+    // An imported memory: no edit, no forget from the UI; pinning works.
+    let (_, refused) = ui_query(
+        &runtime,
+        "remember",
+        json!({"slug": "imported", "kind": "project", "summary": "x", "body": "x",
+               "source": "ui", "project": project}),
+    );
+    assert!(
+        refused.to_string().contains("read-only in the UI"),
+        "{refused}"
+    );
+    let (_, refused) = ui_query(
+        &runtime,
+        "forget",
+        json!({"slug": "imported", "source": "ui", "project": project}),
+    );
+    assert!(
+        refused.to_string().contains("edit or delete that file"),
+        "{refused}"
+    );
+    let (_, pinned) = ui_query(
+        &runtime,
+        "pin",
+        json!({"slug": "imported", "pinned": true, "project": project}),
+    );
+    assert_eq!(pinned["results"][0]["pinned"], true, "{pinned}");
+    let (_, read) = ui_query(
+        &runtime,
+        "memory",
+        json!({"slug": "imported", "project": project}),
+    );
+    assert_eq!(read["results"][0]["summary"], "from a file", "{read}");
+    runtime.close().unwrap();
+}

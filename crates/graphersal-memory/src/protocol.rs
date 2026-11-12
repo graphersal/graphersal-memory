@@ -23,6 +23,11 @@
 //!   1, "control": "start_context", "project", "max_chars"?}` answers the start context of a
 //!   project root (`crate::start_context::StartContext::to_json`).
 //!
+//! - or a relayed HTTP request of the browser UI: `{"protocol": 1, "relay": "http", "port",
+//!   "method", "target", "headers", "body_length", "shim_version"}` followed by the body; one
+//!   answer line and its body, then the daemon closes the connection (`crate::relay`). An older
+//!   daemon refuses it as a bad handshake.
+//!
 //! A refusal is `{"ok": false, "daemon_version", "error": {"code", "message"}}`; the codes are
 //! the [`Refusal`] variants. `restarting` and `stopping` are retried by the shim (the daemon
 //! exits; the next attempt starts a new one).
@@ -153,6 +158,8 @@ pub enum Opening {
     Handshake(Handshake),
     /// A control request (`status`, `stop`).
     Control(String),
+    /// A relayed HTTP request of the browser UI (`crate::relay`).
+    Relay(crate::relay::Frame),
 }
 
 /// Parses the first line of a connection; the error is the refusal to answer.
@@ -182,6 +189,11 @@ pub fn parse_opening(line: &[u8]) -> Result<Opening, (Refusal, String)> {
                  the shim and the daemon"
             ),
         ));
+    }
+    if object.contains_key("relay") {
+        return crate::relay::parse(object)
+            .map(Opening::Relay)
+            .map_err(|message| (Refusal::BadHandshake, message));
     }
     if let Some(control) = object.get("control") {
         let control = control

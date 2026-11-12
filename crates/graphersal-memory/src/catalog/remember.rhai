@@ -1,17 +1,22 @@
-fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, order, links, about, supersedes, from_file, scope, project) {
+fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, order, links, about, supersedes, from_file, scope, source, project) {
     // A project memory needs a project; without one (no project known) it is global.
     let scoped = scope == "project" && project != "";
     let id = if scoped { "memory:" + slug + "@" + project } else { "memory:" + slug };
     let other = if scoped { "memory:" + slug } else if project != "" { "memory:" + slug + "@" + project } else { "" };
     let visible = if project == "" { __.not(__.has("project")) }
                   else { __.or(__.not(__.has("project")), __.has("project", project)) };
+    // source "ui" (the browser UI): an imported memory stays read-only there (its file is
+    // the one to edit).
+    if source == "ui" && g.v(id).has("imported_at").count().next() > 0 {
+        return #{error: "the memory " + slug + " was imported from " + g.v(id).values("source").next() + ": edit that file instead (an imported memory is read-only in the UI)"};
+    }
     let now = g.gql("RETURN CURRENT_TIMESTAMP AS t").next()["t"];
     let text = body;
     text.trim();
     if why != "" { text += "\n\n**Why:** " + why; }
     if how_to_apply != "" { text += (if why == "" { "\n\n" } else { "\n" }) + "**How to apply:** " + how_to_apply; }
     let p = #{name: slug, kind: kind, summary: summary, body: text, embed_text: slug + ": " + summary,
-              origin: "curated", visibility: "private", source: "user", updated_at: now};
+              origin: "curated", visibility: "private", source: if source == "ui" { "ui" } else { "user" }, updated_at: now};
     // from_file (the file-memory import only): the file it came from and when that file last
     // changed (the decision time); imported_at is when it was imported.
     let imported = false;
@@ -99,7 +104,7 @@ fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, o
         nearest.push(g.v(h.id).project("slug", "scope", "kind", "summary", "source", "updated_at")
             .by("name").by(__.coalesce(__.values("project").constant("project"), __.constant("global")))
             .by("kind").by("summary")
-            .by(__.choose(__.has("imported_at"), __.coalesce(__.values("source"), __.constant("remember")), __.constant("remember")))
+            .by(__.choose(__.has("imported_at"), __.coalesce(__.values("source"), __.constant("remember")), __.choose(__.has("source", "ui"), __.constant("ui"), __.constant("remember"))))
             .by(__.coalesce(__.values("updated_at").as_string(), __.constant(""))).next());
     }
     if nearest.len() > 0 {
@@ -117,7 +122,7 @@ fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, o
         if imported && from_file.contains("dir") && type_of(from_file.dir) == "string" { dir = from_file.dir; }
         let foreign = 0;
         for n in nearest {
-            if dir == "" || n.source == "remember" || !n.source.starts_with(dir) { foreign += 1; }
+            if dir == "" || n.source == "remember" || n.source == "ui" || !n.source.starts_with(dir) { foreign += 1; }
         }
         if imported && foreign > 0 && g.v(id).in_("supersedes").has_label("memory").filter(visible).count().next() == 0 {
             g.v(id).property("unchecked", true).iterate();

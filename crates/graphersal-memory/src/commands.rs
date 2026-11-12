@@ -5,6 +5,7 @@
 
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::cli::{
@@ -49,7 +50,7 @@ pub fn planned_stage(command: &Command) -> (&'static str, &'static str) {
             ("M2", "the shared daemon and the stdio shim")
         }
         Command::Bench { .. } => ("M5", "the built-in A/B"),
-        Command::Ui => ("M7", "the browser UI for develop mode"),
+        Command::Ui { .. } => ("UI", "the browser UI"),
     }
 }
 
@@ -62,7 +63,7 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::Doctor => "doctor",
         Command::Mcp { .. } => "mcp",
         Command::Daemon { .. } => "daemon",
-        Command::Ui => "ui",
+        Command::Ui { .. } => "ui",
         Command::Bench { .. } => "bench",
         Command::Import { .. } => "import",
         Command::Summaries { .. } => "summaries",
@@ -429,10 +430,29 @@ pub fn run_cli(
                 run_bench(cli, &request, &mut BufReader::new(stdin), &mut stdout)
             }
         }
-        command @ (Command::Ui
-        | Command::Export {
+        Command::Ui {
+            no_browser,
+            port,
+            heartbeat_timeout,
+        } => location(cli).and_then(|location| {
+            let (data_dir, run_dir) = dirs(cli)?;
+            let setup = setup_with(cli, false);
+            let report: Arc<dyn Fn() -> serde_json::Value + Send + Sync> =
+                Arc::new(move || ui_report(&data_dir, &run_dir, setup.as_ref()));
+            crate::ui::run(
+                crate::ui::UiOptions {
+                    location,
+                    port: *port,
+                    open_browser: !*no_browser,
+                    heartbeat_timeout: heartbeat_timeout.unwrap_or(crate::ui::HEARTBEAT_TIMEOUT),
+                    report,
+                },
+                &mut stdout,
+            )
+        }),
+        command @ Command::Export {
             to_files: false, ..
-        }) => {
+        } => {
             return run(command, stderr);
         }
     };
@@ -1675,6 +1695,31 @@ fn describe(status: &serde_json::Value) -> String {
     )
 }
 
+/// The `status` and `doctor` text of the browser UI (`/api/ui/status`): plain lines, no
+/// colour; read-only like both commands.
+fn ui_report(data_dir: &Path, run_dir: &Path, setup: Result<&Setup, &String>) -> serde_json::Value {
+    let lines = |text: &str| -> Vec<String> {
+        crate::ui::plain(text).lines().map(str::to_string).collect()
+    };
+    let status = status_text_for(
+        data_dir,
+        run_dir,
+        setup.map_err(String::as_str),
+        false,
+        None,
+    )
+    .unwrap_or_else(|err| err);
+    let doctor = match setup {
+        Ok(setup) => {
+            let mut text = Vec::new();
+            doctor(setup, &mut text);
+            String::from_utf8_lossy(&text).into_owned()
+        }
+        Err(err) => err.clone(),
+    };
+    serde_json::json!({"status": lines(&status), "doctor": lines(&doctor)})
+}
+
 /// `status`: the daemon, the data directory, the settings and what is installed in Claude Code.
 fn status(cli: &Cli, mut stdout: impl Write) -> Result<(), String> {
     let (data_dir, run_dir) = dirs(cli)?;
@@ -1986,17 +2031,16 @@ mod tests {
 
     #[test]
     fn every_command_reports_its_stage_and_exits_2() {
-        for (name, stage) in [("ui", "M7"), ("export", "M7")] {
-            let cli = Cli::try_parse_from(["graphersal-memory", name]).unwrap();
-            let mut err = Vec::new();
-            assert_eq!(run(&cli.command, &mut err), 2);
-            let text = String::from_utf8(err).unwrap();
-            assert!(
-                text.starts_with(&format!("graphersal-memory {name}: not implemented yet")),
-                "{text}"
-            );
-            assert!(text.contains(&format!("stage {stage}")), "{text}");
-        }
+        let (name, stage) = ("export", "M7");
+        let cli = Cli::try_parse_from(["graphersal-memory", name]).unwrap();
+        let mut err = Vec::new();
+        assert_eq!(run(&cli.command, &mut err), 2);
+        let text = String::from_utf8(err).unwrap();
+        assert!(
+            text.starts_with(&format!("graphersal-memory {name}: not implemented yet")),
+            "{text}"
+        );
+        assert!(text.contains(&format!("stage {stage}")), "{text}");
     }
 
     #[test]
