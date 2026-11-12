@@ -211,7 +211,7 @@ anything changes.
   that arrives while it opens waits for it and then answers from the complete store (never a
   partial answer). Answering calls that need no vectors before the model is loaded would need an
   engine option to load schema models at the first embedding instead of at the open, which
-  engine 0.6.0 does not have.
+  the engine (0.6.x) does not have.
 - Background work (backups, checkpoints, session indexing, summaries, imports) runs off the thread
   that answers the agent, so a long job never makes a memory lookup wait. The daemon ticks each
   store's scheduled jobs and runs them on worker threads of their own; the session indexing runs
