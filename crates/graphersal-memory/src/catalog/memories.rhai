@@ -1,4 +1,7 @@
 fn memories(text, k, kind, project) {
+    if kind != "" && !["user", "feedback", "project", "reference"].contains(kind) {
+        return #{error: "unknown kind " + kind + ": use user, feedback, project or reference (empty: every kind)"};
+    }
     let visible = if project == "" { __.not(__.has("project")) }
                   else { __.or(__.not(__.has("project")), __.has("project", project)) };
     if text == "" {

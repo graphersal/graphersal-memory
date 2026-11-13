@@ -362,6 +362,48 @@ fn the_use_profile_refuses_every_tool_but_the_memory_functions() {
     develop.close();
 }
 
+/// Every string in `value` that sits in an `enum` list, with its JSON path.
+fn empty_enum_values(value: &Value, path: &str, found: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, inner) in map {
+                if key == "enum" {
+                    for item in inner.as_array().into_iter().flatten() {
+                        if item.as_str() == Some("") {
+                            found.push(format!("{path}.enum"));
+                        }
+                    }
+                }
+                empty_enum_values(inner, &format!("{path}.{key}"), found);
+            }
+        }
+        Value::Array(items) => {
+            for (i, inner) in items.iter().enumerate() {
+                empty_enum_values(inner, &format!("{path}[{i}]"), found);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn no_tool_schema_has_an_empty_enum_value_which_gemini_refuses() {
+    // Gemini's API refuses the whole request when a tool parameter's enum holds "" (opencode
+    // with Gemini Flash, 2026-11-13: "function_declarations[5].parameters.properties[kind]
+    // .enum[0]: cannot be empty").
+    let data = TempDir::new("enums");
+    for kind in [ProfileKind::Use, ProfileKind::Develop] {
+        let mut client = Client::start(data.path(), kind, "/work/a");
+        let mut found = Vec::new();
+        for tool in client.tools() {
+            let name = tool["name"].as_str().unwrap_or_default().to_string();
+            empty_enum_values(&tool["inputSchema"], &name, &mut found);
+        }
+        client.close();
+        assert!(found.is_empty(), "empty enum values: {found:?}");
+    }
+}
+
 #[test]
 fn the_develop_profile_adds_the_structure_tools() {
     let data = TempDir::new("develop");
