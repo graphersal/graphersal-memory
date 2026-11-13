@@ -821,6 +821,49 @@ impl Daemon {
         Ok(answer)
     }
 
+    /// `sync_instructions` (`crate::instructions`): the rules of the instruction files the
+    /// request names become the project's `instruction` vertices, then the nearest memories of
+    /// the new ones are looked up in batches for [`crate::instructions::SCAN_BUDGET`] (the rest
+    /// at the next sync).
+    fn sync_instructions(&self, line: &[u8]) -> Result<serde_json::Value, String> {
+        let request: serde_json::Value =
+            serde_json::from_slice(line).map_err(|err| err.to_string())?;
+        let root = request["project"].as_str().unwrap_or_default();
+        let project = if root.is_empty() {
+            String::new()
+        } else {
+            self.resolve_project(root)
+        };
+        let files = request["files"].as_array().cloned().unwrap_or_default();
+        let (rules, notes) = crate::instructions::read_rules(&files, root, &project);
+        let store = self.store_for(&project)?;
+        let synced = store
+            .call(
+                "sync_instructions",
+                json!({"project": project, "rules": rules}),
+            )
+            .inspect_err(|_| self.check_alive(&store))?;
+        let deadline = Instant::now() + crate::instructions::SCAN_BUDGET;
+        let mut pending = synced["pending"].as_u64().unwrap_or(0);
+        let mut found = 0;
+        while pending > 0 && Instant::now() < deadline {
+            let scan = store
+                .call(
+                    "scan_instructions",
+                    json!({"project": project, "limit": crate::instructions::SCAN_BATCH}),
+                )
+                .inspect_err(|_| self.check_alive(&store))?;
+            found += scan["found"].as_u64().unwrap_or(0);
+            pending = scan["remaining"].as_u64().unwrap_or(0);
+            if scan["capped"] == true {
+                break;
+            }
+        }
+        Ok(json!({"ok": true, "rules": synced["rules"], "created": synced["created"],
+                  "updated": synced["updated"], "removed": synced["removed"], "found": found,
+                  "pending": pending, "notes": notes}))
+    }
+
     /// `export_memories`: every memory (or one project's and the global ones) with what the
     /// file memory format keeps (`uninstall`, `export --to-files`).
     fn export_memories(&self, line: &[u8]) -> Result<serde_json::Value, String> {
@@ -1253,14 +1296,18 @@ impl Daemon {
                 Ok(done) => done.to_string(),
                 Err(err) => protocol::refusal(Refusal::Store, &self.with_log(&err)),
             },
+            crate::instructions::CONTROL => match self.sync_instructions(line) {
+                Ok(done) => done.to_string(),
+                Err(err) => protocol::refusal(Refusal::Store, &self.with_log(&err)),
+            },
             // Answered first; `handle` then shuts the daemon down.
             "stop" => json!({"ok": true, "daemon_version": self.options.version}).to_string(),
             other => protocol::refusal(
                 Refusal::BadHandshake,
                 &format!(
                     "unknown control request '{other}' (expected status, stop, index_sessions, \
-                     sessions_status, apply_settings, export_memories, merge_projects or \
-                     start_context)"
+                     sessions_status, apply_settings, export_memories, merge_projects, \
+                     start_context or sync_instructions)"
                 ),
             ),
         }

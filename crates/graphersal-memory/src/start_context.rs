@@ -16,7 +16,10 @@
 //! - **Conflicts** (M12): a superseded memory never appears (the catalog function leaves it
 //!   out); the open conflicts between the project's and the global memories follow the groups,
 //!   both versions with their files (`open_conflicts`, at most [`MAX_CONFLICTS`]), and a line
-//!   counts the imported memories waiting for their conflict check, both naming `conflicts()`.
+//!   counts the imported memories waiting for their conflict check, both naming `conflicts()`;
+//!   then the memories that contradict a line of an instruction file the harness loads (the
+//!   memory and the file's line, at most [`MAX_CONFLICTS`]) and one line counting the memories
+//!   near such a line not yet checked (`crate::instructions`, [`render_all`]).
 //! - **Delivery**: the session-start hooks print it (Claude Code: `additionalContext`; Codex:
 //!   the same JSON; Cursor: `additional_context`), and the `use` server's instructions of a
 //!   connection carry it, unless the connection says its harness's hook delivers it
@@ -122,16 +125,67 @@ impl Conflict {
     }
 }
 
-/// The open conflicts and the unchecked count of the catalog function `open_conflicts`.
-pub fn conflicts(value: &Value) -> (Vec<Conflict>, usize) {
-    let side = |row: &Value| Side {
+/// A memory that contradicts a line of an instruction file the harness loads
+/// (`crate::instructions`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuleConflict {
+    /// The memory.
+    pub memory: Side,
+    /// The instruction file.
+    pub file: String,
+    /// The line of the rule in it.
+    pub line: u64,
+    /// The rule's text.
+    pub text: String,
+}
+
+impl RuleConflict {
+    /// The `status` line: the memory with its source, and the file's line.
+    pub fn status_line(&self) -> String {
+        let memory = if self.memory.file.is_empty() {
+            format!("{} (remember)", self.memory.slug)
+        } else {
+            format!("{} (file {})", self.memory.slug, self.memory.file)
+        };
+        format!("{memory} vs {}:{}", self.file, self.line)
+    }
+}
+
+/// The open conflicts between memories and lines of instruction files, and how many such
+/// candidates wait for their check, of the catalog function `open_conflicts` (none from an
+/// older daemon).
+pub fn rule_conflicts(value: &Value) -> (Vec<RuleConflict>, usize) {
+    let open = value["rules_open"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row["memory"]["slug"].is_string())
+        .map(|row| RuleConflict {
+            memory: side_of(&row["memory"]),
+            file: row["file"].as_str().unwrap_or_default().to_string(),
+            line: row["line"].as_u64().unwrap_or(0),
+            text: row["text"].as_str().unwrap_or_default().to_string(),
+        })
+        .collect();
+    let unchecked = value["rules_unchecked"].as_u64().unwrap_or(0) as usize;
+    (open, unchecked)
+}
+
+/// One memory of an `open_conflicts` row.
+fn side_of(row: &Value) -> Side {
+    Side {
         slug: row["slug"].as_str().unwrap_or_default().to_string(),
         scope: row["scope"].as_str().unwrap_or_default().to_string(),
         title: row["title"].as_str().unwrap_or_default().to_string(),
         hook: row["hook"].as_str().unwrap_or_default().to_string(),
         always: row["always"] == Value::Bool(true),
         file: row["file"].as_str().unwrap_or_default().to_string(),
-    };
+    }
+}
+
+/// The open conflicts and the unchecked count of the catalog function `open_conflicts`.
+pub fn conflicts(value: &Value) -> (Vec<Conflict>, usize) {
+    let side = side_of;
     let open = value["open"]
         .as_array()
         .into_iter()
@@ -191,6 +245,10 @@ pub struct StartContext {
     pub conflicts: Vec<String>,
     /// How many imported memories wait for their conflict check.
     pub unchecked: usize,
+    /// The open conflicts between memories and lines of instruction files, one line each.
+    pub rule_conflicts: Vec<String>,
+    /// How many candidates (a memory near a line of an instruction file) wait for their check.
+    pub rules_unchecked: usize,
 }
 
 impl StartContext {
@@ -245,6 +303,24 @@ impl StartContext {
                 if self.unchecked == 1 { "y" } else { "ies" }
             ));
         }
+        if !self.rule_conflicts.is_empty() {
+            lines.push(format!(
+                "memory conflicts: {} memor{} contradict{} a line of your instruction files; \
+                 ask your agent which holds (conflicts()), or edit the file",
+                self.rule_conflicts.len(),
+                if self.rule_conflicts.len() == 1 { "y" } else { "ies" },
+                if self.rule_conflicts.len() == 1 { "s" } else { "" }
+            ));
+            lines.extend(self.rule_conflicts.iter().map(|line| format!("  {line}")));
+        }
+        if self.rules_unchecked > 0 {
+            lines.push(format!(
+                "memory conflicts: {} memor{} near a line of your instruction files not yet \
+                 checked (your agent: conflicts())",
+                self.rules_unchecked,
+                if self.rules_unchecked == 1 { "y" } else { "ies" }
+            ));
+        }
         lines
     }
 
@@ -265,6 +341,21 @@ impl StartContext {
                 if self.unchecked == 1 { "y" } else { "ies" }
             ));
         }
+        if !self.rule_conflicts.is_empty() {
+            parts.push(format!(
+                "{} memor{} contradict{} your instruction files",
+                self.rule_conflicts.len(),
+                if self.rule_conflicts.len() == 1 { "y" } else { "ies" },
+                if self.rule_conflicts.len() == 1 { "s" } else { "" }
+            ));
+        }
+        if self.rules_unchecked > 0 {
+            parts.push(format!(
+                "{} memor{} to check against your instruction files",
+                self.rules_unchecked,
+                if self.rules_unchecked == 1 { "y" } else { "ies" }
+            ));
+        }
         if parts.is_empty() {
             String::new()
         } else {
@@ -276,7 +367,9 @@ impl StartContext {
     pub fn to_json(&self) -> Value {
         serde_json::json!({"ok": true, "text": self.text, "shown": self.shown,
                            "total": self.total, "chars": self.chars(), "budget": self.budget,
-                           "conflicts": self.conflicts, "unchecked": self.unchecked})
+                           "conflicts": self.conflicts, "unchecked": self.unchecked,
+                           "rule_conflicts": self.rule_conflicts,
+                           "rules_unchecked": self.rules_unchecked})
     }
 
     /// The daemon's answer read back (`None` when it is not one).
@@ -299,6 +392,17 @@ impl StartContext {
                 })
                 .unwrap_or_default(),
             unchecked: count("unchecked").unwrap_or(0),
+            rule_conflicts: value["rule_conflicts"]
+                .as_array()
+                .map(|lines| {
+                    lines
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            rules_unchecked: count("rules_unchecked").unwrap_or(0),
         })
     }
 }
@@ -390,9 +494,20 @@ fn side_text(side: &Side) -> String {
     }
 }
 
-/// The conflict part of the text: the open conflicts (both versions) and the unchecked count;
-/// empty when there is neither.
-fn conflicts_text(conflicts: &[Conflict], unchecked: usize) -> String {
+/// The heading of the conflicts between memories and lines of instruction files.
+const RULE_CONFLICTS_HEADING: &str = "## Memories that contradict your instruction files (ask the \
+                                      user which holds: forget the memory, or the user edits the \
+                                      file; conflicts() lists them)";
+
+/// The conflict part of the text: the open conflicts (both versions), the unchecked count, the
+/// memories that contradict lines of instruction files and how many such candidates wait for
+/// their check; empty when there is none of them.
+fn conflicts_text(
+    conflicts: &[Conflict],
+    unchecked: usize,
+    rules: &[RuleConflict],
+    rules_unchecked: usize,
+) -> String {
     let mut out = String::new();
     if !conflicts.is_empty() {
         out.push_str(CONFLICTS_HEADING);
@@ -419,6 +534,42 @@ fn conflicts_text(conflicts: &[Conflict], unchecked: usize) -> String {
              conflicts() lists {}.",
             if unchecked == 1 { "y is" } else { "ies are" },
             if unchecked == 1 { "it" } else { "them" }
+        ));
+    }
+    if !rules.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(RULE_CONFLICTS_HEADING);
+        for rule in rules.iter().take(MAX_CONFLICTS) {
+            let text = one_line(&rule.text);
+            let text: String = if text.chars().count() > MAX_CONFLICT_HOOK_CHARS {
+                let cut: String = text.chars().take(MAX_CONFLICT_HOOK_CHARS - 1).collect();
+                format!("{}…", cut.trim_end())
+            } else {
+                text
+            };
+            out.push_str(&format!(
+                "\n- {}\n  CONTRADICTS {} line {}: {text}",
+                side_text(&rule.memory),
+                rule.file,
+                rule.line
+            ));
+        }
+        if rules.len() > MAX_CONFLICTS {
+            out.push_str(&format!("\n{} more: conflicts().", rules.len() - MAX_CONFLICTS));
+        }
+    }
+    if rules_unchecked > 0 {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "{rules_unchecked} memor{} near lines of your instruction files {} not yet checked \
+             for a contradiction: conflicts() lists {}.",
+            if rules_unchecked == 1 { "y" } else { "ies" },
+            if rules_unchecked == 1 { "is" } else { "are" },
+            if rules_unchecked == 1 { "it" } else { "them" }
         ));
     }
     out
@@ -485,15 +636,35 @@ pub fn render(entries: Vec<Entry>, budget: usize) -> StartContext {
 /// [`render`] with the open `conflicts` and the `unchecked` count after the groups (the text
 /// is empty only when there is neither and no entry, or the budget is 0).
 pub fn render_with(
-    mut entries: Vec<Entry>,
+    entries: Vec<Entry>,
     conflicts: Vec<Conflict>,
     unchecked: usize,
     budget: usize,
 ) -> StartContext {
+    render_all(entries, conflicts, unchecked, (Vec::new(), 0), budget)
+}
+
+/// [`render_with`] with the memories that contradict lines of instruction files and how many
+/// such candidates wait for their check (`rules`, from [`rule_conflicts`]) after the conflicts.
+pub fn render_all(
+    mut entries: Vec<Entry>,
+    conflicts: Vec<Conflict>,
+    unchecked: usize,
+    rules: (Vec<RuleConflict>, usize),
+    budget: usize,
+) -> StartContext {
     sort(&mut entries);
     let total = entries.len();
+    let (rules, rules_unchecked) = rules;
     let lines: Vec<String> = conflicts.iter().map(Conflict::status_line).collect();
-    if (total == 0 && conflicts.is_empty() && unchecked == 0) || budget == 0 {
+    let rule_lines: Vec<String> = rules.iter().map(RuleConflict::status_line).collect();
+    if (total == 0
+        && conflicts.is_empty()
+        && unchecked == 0
+        && rules.is_empty()
+        && rules_unchecked == 0)
+        || budget == 0
+    {
         return StartContext {
             text: String::new(),
             shown: 0,
@@ -501,9 +672,11 @@ pub fn render_with(
             budget,
             conflicts: lines,
             unchecked,
+            rule_conflicts: rule_lines,
+            rules_unchecked,
         };
     }
-    let conflict_text = conflicts_text(&conflicts, unchecked);
+    let conflict_text = conflicts_text(&conflicts, unchecked, &rules, rules_unchecked);
     let all: Vec<&Entry> = entries.iter().collect();
     // The longest prefix whose text fits (the text grows with the prefix, so a binary search
     // finds it; the "more" line shrinks by at most a few characters as the prefix grows, which
@@ -534,6 +707,8 @@ pub fn render_with(
         budget,
         conflicts: lines,
         unchecked,
+        rule_conflicts: rule_lines,
+        rules_unchecked,
     }
 }
 
@@ -619,6 +794,7 @@ pub fn request_running(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn entry(slug: &str, kind: &str, pinned: bool, order: Option<i64>, at: &str) -> Entry {
         Entry {
@@ -830,6 +1006,51 @@ mod tests {
              imported memories to check: conflicts()."
         );
         assert_eq!(context.conflict_lines().len(), 3);
+    }
+
+    #[test]
+    fn memories_against_instruction_files_follow_the_conflicts_with_the_file_line() {
+        let open = json!({"open": [], "unchecked": 0, "rules_unchecked": 3, "rules_open": [
+            {"memory": {"slug": "use-pnpm", "scope": "project", "title": "Use pnpm",
+                        "hook": "Install with pnpm", "always": true, "file": ""},
+             "file": "/w/CLAUDE.md", "line": 12, "text": "Always use npm for packages."}]});
+        let (conflicts, unchecked) = conflicts(&open);
+        let context = render_all(
+            Vec::new(),
+            conflicts,
+            unchecked,
+            rule_conflicts(&open),
+            DEFAULT_CHARS,
+        );
+        assert_eq!(
+            context.text,
+            format!(
+                "{HEADLINE}\n\n{RULE_CONFLICTS_HEADING}\n- Use pnpm — Install with pnpm (memory: \
+                 use-pnpm, always loaded)\n  CONTRADICTS /w/CLAUDE.md line 12: Always use npm for \
+                 packages.\n3 memories near lines of your instruction files are not yet checked \
+                 for a contradiction: conflicts() lists them.\n\n{FOOTER}"
+            )
+        );
+        assert_eq!(context.rule_conflicts, ["use-pnpm (remember) vs /w/CLAUDE.md:12"]);
+        assert_eq!(context.rules_unchecked, 3);
+        assert_eq!(
+            context.start_note(),
+            " 1 memory contradicts your instruction files; 3 memories to check against your \
+             instruction files: conflicts()."
+        );
+        let lines = context.conflict_lines();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].contains("1 memory contradicts a line of your instruction files"));
+        assert_eq!(lines[1], "  use-pnpm (remember) vs /w/CLAUDE.md:12");
+        assert!(lines[2].contains("3 memories near a line of your instruction files"));
+        // The daemon's answer carries both, and an older one's neither.
+        assert_eq!(StartContext::from_json(&context.to_json()), Some(context.clone()));
+        let older = StartContext::from_json(&json!({"text": "", "shown": 0, "total": 0,
+                                                    "budget": 10})).unwrap();
+        assert!(older.rule_conflicts.is_empty() && older.rules_unchecked == 0);
+        // Nothing of it: no text.
+        let none = render_all(Vec::new(), Vec::new(), 0, (Vec::new(), 0), DEFAULT_CHARS);
+        assert!(none.text.is_empty());
     }
 
     #[test]

@@ -29,6 +29,7 @@ mod harness;
 mod hook;
 mod import;
 mod install;
+mod instructions;
 #[cfg(test)]
 mod install_tests;
 mod ipc;

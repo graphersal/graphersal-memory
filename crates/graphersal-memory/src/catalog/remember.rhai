@@ -37,6 +37,10 @@ fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, o
     if type_of(pinned) == "bool" { p.pinned = pinned; }
     // order: a number sets the priority within its group; null keeps what the memory has.
     if type_of(order) == "i64" { p.order = order; }
+    // The text before this write: a changed text ends the decisions on its old text.
+    let before = g.v(id).project("s", "b").by(__.coalesce(__.values("summary"), __.constant("")))
+        .by(__.coalesce(__.values("body"), __.constant(""))).to_list();
+    let text_changed = before.len() == 0 || before[0].s != summary || before[0].b != text;
     let created = g.v(id).count().next() == 0;
     if created {
         let mx = g.v().has_label("memory").values("index_order").max().to_list();
@@ -132,6 +136,30 @@ fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, o
         }
     } else if imported {
         g.v(id).properties("unchecked").drop().iterate();
+    }
+    // The lines of the harness's instruction files nearest to the memory (the same scoring and
+    // limits as scan_instructions): candidates of the conflict check, kept until settled. A
+    // project memory is checked against its project's lines, a global one against every line
+    // it sees.
+    if text_changed {
+        g.v(id).in_e("compared_with").drop().iterate();
+        let lines = g.query("recall", #{text: slug + ": " + summary, k: 12, label: "instruction", project: project});
+        let floor = 0.15;
+        if lines.len() >= 12 && lines[11].score * 1.5 > floor { floor = lines[11].score * 1.5; }
+        let rules = [];
+        for h in lines {
+            if rules.len() >= 3 || h.score < floor { break; }
+            if h.keywords <= 0.0 && h.semantic < 0.45 { continue; }
+            if scoped && g.v(h.id).has("project").count().next() == 0 { continue; }
+            g.merge_e(#{"T.label": "compared_with", "Direction.OUT": h.id, "Direction.IN": id})
+                .option(Merge.onCreate, #{origin: "instructions", source: "derived", visibility: "private", decision: "unchecked", at: now}).iterate();
+            let r = g.v(h.id).project("file", "line", "text").by("file").by("line").by("text").next();
+            rules.push(#{rule: h.id.sub_string(12), file: r.file, line: r.line, text: r.text});
+        }
+        if rules.len() > 0 {
+            out.instruction_lines = rules;
+            out.check_lines = "These lines of instruction files the harness loads are near the new memory; most are merely on a similar topic. If the memory contradicts a line, record it with settle(\"" + slug + "\", \"conflict\", rule: <rule>) and ask the user which holds; if both hold, settle(\"" + slug + "\", \"compatible\", rule: <rule>). Never edit an instruction file yourself.";
+        }
     }
     out
 }

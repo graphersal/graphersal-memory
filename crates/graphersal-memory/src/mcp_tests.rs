@@ -1332,3 +1332,84 @@ fn the_ui_writes_as_the_ui_and_an_agent_never_can() {
     assert_eq!(read["results"][0]["summary"], "from a file", "{read}");
     runtime.close().unwrap();
 }
+
+#[test]
+fn memories_against_instruction_files_reach_conflicts_settle_and_the_start_context() {
+    let data = TempDir::new("ic-mcp");
+    let files = TempDir::new("ic-mcp-files");
+    let claude = files.path().join("CLAUDE.md");
+    std::fs::write(
+        &claude,
+        "# Rules\n\n- Always use npm for installing packages, never another package manager.\n\
+         - Write commit messages in the imperative mood.\n",
+    )
+    .unwrap();
+    let runtime = mcp::StoreRuntime::open(
+        "default",
+        &crate::store::default_store_dir(data.path()),
+        std::sync::Arc::new(mcp::endpoint()),
+    )
+    .unwrap();
+    let id = crate::projects::resolve(data.path(), "/work/a").unwrap().id;
+    let (rules, notes) = crate::instructions::read_rules(
+        &[json!({"path": claude.display().to_string(), "global": false,
+                 "loaded_by": ["claude-code"]})],
+        &files.path().display().to_string(),
+        &id,
+    );
+    assert!(notes.is_empty(), "{notes:?}");
+    let synced = runtime
+        .call("sync_instructions", json!({"project": id, "rules": rules}))
+        .unwrap();
+    assert_eq!(synced["created"], 2, "{synced}");
+    runtime.close().unwrap();
+
+    let mut client = Client::start(data.path(), ProfileKind::Use, "/work/a");
+    remember_kind(&mut client, "dark-theme", "user", "global", json!({}));
+    let answer: Value = json_of(&client.ok(
+        "remember",
+        json!({"slug": "use-pnpm", "kind": "feedback", "summary": "Install dependencies with pnpm, not npm",
+               "body": "Install dependencies with pnpm, not npm."}),
+    ));
+    let rule = answer["instruction_lines"][0]["rule"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{answer}"))
+        .to_string();
+    assert_eq!(answer["instruction_lines"][0]["line"], 3, "{answer}");
+    let listed: Value = json_of(&client.ok("conflicts", json!({}))).unwrap();
+    assert_eq!(listed["rules_unchecked"][0]["memory"]["slug"], "use-pnpm", "{listed}");
+    let settled: Value = json_of(&client.ok(
+        "settle",
+        json!({"slug": "use-pnpm", "decision": "conflict", "rule": rule}),
+    ));
+    assert_eq!(settled["rule_conflicts"], 1, "{settled}");
+    client.close();
+
+    let context = start_context_of(data.path(), "/work/a", crate::start_context::DEFAULT_CHARS);
+    assert!(
+        context.text.contains(&format!(
+            "(memory: use-pnpm, always loaded)\n  CONTRADICTS {} line 3: Always use npm",
+            claude.display()
+        )),
+        "{}",
+        context.text
+    );
+    assert_eq!(
+        context.rule_conflicts,
+        [format!("use-pnpm (remember) vs {}:3", claude.display())]
+    );
+    assert!(
+        context
+            .start_note()
+            .contains("1 memory contradicts your instruction files"),
+        "{}",
+        context.start_note()
+    );
+    // status and doctor print these lines (from the daemon's answer).
+    let round = crate::start_context::StartContext::from_json(&context.to_json()).unwrap();
+    assert!(
+        round.conflict_lines()[0].contains("contradicts a line of your instruction files"),
+        "{:?}",
+        round.conflict_lines()
+    );
+}

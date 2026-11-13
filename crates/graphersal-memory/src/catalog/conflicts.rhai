@@ -1,7 +1,8 @@
 fn conflicts(k, project) {
     // What waits for a decision in this project's and the global memories: open conflicts
-    // (both versions), imported memories not yet checked against their nearest memories, and
-    // the project memories that narrow a global one.
+    // (both versions), imported memories not yet checked against their nearest memories, the
+    // project memories that narrow a global one, and memories against the lines of the
+    // harness's instruction files near them (open conflicts and candidates still to check).
     let visible = if project == "" { __.not(__.has("project")) }
                   else { __.or(__.not(__.has("project")), __.has("project", project)) };
     let open = [];
@@ -55,7 +56,46 @@ fn conflicts(k, project) {
         .filter(__.in_("supersedes").has_label("memory").filter(visible))
         .project("slug", "file", "superseded_by").by("name").by("source")
         .by(__.in_("supersedes").has_label("memory").filter(visible).values("name").limit(1)).to_list();
+    // Memories against lines of instruction files (compared_with: instruction -> memory), the
+    // superseded memories left out.
+    let lines = g.v().has_label("instruction").filter(visible).out_e("compared_with")
+        .filter(__.in_v().filter(visible).not(__.in_("supersedes").has_label("memory").filter(visible)))
+        .project("rule", "memory", "decision", "since", "file", "line")
+        .by(__.out_v().id()).by(__.in_v().id()).by(__.coalesce(__.values("decision"), __.constant("unchecked")))
+        .by(__.coalesce(__.values("at").as_string(), __.constant("")))
+        .by(__.out_v().values("file")).by(__.out_v().values("line")).to_list();
+    let rules_open = [];
+    let rules_unchecked = [];
+    let rules_total = 0;
+    for pair in lines {
+        if pair.decision == "compatible" { continue; }
+        if pair.decision != "conflict" {
+            rules_total += 1;
+            if rules_unchecked.len() >= k { continue; }
+        }
+        let row = #{since: if pair.since.len() >= 10 { pair.since.sub_string(0, 10) } else { pair.since }};
+        row.memory = g.v(pair.memory).project("slug", "scope", "kind", "summary", "source", "updated_at")
+            .by("name").by(__.coalesce(__.values("project").constant("project"), __.constant("global")))
+            .by("kind").by("summary")
+            .by(__.choose(__.has("imported_at"), __.coalesce(__.values("source"), __.constant("remember")), __.choose(__.has("source", "ui"), __.constant("ui"), __.constant("remember"))))
+            .by(__.coalesce(__.values("updated_at").as_string(), __.constant(""))).next();
+        row.rule = g.v(pair.rule).project("file", "line", "text", "scope", "loaded_by")
+            .by("file").by("line").by("text")
+            .by(__.coalesce(__.values("project").constant("project"), __.constant("global")))
+            .by(__.coalesce(__.values("loaded_by"), __.constant(""))).next();
+        row.rule.rule = pair.rule.sub_string(12);
+        if pair.decision == "conflict" { rules_open.push(row); } else { rules_unchecked.push(row); }
+    }
     let out = #{open: open, unchecked: unchecked, unchecked_total: all.len()};
+    if rules_open.len() > 0 {
+        out.rules_open = rules_open;
+        out.settle_rules = "Each memory contradicts a line of an instruction file the harness loads. Ask the user which holds. The memory is outdated: forget it, or remember the new rule with supersedes: [<slug>] (an imported memory: the user edits or deletes its file too). The file is outdated: tell the user to edit that file at that line (never edit it yourself); the conflict closes when the line changes or goes. Both hold after all: settle(<slug>, \"compatible\", rule: <rule>).";
+    }
+    if rules_total > 0 {
+        out.rules_unchecked = rules_unchecked;
+        out.rules_unchecked_total = rules_total;
+        out.check_rules = "Each pair is a memory and a line of an instruction file the harness loads near it; most are merely on a similar topic. Per pair pick ONE: compatible (both can hold: different subject, scope, tool or an explicit exception; a project's rule that narrows a global memory is compatible; the default): settle(<slug>, \"compatible\", rule: <rule>); conflict (following one would break the other): settle(<slug>, \"conflict\", rule: <rule>) and ask the user which holds. Decide from the texts. Never edit an instruction file yourself.";
+    }
     if narrows.len() > 0 { out.narrows = narrows; }
     if stale.len() > 0 {
         out.stale_files = stale;
