@@ -22,14 +22,7 @@
       {
         "name": "kind",
         "schema": {
-          "type": "string",
-          "enum": [
-            "",
-            "user",
-            "feedback",
-            "project",
-            "reference"
-          ]
+          "type": "string"
         },
         "default": ""
       },
