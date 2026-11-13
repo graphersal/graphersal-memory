@@ -71,6 +71,10 @@ export default {
       await one(props.api, 'pin', { slug: entry.slug, pinned: !entry.pinned, order: null, project: state.selection });
       props.api.toast('success', entry.pinned ? `Unpinned "${entry.slug}".` : `Pinned "${entry.slug}".`);
     });
+    const unmark = (entry) => act(entry.slug, async () => {
+      await one(props.api, 'pin', { slug: entry.slug, pinned: false, order: null, project: state.selection });
+      props.api.toast('success', `"${entry.slug}" now follows its section's order (still always loaded).`);
+    });
     async function editLine(entry) {
       line.problem = '';
       try {
@@ -102,7 +106,7 @@ export default {
     });
     return {
       context, groups, cut, bar, warnings, settings, budget, error, busy, line, state, model,
-      move, togglePin, editLine, saveLine, saveBudget, rowOf, selectionName, entries,
+      move, togglePin, unmark, editLine, saveLine, saveBudget, rowOf, selectionName, entries,
       isFirst: (entry) => model.moved(entries.value, entry.slug, -1) === null,
       isLast: (entry) => model.moved(entries.value, entry.slug, 1) === null,
     };
@@ -129,12 +133,17 @@ export default {
       <p v-if="!entries.length" class="muted">Nothing is loaded at the start yet: pin a memory, or add a "how to work" or "about you" memory.</p>
       <section v-for="group in groups" :key="group.id" class="mem-group">
         <h3>{{ group.title }}</h3>
+        <p v-if="group.note" class="muted mem-section-note">{{ group.note }}</p>
         <div v-for="entry in group.entries" :key="entry.scope + entry.slug" class="mem-entry" :class="{cut: !entry.shown}">
           <span class="mem-moves">
             <button class="icon" type="button" :disabled="!!busy || isFirst(entry)" :aria-label="'Move ' + entry.slug + ' up'" title="Move up" @click="move(entry, -1)">↑</button>
             <button class="icon" type="button" :disabled="!!busy || isLast(entry)" :aria-label="'Move ' + entry.slug + ' down'" title="Move down" @click="move(entry, 1)">↓</button>
           </span>
-          <label class="mem-pin" :title="entry.pinned ? 'Unpin' : 'Pin: always load it'"><input type="checkbox" :checked="entry.pinned" :disabled="!!busy" @change="togglePin(entry)"> pinned</label>
+          <label v-if="model.pinControls(group, entry).checkbox" class="mem-pin" :title="entry.pinned ? 'Unpin' : 'Pin: always load it'"><input type="checkbox" :checked="entry.pinned" :disabled="!!busy" @change="togglePin(entry)"> pinned</label>
+          <span v-else-if="model.pinControls(group, entry).keptFirst" class="mem-pin">
+            <span class="mem-kept-badge" :title="model.KEPT_FIRST_TITLE">kept first</span>
+            <button class="icon" type="button" :disabled="!!busy" :aria-label="'Remove the kept-first mark of ' + entry.slug" title="Remove the mark (it stays always loaded)" @click="unmark(entry)">×</button>
+          </span>
           <div class="mem-entry-text">
             <template v-if="line.slug === entry.slug && line.scope === entry.scope">
               <input v-model="line.text" class="mem-line-input" :aria-label="'Start line of ' + entry.slug">
@@ -145,7 +154,7 @@ export default {
             <template v-else>
               <strong>{{ entry.title }}</strong> — {{ entry.hook }}
               <span class="muted"> · {{ entry.scope === 'global' ? 'global' : 'project' }} · {{ entry.slug }}</span>
-              <span v-if="!entry.shown" class="mem-cut-badge">cut: no room</span>
+              <span v-for="label in model.reachLabels(entry)" :key="label.id" class="mem-cut-badge" :title="label.title">{{ label.text }}</span>
             </template>
           </div>
           <button v-if="!(line.slug === entry.slug && line.scope === entry.scope) && !rowOf(entry).imported" class="btn small" type="button" @click="editLine(entry)">Edit line</button>

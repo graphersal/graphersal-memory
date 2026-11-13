@@ -39,6 +39,16 @@ pub const START_LOCK_FILE: &str = "daemon.start.lock";
 /// The daemon's log file.
 pub const LOG_FILE: &str = "daemon.log";
 
+/// The marker a daemon leaves when it was stopped on purpose (the `stop` control request of
+/// `uninstall` and `purge`): an open shim or `ui` whose connection ended does not start a new
+/// daemon while it exists (`crate::shim`'s reconnect). The next daemon removes it at its start.
+pub const STOPPED_FILE: &str = "daemon.stopped";
+
+/// Whether the daemon of `run_dir` was stopped on purpose ([`STOPPED_FILE`]).
+pub fn stopped_on_purpose(run_dir: &Path) -> bool {
+    run_dir.join(STOPPED_FILE).exists()
+}
+
 /// The longest socket path the platforms accept (`sun_path` is 104 bytes on macOS and the BSDs,
 /// 108 on Linux and Windows; one byte for the terminating zero).
 const MAX_SOCKET_PATH: usize = 103;

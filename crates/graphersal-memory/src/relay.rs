@@ -17,7 +17,6 @@
 //! Bodies are limited to graphersal-serve's `MAX_BODY_BYTES` both ways.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -182,20 +181,20 @@ pub struct Answer {
     pub body: Vec<u8>,
 }
 
-/// Relays one request to the daemon of `run_dir` (which must run: the `ui` process keeps a
-/// connection open) and reads its answer. A refusal of the daemon is an error with its message.
+/// Relays one request to the daemon at `location` (started when none answers, as after a
+/// daemon restart: `crate::shim::connect_again`) and reads its answer. A refusal of the daemon
+/// is an error with its message.
 pub fn send(
-    run_dir: &Path,
+    location: &crate::shim::DaemonLocation,
     port: u16,
     method: &str,
     target: &str,
     headers: &[(String, String)],
     body: &[u8],
 ) -> Result<Answer, String> {
-    let log = run_dir.join(crate::ipc::LOG_FILE);
+    let log = location.run_dir.join(crate::ipc::LOG_FILE);
     let failed = |what: String| format!("the daemon failed: {what}; see {}", log.display());
-    let stream = crate::ipc::connect(run_dir)
-        .map_err(|err| format!("the daemon is not reachable ({err}); start the UI again"))?;
+    let stream = crate::shim::connect_again(location)?;
     let mut writer = stream
         .try_clone()
         .map_err(|err| format!("cannot use the daemon's socket: {err}"))?;

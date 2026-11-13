@@ -199,3 +199,36 @@ test('the Always loaded list follows the text: How to work, About you, Pinned', 
   assert.equal(m.moved(entries, 'p1', -1), null, 'never into How to work');
   assert.deepEqual(m.moved(entries, 'p2', -1), ['fp', 'p2', 'p1']);
 });
+
+test('How to work and About you have no pin checkbox; a pinned one there is "kept first"', () => {
+  const entries = [
+    { slug: 'fp', tier: 'pinned', group: 'How to work', pinned: true, shown: true },
+    { slug: 'f1', tier: 'feedback', group: 'How to work', pinned: false, shown: true },
+    { slug: 'u1', tier: 'user', group: 'About you', pinned: false, shown: true },
+    { slug: 'p1', tier: 'pinned', group: 'Pinned', pinned: true, shown: true },
+  ];
+  const [work, about, pinned] = m.sections(entries);
+  assert.deepEqual(m.pinControls(work, entries[0]), { checkbox: false, keptFirst: true });
+  assert.deepEqual(m.pinControls(work, entries[1]), { checkbox: false, keptFirst: false });
+  assert.deepEqual(m.pinControls(about, entries[2]), { checkbox: false, keptFirst: false });
+  assert.deepEqual(m.pinControls(pinned, entries[3]), { checkbox: true, keptFirst: false });
+  // The notes say they are always loaded and name the cut order of start_context::sort.
+  for (const section of [work, about]) {
+    assert.match(section.note, /^Always loaded/);
+    assert.match(section.note, /About you, then How to work, then Pinned/);
+  }
+  assert.equal(pinned.note, '');
+  assert.match(m.KEPT_FIRST_TITLE, /cut last/);
+});
+
+test('memories that do not fully reach the agent are labelled with what it gets instead', () => {
+  assert.deepEqual(m.reachLabels({ slug: 'a', shown: true, shortened: false }), []);
+  const cut = m.reachLabels({ slug: 'a', shown: false, shortened: true });
+  assert.deepEqual(cut.map((l) => l.text), ['cut: no room'], 'a cut entry is not also "shortened"');
+  assert.match(cut[0].title, /memory\("a"\)/);
+  const short = m.reachLabels({ slug: 'long', shown: true, shortened: true, shown_hook_chars: 299 });
+  assert.deepEqual(short.map((l) => l.text), ['shortened']);
+  assert.match(short[0].title, /first 299 characters/);
+  assert.match(short[0].title, /memory\("long"\)/);
+  assert.deepEqual(m.reachLabels(null), []);
+});

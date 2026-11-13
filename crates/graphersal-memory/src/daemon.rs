@@ -334,6 +334,8 @@ pub fn run(options: DaemonOptions) -> Result<(), String> {
             ));
         }
     }
+    // A new daemon runs: open shims and `ui` may reconnect (and start one) again.
+    let _ = std::fs::remove_file(options.run_dir.join(ipc::STOPPED_FILE));
     // We hold the pid lock: a socket file left here belongs to no running daemon.
     match std::fs::remove_file(&socket) {
         Ok(()) => log(&format!("removed the stale socket {}", socket.display())),
@@ -1027,6 +1029,14 @@ impl Daemon {
                 }));
                 match answered {
                     Ok(text) => {
+                        if control == "stop" {
+                            // Before the answer and the socket's end: an open shim that sees
+                            // its connection end finds it and does not start a new daemon.
+                            let marker = self.options.run_dir.join(ipc::STOPPED_FILE);
+                            if let Err(err) = std::fs::write(&marker, "stop requested\n") {
+                                log(&format!("cannot write {}: {err}", marker.display()));
+                            }
+                        }
                         answer(text);
                         if control == "stop" {
                             self.shutdown("stop requested");

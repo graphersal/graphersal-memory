@@ -185,7 +185,7 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `render` within the budget (groups like `MEMORY.md`, "N more not shown"), `StartContext`
     (`status_line`, the control-line JSON), `request`/`request_running` (the daemon's
     `start_context` control line; `project_id` uses an id as it is, `entries` adds the
-    always-loaded memories in selection order with tier, group and shown, `entries_json`);
+    always-loaded memories in selection order with tier, group, shown and `shortened` (the hook cut at `MAX_HOOK_CHARS`), `entries_json`);
   - `src/config.rs`: `<data dir>/config.json` (`daemon.idle`, `memory.language`,
     `memory.start_context_chars`,
     `embedding.model`, `summaries.enabled|harness_command|monthly_budget_usd|since`,
@@ -254,7 +254,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     FNV-1a fingerprint;
   - `src/ipc.rs`: the run directory (`--run-dir`, `GRAPHERSAL_MEMORY_RUN_DIR`, `<data dir>/run`
     for an explicit data directory, the platform's default), its files (`daemon.sock`,
-    `daemon.pid`, `daemon.start.lock`, `daemon.log`; a default whose socket path is too long
+    `daemon.pid`, `daemon.start.lock`, `daemon.log`, `daemon.stopped` (`STOPPED_FILE`: written by a `stop`
+    control request, removed by the next daemon's start; `stopped_on_purpose`); a default whose socket path is too long
     becomes `short_run_dir`, `/tmp/graphersal-memory-<fingerprint of the data dir>`), the socket types per platform (std on
     Unix, `uds_windows` on Windows), `LockFile` (`fd-lock`);
   - `src/ui.rs`: `graphersal-memory ui` (stage UI): the loopback HTTP server (`tiny_http`, port 0 or
@@ -263,7 +264,7 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `ui-<pid>.html` in the run directory (0600; removed at the first heartbeat and on exit; older
     ones swept at start), the browser opened on the file's path only, the heartbeat exit
     (`HEARTBEAT_TIMEOUT` 15 min, hidden `--heartbeat-timeout` for tests), one `use` handshake
-    held open so the daemon stays (reconnects), `/api/ui/*` answered itself (`status` with the
+    held open so the daemon stays (reconnects, starting a daemon unless `shim::may_start` says no), `/api/ui/*` answered itself (`status` with the
     `status`/`doctor` lines from `commands::ui_report`, `projects`, `start-context` (the control
     line with `project_id` + `entries`), `settings` GET/POST of `memory.start_context_chars`
     only, `heartbeat`), every other `/api/` relayed (`crate::relay`), static files: the
@@ -271,7 +272,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `index.html` with `/memory-ui/boot.js` added);
   - `src/relay.rs`: the relay frame (opening `{"protocol", "relay": "http", "port", "method",
     "target", "headers", "body_length"}` + body; answer line + body; only `FORWARDED_HEADERS`,
-    never the token; bodies up to serve's `MAX_BODY_BYTES`), `send` (the `ui` side) and
+    never the token; bodies up to serve's `MAX_BODY_BYTES`), `send` (the `ui` side, through
+    `shim::connect_again`: a daemon that went away is started again) and
     `selection` (the memory functions + `catalog::UI_FUNCTIONS`, never an internal one);
   - `src/ui_assets.rs` + `ui/`: the `memory` profile built into the binary (`profile.json`: tabs
     Overview, Memory, Always loaded, Conflicts, Sessions as modules, cards `memory`, `session`,
@@ -290,9 +292,14 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     free `daemon.pid`, detached spawn, timeout naming the log; on Windows the spawning process's
     standard handles are made non-inheritable first, `keep_std_handles_from_children`, one of the
     two `unsafe` blocks of the crate), the handshake with retries on
-    `restarting`/`stopping`, then a byte relay (`run_with`, with optional `Events`: the session
+    `restarting`/`stopping`, then a line relay (`run_with`, with optional `Events`: the session
     start's work on a thread after the handshake, the end's after the input closed; notes to
-    stderr, never stdout); `control` (status/stop); `exchange` reads a one-line answer of up to
+    stderr, never stdout) that survives a daemon restart: `Book` (the harness's `initialize`, its
+    `notifications/initialized`, the ids in flight), on the connection's end the in-flight
+    requests answered `RESTARTED_CODE`, `open_with` again until the start timeout, the opening
+    replayed under a shim-internal id, `notifications/tools/list_changed` when the daemon's
+    version changed; `may_start`/`connect_again` (no new daemon after one was stopped on purpose,
+    `ipc::STOPPED_FILE`); `control` (status/stop); `exchange` reads a one-line answer of up to
     `MAX_ANSWER_BYTES` (an export carries every memory) and reports a missing, cut or non-JSON
     answer as "the daemon failed ...; see <daemon.log>";
   - `src/daemon.rs`: the daemon: pid lock, socket, one thread per connection, routing by the
@@ -356,7 +363,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `tests/daemon_tests.rs`: the real binary as shims and daemon (every platform; the permission
     test Unix only): shared daemon,
     parallel calls, idle exit, stale socket, killed daemon, start race, handshake errors, upgrade
-    and drain, `daemon`/`status`, permissions. Each test has its own temporary data/run/home
+    and drain, `daemon`/`status`, permissions, a daemon restart under an open session (the next
+    call through a new daemon, an in-flight request answered with an error (Unix: SIGSTOP),
+    the session start not repeated, a version change announced, a `stop` not undone). Each test has its own temporary data/run/home
     directories (`GRAPHERSAL_MEMORY_DIR`, `GRAPHERSAL_MEMORY_RUN_DIR`, short
     `GRAPHERSAL_MEMORY_IDLE`) and stops (or kills) every daemon it started.
   - `tests/install_tests.rs`: the real binary's install/status/doctor/hook/uninstall/purge on a
@@ -372,7 +381,7 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     GETs leave the commit position unchanged, the relay refuses internal functions, a round trip
     create -> list -> edit -> pin -> set_order -> preview -> budget -> settle -> forget, imported
     memories refused, the launch file (0600, gone at the first heartbeat), the heartbeat exit with
-    the daemon kept alive meanwhile.
+    the daemon kept alive meanwhile, `/api/...` answered after a daemon restart.
   - `tests/bench_tests.rs`: the real binary's `bench` with a fake `claude` on `PATH` that records
     its calls (dry run: zero calls; a run through the harness: the flags of every call, the live
     store and the sources unchanged, the spend in the report; Unix only, shell-script fakes).

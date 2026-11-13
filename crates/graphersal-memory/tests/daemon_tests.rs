@@ -99,8 +99,14 @@ impl Env {
     }
 
     fn spawn_shim(&self, project: &str, extra: &[&str]) -> Shim {
-        let mut child = self
-            .command()
+        self.spawn_shim_env(project, extra, &[])
+    }
+
+    /// [`Env::spawn_shim`] with extra environment variables.
+    fn spawn_shim_env(&self, project: &str, extra: &[&str], vars: &[(&str, &str)]) -> Shim {
+        let mut command = self.command();
+        command.envs(vars.iter().copied());
+        let mut child = command
             .arg("mcp")
             .arg("--project")
             .arg(project)
@@ -428,12 +434,10 @@ fn a_killed_daemon_is_restarted_by_the_next_shim() {
     let pid = env.status().unwrap()["pid"].as_u64().unwrap();
     kill(pid);
     env.wait_for("the kill", || !alive(pid));
-    // The open session notices: its shim ends with an error naming the log.
-    assert!(first.answer().is_none());
-    let (ok, stderr) = first.close();
-    assert!(!ok);
-    assert!(stderr.contains("daemon.log"), "{stderr}");
-    // The next session starts a new daemon; the committed memory survived.
+    // The open session reconnects (and starts a new daemon) instead of ending: see
+    // `a_daemon_restart_keeps_the_open_session`.
+    close_ok(first);
+    // The next session finds a new daemon; the committed memory survived.
     let mut next = env.shim("/w/k");
     let read = next.ok("memory", json!({"slug": "before-kill"}));
     assert!(read.contains("Written before the crash"), "{read}");
@@ -966,4 +970,196 @@ fn the_start_context_reaches_the_instructions_the_cli_and_status() {
         .unwrap();
     let doctor = String::from_utf8(output.stdout).unwrap();
     assert!(doctor.contains("start context: 2 memories,"), "{doctor}");
+}
+
+/// A stopped (SIGSTOP) process continues; Unix only (the in-flight test).
+#[cfg(unix)]
+fn signal(pid: u64, name: &str) {
+    let status = Command::new("kill")
+        .arg(format!("-{name}"))
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -{name} {pid}");
+}
+
+/// The daemon's pid, waiting until one answers that is not `old`.
+fn new_daemon(env: &Env, old: u64) -> u64 {
+    let mut pid = None;
+    env.wait_for("a new daemon", || {
+        pid = env
+            .status()
+            .and_then(|status| status["pid"].as_u64())
+            .filter(|pid| *pid != old);
+        pid.is_some()
+    });
+    pid.unwrap()
+}
+
+#[test]
+fn a_daemon_restart_keeps_the_open_session() {
+    let env = Env::new("10m");
+    let mut shim = env.shim("/w/r");
+    shim.remember("before-restart", "Written before the restart", "project");
+    let pid = env.status().unwrap()["pid"].as_u64().unwrap();
+    kill(pid);
+    env.wait_for("the kill", || !alive(pid));
+    // The next call goes through a new daemon, without a new initialize from the harness
+    // (the shim replays the session's own).
+    let read = shim.ok("memory", json!({"slug": "before-restart"}));
+    assert!(read.contains("Written before the restart"), "{read}");
+    shim.remember("after-restart", "Written after the restart", "project");
+    let new = new_daemon(&env, pid);
+    assert!(alive(new));
+    // The replayed initialize answered nothing to the harness: the next answer is its own.
+    let listed = shim.request("tools/list", json!({}));
+    assert!(listed["result"]["tools"].is_array(), "{listed}");
+    // The same project is bound on the new connection.
+    let mut other = env.shim("/w/r");
+    let read = other.ok("memory", json!({"slug": "after-restart"}));
+    assert!(read.contains("Written after the restart"), "{read}");
+    close_ok(other);
+    let (ok, stderr) = shim.close();
+    assert!(ok, "{stderr}");
+    assert!(stderr.contains("reconnected to the daemon"), "{stderr}");
+    // The new daemon logged one more connection, the replayed handshake.
+    assert!(
+        env.log().contains("connection opened: profile use"),
+        "{}",
+        env.log()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_request_in_flight_at_the_restart_gets_an_error_answer() {
+    let env = Env::new("10m");
+    let mut shim = env.shim("/w/f");
+    shim.remember("kept", "Kept across the restart", "project");
+    let pid = env.status().unwrap()["pid"].as_u64().unwrap();
+    // A stopped daemon reads nothing: the request is in flight for sure when it dies.
+    signal(pid, "STOP");
+    let id = shim.send_request(
+        "tools/call",
+        json!({"name": "memory", "arguments": {"slug": "kept"}}),
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    signal(pid, "KILL");
+    env.wait_for("the kill", || !alive(pid));
+    let answer = shim.answer().expect("an answer, not silence");
+    assert_eq!(answer["id"], json!(id), "{answer}");
+    assert_eq!(answer["error"]["code"], -32000, "{answer}");
+    let message = answer["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("restarted") && message.contains("retry"),
+        "{message}"
+    );
+    // The retry works through the new daemon.
+    let read = shim.ok("memory", json!({"slug": "kept"}));
+    assert!(read.contains("Kept across the restart"), "{read}");
+    close_ok(shim);
+}
+
+#[test]
+fn a_restart_does_not_repeat_the_session_start_and_the_end_reaches_the_new_daemon() {
+    let env = Env::new("10m");
+    // Claude Code's sessions directory: the shim's session start queues their indexing.
+    std::fs::create_dir_all(env.root.join(".claude").join("projects")).unwrap();
+    let project = env.root.join("w");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut shim = env.spawn_shim_env(&project.display().to_string(), &[], &[("CLAUDECODE", "1")]);
+    let init = shim.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {},
+               "clientInfo": {"name": "test", "version": "1"}}),
+    );
+    assert!(init["result"].is_object(), "{init}");
+    shim.notify("notifications/initialized");
+    let requested = || {
+        env.control("sessions_status")
+            .and_then(|status| status["requested"].as_u64())
+    };
+    env.wait_for("the session start's indexing request", || {
+        requested().is_some_and(|n| n >= 1)
+    });
+    let pid = env.status().unwrap()["pid"].as_u64().unwrap();
+    kill(pid);
+    env.wait_for("the kill", || !alive(pid));
+    let listed = shim.request("tools/list", json!({}));
+    assert!(listed["result"]["tools"].is_array(), "{listed}");
+    let new = new_daemon(&env, pid);
+    // A moment for a start that would run again: none comes.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        requested(),
+        Some(0),
+        "the session start ran once, on the first daemon"
+    );
+    // The session ends: its end work goes to the daemon that runs now.
+    let (ok, stderr) = shim.close();
+    assert!(ok, "{stderr}");
+    assert_eq!(env.status().unwrap()["pid"].as_u64(), Some(new));
+    assert_eq!(requested(), Some(1), "the session end queued once");
+}
+
+#[test]
+fn a_daemon_stopped_on_purpose_is_not_started_again_by_an_open_session() {
+    let env = Env::new("10m");
+    let shim = env.shim("/w/s");
+    let pid = env.status().unwrap()["pid"].as_u64().unwrap();
+    // `purge` and `uninstall` stop the daemon this way.
+    assert_eq!(env.control("stop").unwrap()["ok"], true);
+    env.wait_for("the stop", || !alive(pid));
+    let mut shim = shim;
+    assert!(shim.answer().is_none(), "the shim ends");
+    let (ok, stderr) = shim.close();
+    assert!(!ok);
+    assert!(stderr.contains("stopped on purpose"), "{stderr}");
+    assert!(env.status().is_none(), "no daemon was started again");
+    assert!(env.run_dir().join("daemon.stopped").exists());
+    // A new session starts one as always, which removes the marker.
+    let next = env.shim("/w/s");
+    assert!(!env.run_dir().join("daemon.stopped").exists());
+    close_ok(next);
+}
+
+#[test]
+fn a_daemon_of_another_version_after_the_restart_announces_a_new_tool_list() {
+    let env = Env::new("10m");
+    // A newer daemon serves an older shim; this one says it is newer than this binary.
+    let mut newer = env
+        .command()
+        .args(["daemon", "--foreground", "--version-as", "99.0.0"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    env.wait_for("the newer daemon", || env.status().is_some());
+    let mut shim = env.shim("/w/v");
+    assert_eq!(env.status().unwrap()["daemon_version"], "99.0.0");
+    newer.kill().unwrap();
+    newer.wait().unwrap();
+    // The new daemon is this binary's version: the harness hears that the tools may differ.
+    let id = shim.send_request("tools/list", json!({}));
+    let deadline = Instant::now() + PATIENCE;
+    let mut announced = false;
+    loop {
+        let line = shim.from.recv_timeout(PATIENCE).unwrap();
+        let message: Value = serde_json::from_str(&line).unwrap();
+        if message["method"] == "notifications/tools/list_changed" {
+            announced = true;
+        }
+        if message["id"] == json!(id) {
+            assert!(message["result"]["tools"].is_array(), "{message}");
+            break;
+        }
+        assert!(Instant::now() < deadline);
+    }
+    assert!(
+        announced,
+        "notifications/tools/list_changed before the answer"
+    );
+    assert_eq!(env.status().unwrap()["daemon_version"], VERSION);
+    close_ok(shim);
 }
