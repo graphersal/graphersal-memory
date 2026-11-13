@@ -14,8 +14,9 @@
 //! `import`) knows the harnesses and lists the files ([`files`]); it sends them in the control
 //! request [`CONTROL`] unless they are unchanged since the last complete sync ([`sync`], state
 //! in `<data dir>/import/instructions.json`). The daemon reads the files ([`read_rules`]),
-//! syncs the vertices and scans within [`SCAN_BUDGET`]; the rest of the scan follows at the
-//! next sync. Only local files are read, and only to compare them with the memories.
+//! syncs the vertices and answers; the scan for candidates runs in the daemon's background
+//! (rounds of [`SCAN_BUDGET`], batches of [`SCAN_BATCH`] rules), so a session start never waits
+//! for it. Only local files are read, and only to compare them with the memories.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,7 +30,8 @@ use crate::install::Setup;
 /// The control request that syncs a project's instruction files (`crate::daemon`).
 pub const CONTROL: &str = "sync_instructions";
 
-/// How long the daemon scans for candidates in one sync; the rest follows at the next sync.
+/// How long one background scan round of a project lasts (then other queued projects get
+/// their turn, and the project another round).
 pub const SCAN_BUDGET: Duration = Duration::from_secs(3);
 
 /// How many rules one `scan_instructions` call scans (one job on the store's session thread,
@@ -344,9 +346,8 @@ pub struct Synced {
     pub created: u64,
     /// Removed (changed or deleted) rules.
     pub removed: u64,
-    /// New candidates of the conflict check.
-    pub found: u64,
-    /// Rules still to scan (at the next sync).
+    /// Rules not yet compared with the memories when the daemon answered (it goes on in the
+    /// background).
     pub pending: u64,
     /// Notes on files that could not be read.
     pub notes: Vec<String>,
@@ -366,7 +367,6 @@ impl Synced {
             rules: n("rules"),
             created: n("created"),
             removed: n("removed"),
-            found: n("found"),
             pending: n("pending"),
             notes: answer["notes"]
                 .as_array()
@@ -381,18 +381,16 @@ impl Synced {
     /// The line `import` prints.
     pub fn line(&self) -> String {
         let mut line = format!(
-            "instruction files: {} rule{} ({} new, {} removed); {} new candidate{} for the \
-             conflict check",
+            "instruction files: {} rule{} ({} new, {} removed)",
             self.rules,
             if self.rules == 1 { "" } else { "s" },
             self.created,
             self.removed,
-            self.found,
-            if self.found == 1 { "" } else { "s" }
         );
         if self.pending > 0 {
             line.push_str(&format!(
-                "; {} rule{} still to compare (next time)",
+                "; {} rule{} being compared with the memories in the background (the conflict \
+                 check: conflicts(), or the UI's Conflicts tab)",
                 self.pending,
                 if self.pending == 1 { "" } else { "s" }
             ));

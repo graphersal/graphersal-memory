@@ -410,7 +410,9 @@ those files; it finds the pairs worth a look, and the agent or you decide.
   (`<data dir>/import/instructions.json` records their fingerprint).
 - **Candidates**: the daemon looks up the nearest memories of each new rule with the `recall`
   scoring (a project's rule against the project's and the global memories, a user-level rule
-  against the global ones), for at most 3 seconds per sync (the rest at the next one), and
+  against the global ones) in the background, after it answered the sync, so a session start
+  never waits for it (batches of 10 rules, so the agent's calls wait for one batch at most;
+  the start context shows the candidates found so far), and
   `remember` does the same the other way for a memory whose text changed (a project memory
   against its project's lines, a global one against every line it sees). A pair is a candidate
   when the memory is among the rule's three nearest, scores at least 0.15 and 1.5 times the 12th

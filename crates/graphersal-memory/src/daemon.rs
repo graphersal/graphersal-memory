@@ -274,6 +274,15 @@ struct Indexer {
     report: serde_json::Value,
 }
 
+/// The background scan of instruction file rules (`crate::instructions`).
+#[derive(Default)]
+struct Scanner {
+    /// Whether the scanner thread runs.
+    running: bool,
+    /// The projects whose rules wait for their scan, each once.
+    pending: std::collections::BTreeSet<String>,
+}
+
 /// The running daemon.
 struct Daemon {
     options: DaemonOptions,
@@ -291,6 +300,7 @@ struct Daemon {
     started: Instant,
     shutting_down: AtomicBool,
     indexer: Mutex<Indexer>,
+    scanner: Mutex<Scanner>,
 }
 
 /// Runs the daemon in this process until it exits (idle, stop, upgrade): the process ends
@@ -367,6 +377,7 @@ pub fn run(options: DaemonOptions) -> Result<(), String> {
         started: Instant::now(),
         shutting_down: AtomicBool::new(false),
         indexer: Mutex::new(Indexer::default()),
+        scanner: Mutex::new(Scanner::default()),
     });
     log(&format!(
         "daemon {} (protocol {}) listening on {}, data {}, idle exit after {}s",
@@ -606,7 +617,9 @@ impl Daemon {
         let tick = (self.options.idle / 4).clamp(Duration::from_millis(50), Duration::from_secs(5));
         loop {
             std::thread::sleep(tick);
-            let indexing = self.lock_indexer().running || self.embedding.load(Ordering::SeqCst) > 0;
+            let indexing = self.lock_indexer().running
+                || self.lock_scanner().running
+                || self.embedding.load(Ordering::SeqCst) > 0;
             let background: usize = self
                 .stores
                 .lock()
@@ -822,10 +835,10 @@ impl Daemon {
     }
 
     /// `sync_instructions` (`crate::instructions`): the rules of the instruction files the
-    /// request names become the project's `instruction` vertices, then the nearest memories of
-    /// the new ones are looked up in batches for [`crate::instructions::SCAN_BUDGET`] (the rest
-    /// at the next sync).
-    fn sync_instructions(&self, line: &[u8]) -> Result<serde_json::Value, String> {
+    /// request names become the project's `instruction` vertices, and the answer follows right
+    /// after; the nearest memories of the new rules are looked up in the background
+    /// ([`Self::queue_scan`]), so a session start never waits for that.
+    fn sync_instructions(self: &Arc<Self>, line: &[u8]) -> Result<serde_json::Value, String> {
         let request: serde_json::Value =
             serde_json::from_slice(line).map_err(|err| err.to_string())?;
         let root = request["project"].as_str().unwrap_or_default();
@@ -843,27 +856,98 @@ impl Daemon {
                 json!({"project": project, "rules": rules}),
             )
             .inspect_err(|_| self.check_alive(&store))?;
+        let pending = synced["pending"].as_u64().unwrap_or(0);
+        if pending > 0 {
+            self.queue_scan(&project);
+        }
+        Ok(
+            json!({"ok": true, "rules": synced["rules"], "created": synced["created"],
+                  "updated": synced["updated"], "removed": synced["removed"],
+                  "pending": pending, "notes": notes, "project_id": project}),
+        )
+    }
+
+    /// Queues the candidate scan of `project`'s new rules (a project already queued is not
+    /// queued twice) and starts the scanner thread when none runs.
+    fn queue_scan(self: &Arc<Self>, project: &str) {
+        let mut scanner = self.lock_scanner();
+        scanner.pending.insert(project.to_string());
+        if !scanner.running {
+            scanner.running = true;
+            let daemon = self.clone();
+            let spawned = std::thread::Builder::new()
+                .name("instructions".into())
+                .spawn(move || daemon.scan_loop());
+            if let Err(err) = spawned {
+                scanner.running = false;
+                log(&format!("cannot start the instruction file scan: {err}"));
+            }
+        }
+    }
+
+    fn lock_scanner(&self) -> MutexGuard<'_, Scanner> {
+        self.scanner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The scanner thread: one project at a time, `scan_instructions` batches (each one job on
+    /// the store's session thread, so other calls wait for one batch at most) for up to
+    /// [`crate::instructions::SCAN_BUDGET`] per round; a project with rules left goes to the
+    /// back of the queue for another round, until none is left or the candidates are capped
+    /// (then the next sync queues it again).
+    fn scan_loop(&self) {
+        loop {
+            let project = {
+                let mut scanner = self.lock_scanner();
+                match scanner.pending.pop_first() {
+                    Some(project) => project,
+                    None => {
+                        scanner.running = false;
+                        return;
+                    }
+                }
+            };
+            if self.shutting_down.load(Ordering::SeqCst) {
+                continue;
+            }
+            let round = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _doing = doing("scanning the instruction files of a project");
+                self.scan_round(&project)
+            }));
+            match round {
+                Ok(Ok(true)) => {
+                    self.lock_scanner().pending.insert(project);
+                }
+                Ok(Ok(false)) => {}
+                Ok(Err(err)) => log(&format!("the instruction file scan failed: {err}")),
+                Err(_) => log(&format!(
+                    "the instruction file scan failed (a bug); see {}",
+                    self.log_file().display()
+                )),
+            }
+        }
+    }
+
+    /// One scan round of `project`: whether rules are left for another round.
+    fn scan_round(&self, project: &str) -> Result<bool, String> {
+        let store = self.store_for(project)?;
         let deadline = Instant::now() + crate::instructions::SCAN_BUDGET;
-        let mut pending = synced["pending"].as_u64().unwrap_or(0);
-        let mut found = 0;
-        while pending > 0 && Instant::now() < deadline {
+        loop {
             let scan = store
                 .call(
                     "scan_instructions",
                     json!({"project": project, "limit": crate::instructions::SCAN_BATCH}),
                 )
                 .inspect_err(|_| self.check_alive(&store))?;
-            found += scan["found"].as_u64().unwrap_or(0);
-            pending = scan["remaining"].as_u64().unwrap_or(0);
-            if scan["capped"] == true {
-                break;
+            let remaining = scan["remaining"].as_u64().unwrap_or(0);
+            if remaining == 0 || scan["capped"] == true {
+                return Ok(false);
+            }
+            if Instant::now() >= deadline || self.shutting_down.load(Ordering::SeqCst) {
+                return Ok(true);
             }
         }
-        Ok(
-            json!({"ok": true, "rules": synced["rules"], "created": synced["created"],
-                  "updated": synced["updated"], "removed": synced["removed"], "found": found,
-                  "pending": pending, "notes": notes, "project_id": project}),
-        )
     }
 
     /// `export_memories`: every memory (or one project's and the global ones) with what the

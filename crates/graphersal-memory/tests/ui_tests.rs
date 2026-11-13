@@ -753,3 +753,82 @@ fn memories_against_instruction_files_show_and_settle_through_the_relay() {
         assert_eq!(answer.status, 403, "{name}: {}", answer.body);
     }
 }
+
+#[test]
+fn the_sync_answers_before_the_scan_and_the_candidates_follow_in_the_background() {
+    let env = Env::start("2h", &[]);
+    let work = env.root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let claude = work.join("CLAUDE.md");
+    let sync = || {
+        env.control_line(json!({"protocol": 1, "control": "sync_instructions",
+            "project": work.display().to_string(),
+            "files": [{"path": claude.display().to_string(), "global": false,
+                       "loaded_by": ["claude-code"]}]}))
+    };
+    // The project and its memories first (no rules yet, so remember finds no line).
+    std::fs::write(&claude, "# Rules\n").unwrap();
+    let p = sync()["project_id"].as_str().unwrap().to_string();
+    for (slug, summary) in [
+        ("use-pnpm", "Install dependencies with pnpm, not npm"),
+        ("dark-theme", "Use a dark editor theme"),
+        ("small-commits", "Keep commits small and focused"),
+    ] {
+        env.query(
+            "remember",
+            json!({"slug": slug, "kind": "project", "summary": summary,
+                   "body": format!("{summary}."), "source": "ui", "project": p}),
+        );
+    }
+    // Many rules, the one near a memory last (the scan goes by line).
+    let mut text = String::from("# Rules\n\n");
+    for i in 0..250 {
+        text.push_str(&format!(
+            "- Filler rule number {i} about the module layout of part {i}.\n"
+        ));
+    }
+    text.push_str("- Always use npm for installing packages, never another package manager.\n");
+    std::fs::write(&claude, text).unwrap();
+    let started = Instant::now();
+    let synced = sync();
+    let took = started.elapsed();
+    assert_eq!(synced["ok"], true, "{synced}");
+    assert_eq!(synced["rules"], 251, "{synced}");
+    // Answered right after the rules were stored: none of them was scanned yet.
+    assert_eq!(synced["pending"], 251, "{synced}");
+    eprintln!("sync of 251 rules answered in {took:?}");
+    // Well under the 3 s a scan round may take (measured: about 0.1 s in a debug build).
+    assert!(took < Duration::from_secs(3), "{took:?}");
+    // The candidate appears once the background scan reached the last line.
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let listed = env.query("conflicts", json!({"k": 20, "project": p}));
+        let found = listed[0]["rules_unchecked"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|pair| pair["memory"]["slug"] == "use-pnpm" && pair["rule"]["line"] == 253);
+        if found {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no candidate after the scan: {listed}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Unchanged files: nothing left to scan.
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let again = sync();
+        if again["pending"] == 0 {
+            assert_eq!(again["created"], 0, "{again}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the scan never finished: {again}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}

@@ -26,8 +26,9 @@
 //!   project root (`crate::start_context::StartContext::to_json`). `{"protocol": 1, "control":
 //!   "sync_instructions", "project", "files": [{"path", "global", "loaded_by"}]}` syncs the
 //!   rules of a project's instruction files for the conflict check (`crate::instructions`;
-//!   answer `{"ok": true, "rules", "created", "updated", "removed", "found", "pending",
-//!   "notes", "project_id"}`).
+//!   answer `{"ok": true, "rules", "created", "updated", "removed", "pending", "notes",
+//!   "project_id"}` right after the rules are stored; the scan for candidates runs in the
+//!   background).
 //!
 //! - or a relayed HTTP request of the browser UI: `{"protocol": 1, "relay": "http", "port",
 //!   "method", "target", "headers", "body_length", "shim_version"}` followed by the body; one
