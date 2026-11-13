@@ -13,7 +13,7 @@ pub const FILES_PREFIX: &str = "/memory-ui/";
 const PROFILE: &str = include_str!("../ui/profile.json");
 
 /// The files under [`FILES_PREFIX`]: name and bytes.
-const FILES: [(&str, &[u8]); 11] = [
+const FILES: [(&str, &[u8]); 13] = [
     ("boot.js", include_bytes!("../ui/boot.js")),
     ("memory-ui.css", include_bytes!("../ui/memory-ui.css")),
     ("model.js", include_bytes!("../ui/model.js")),
@@ -21,6 +21,8 @@ const FILES: [(&str, &[u8]); 11] = [
     ("shared.js", include_bytes!("../ui/shared.js")),
     ("overview.js", include_bytes!("../ui/overview.js")),
     ("memory.js", include_bytes!("../ui/memory.js")),
+    ("graph-model.js", include_bytes!("../ui/graph-model.js")),
+    ("graph.js", include_bytes!("../ui/graph.js")),
     ("always.js", include_bytes!("../ui/always.js")),
     ("conflicts.js", include_bytes!("../ui/conflicts.js")),
     ("sessions.js", include_bytes!("../ui/sessions.js")),
@@ -67,7 +69,7 @@ mod tests {
         assert_eq!(profile["name"], "memory");
         assert_eq!(profile["files"], FILES_PREFIX);
         let tabs = profile["tabs"].as_array().unwrap();
-        assert_eq!(tabs.len(), 5);
+        assert_eq!(tabs.len(), 6);
         for tab in tabs {
             let module = tab["module"].as_str().unwrap();
             assert!(file(module).is_some(), "{module} is not built in");

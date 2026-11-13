@@ -381,6 +381,14 @@ conflict checks, the history and the start context work exactly as for the agent
   imported from a file is read-only here: edit its file instead (pin, order and conflict
   decisions work). Before an edit is saved, the memory is read again: when an agent changed it
   meanwhile, nothing is saved.
+- **Graph**: the memories and the decisions between them as a graph: replaces (newer to older,
+  an arrow), open conflicts (red), narrows (a project memory to the global one it makes an
+  exception to) and related memories (thin grey); colour by kind, a thick border for the
+  memories every session starts with, a dashed one for imported memories, faded when replaced,
+  with a legend. Sessions and facts appear only when you expand a memory (double click, or
+  Expand on its card): what it is about and what is about it. The graph only reads; its cards
+  write as the other tabs do (open in Memory, pin, settle a conflict, forget with a question,
+  never an imported memory).
 - **Always loaded**: exactly what a session of a project starts with, in delivery order and
   grouped as the agent sees it, the budget bar, the literal text, labels for what does not fully
   reach the agent ("cut: no room" over the budget, "shortened" when a line's text is cut at 300
@@ -405,7 +413,8 @@ browser through a launch file in the run directory, never through a command line
 the tab's session storage); requests from another site are refused (Host and Origin checks, no
 cross-origin headers); `GET` never changes anything. The daemon stays socket-only: `ui` hands
 each request over the socket to the daemon, which answers only the memory functions and the
-UI's own read and reorder functions (`overview`, `memory_list`, `set_order`, `session_list`),
+UI's own read and reorder functions (`overview`, `memory_list`, `set_order`, `session_list`,
+`memory_graph`, `memory_neighbours`),
 never the internal ones (indexing, merge, export, migrations), under the same access policy as
 the agent's `use` server.
 
