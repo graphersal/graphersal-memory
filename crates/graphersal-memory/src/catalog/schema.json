@@ -1,7 +1,7 @@
 {
   "$schema": "https://graphersal.dev/schema/v1",
   "meta": {
-    "purpose": "graphersal-memory: memories, past sessions, their turns and facts",
+    "purpose": "graphersal-memory: memories, past sessions, their turns and facts, and the lines of the harness's instruction files they are checked against",
     "origin": "product"
   },
   "mode": "open",
@@ -394,6 +394,79 @@
           "fact_kind"
         ]
       }
+    },
+    "instruction": {
+      "schema": {
+        "type": "object",
+        "description": "a rule of an instruction file a harness loads (CLAUDE.md, AGENTS.md, rules files): kept only to check memories against it, never shown as a memory; synced by its text's fingerprint, removed when its line changes or goes",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "the rule: one list item, paragraph or line of an instruction file, as written (any language)"
+          },
+          "file": {
+            "type": "string",
+            "description": "the instruction file it is in (absolute path, as last seen)"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "its first line in the file (1-based, as last seen)"
+          },
+          "loaded_by": {
+            "type": "string",
+            "description": "the harnesses that load the file, comma-separated (claude-code, opencode, codex, cursor)"
+          },
+          "project": {
+            "type": "string",
+            "description": "the project whose file it is; absent = a user-level file, loaded in every project"
+          },
+          "origin": {
+            "type": "string",
+            "description": "instructions (read from the harness's instruction files, never written by an agent)"
+          },
+          "source": {
+            "type": "string",
+            "description": "the file it was read from"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "defaultFunction": "now",
+            "description": "when it was read first"
+          },
+          "embed_text": {
+            "type": "string",
+            "description": "the text emb is computed from"
+          },
+          "emb": {
+            "type": "array",
+            "format": "vector",
+            "element": "f32",
+            "metric": "cosine",
+            "embedder": "hash-ngram/1",
+            "from": "embed_text",
+            "description": "computed from embed_text by the vector rule (never written directly)"
+          },
+          "scanned": {
+            "type": "boolean",
+            "description": "its nearest memories were looked up for the conflict check (false: still to do)"
+          }
+        },
+        "required": [
+          "text",
+          "file",
+          "line"
+        ]
+      }
     }
   },
   "edges": {
@@ -647,6 +720,48 @@
               "private"
             ],
             "default": "private"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "when it was recorded"
+          }
+        }
+      }
+    },
+    "compared_with": {
+      "connections": [
+        {
+          "from": "instruction",
+          "to": "memory"
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "description": "instruction -> a memory near it: a candidate conflict between a line of an instruction file and a memory, and its decision (settle with rule)",
+        "properties": {
+          "origin": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "unchecked",
+              "compatible",
+              "conflict"
+            ],
+            "description": "unchecked: a candidate for the agent's or the user's check; compatible: both hold; conflict: they contradict until the memory or the line changes"
           },
           "at": {
             "type": "string",

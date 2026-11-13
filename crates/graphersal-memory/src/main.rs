@@ -31,6 +31,7 @@ mod import;
 mod install;
 #[cfg(test)]
 mod install_tests;
+mod instructions;
 mod ipc;
 mod jsonedit;
 mod language;

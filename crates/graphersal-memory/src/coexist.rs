@@ -1261,7 +1261,7 @@ fn units(text: &str) -> Vec<Vec<(usize, &str)>> {
 }
 
 /// Whether a trimmed line starts a list item (`- `, `* `, `+ `, `1. `, `1) `).
-fn starts_list_item(trimmed: &str) -> bool {
+pub(crate) fn starts_list_item(trimmed: &str) -> bool {
     if ["- ", "* ", "+ "].iter().any(|m| trimmed.starts_with(m)) {
         return true;
     }

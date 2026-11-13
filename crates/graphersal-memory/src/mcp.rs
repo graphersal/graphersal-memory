@@ -443,20 +443,20 @@ impl StoreRuntime {
     }
 
     /// The start context of `project` (its stable id) within `budget` characters, with its open
-    /// memory conflicts.
+    /// memory conflicts (between memories, and against lines of instruction files).
     pub fn start_context(
         &self,
         project: &str,
         budget: usize,
     ) -> Result<crate::start_context::StartContext, String> {
         let rows = self.call("start_context", json!({"project": project}))?;
-        let (conflicts, unchecked) = crate::start_context::conflicts(
-            &self.call("open_conflicts", json!({"project": project}))?,
-        );
-        Ok(crate::start_context::render_with(
+        let open = self.call("open_conflicts", json!({"project": project}))?;
+        let (conflicts, unchecked) = crate::start_context::conflicts(&open);
+        Ok(crate::start_context::render_all(
             crate::start_context::entries(&rows),
             conflicts,
             unchecked,
+            crate::start_context::rule_conflicts(&open),
             budget,
         ))
     }

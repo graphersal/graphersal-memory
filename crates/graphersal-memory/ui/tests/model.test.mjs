@@ -232,3 +232,34 @@ test('memories that do not fully reach the agent are labelled with what it gets 
   assert.match(short[0].title, /memory\("long"\)/);
   assert.deepEqual(m.reachLabels(null), []);
 });
+
+test('memories against instruction files: merged once, open conflicts first, actions per pair', () => {
+  const rule = (id) => ({ rule: id, file: '/w/CLAUDE.md', line: 3, text: 'Always use npm.', scope: 'project', loaded_by: 'claude-code,codex' });
+  const pnpm = { slug: 'use-pnpm', scope: 'project', kind: 'feedback', summary: 'pnpm', source: 'remember' };
+  const global = { slug: 'dark', scope: 'global', kind: 'user', summary: 'dark', source: 'remember' };
+  const userRule = { ...rule('a4'), scope: 'global' };
+  const merged = m.mergeConflicts([
+    { call: { project: 'p', only: 'project' }, rows: { open: [], unchecked: [], rules_unchecked: [{ memory: pnpm, rule: rule('a1') }, { memory: global, rule: rule('a2') }, { memory: global, rule: userRule }], rules_open: [{ memory: pnpm, rule: rule('a3'), since: '2026-11-13' }] } },
+    { call: { project: '', only: 'global' }, rows: { open: [], unchecked: [], rules_unchecked: [{ memory: global, rule: userRule }] } },
+  ]);
+  assert.deepEqual(merged.rules.map((p) => `${p.status}:${p.rule.rule}:${p.memory.slug}:${p.project}`), ['conflict:a3:use-pnpm:p', 'unchecked:a1:use-pnpm:p', 'unchecked:a2:dark:p', 'unchecked:a4:dark:'], 'a global memory against a project line is that project\'s; two global ones once');
+  assert.equal(merged.rules_unchecked_total, 3);
+  assert.equal(m.mergeConflicts([{ call: { project: 'p', only: null }, rows: { open: [], unchecked: [], rules_unchecked: [], rules_unchecked_total: 9 } }]).rules_unchecked_total, 9);
+  assert.deepEqual(m.mergeConflicts([{ call: { project: 'p' }, rows: { open: [], unchecked: [] } }]).rules, [], 'an older answer has none');
+  const pair = merged.rules[1];
+  assert.equal(m.fileLine(pair.rule), '/w/CLAUDE.md:3');
+  assert.equal(m.loadedByText(pair.rule), 'loaded by Claude Code, Codex');
+  const actions = m.ruleActions(pair);
+  assert.deepEqual(actions.compatible, { slug: 'use-pnpm', decision: 'compatible', other: '', rule: 'a1', project: 'p' });
+  assert.equal(actions.conflict.decision, 'conflict');
+  assert.equal(actions.canForget, true);
+  assert.equal(actions.fileText, 'File is outdated: edit /w/CLAUDE.md line 3');
+  assert.match(actions.fileNote, /never changes instruction files/);
+  assert.match(actions.fileNote, /closes by itself when that line changes/);
+  const imported = m.ruleActions({ ...pair, memory: { ...pnpm, source: '/home/u/memory/use-pnpm.md', imported_at: '2026-11-01' } });
+  assert.equal(imported.canForget, false);
+  assert.match(imported.forgetTitle, /use-pnpm\.md/);
+  assert.notEqual(m.rulePairKey(merged.rules[2], 'p'), m.rulePairKey(merged.rules[1], 'p'));
+  assert.notEqual(m.rulePairKey(merged.rules[2], 'p'), m.rulePairKey(merged.rules[2], 'q'), 'a project line is per project');
+  assert.equal(m.rulePairKey(merged.rules[3], 'p'), m.rulePairKey(merged.rules[3], 'q'), 'two global sides are one pair everywhere');
+});

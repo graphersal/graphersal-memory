@@ -23,7 +23,12 @@
 //!   `start_context` (`full`, the default, `short` or `none`) says whether the `use` server's
 //!   instructions of the connection carry the start context ([`StartContextMode`]). `{"protocol":
 //!   1, "control": "start_context", "project", "max_chars"?}` answers the start context of a
-//!   project root (`crate::start_context::StartContext::to_json`).
+//!   project root (`crate::start_context::StartContext::to_json`). `{"protocol": 1, "control":
+//!   "sync_instructions", "project", "files": [{"path", "global", "loaded_by"}]}` syncs the
+//!   rules of a project's instruction files for the conflict check (`crate::instructions`;
+//!   answer `{"ok": true, "rules", "created", "updated", "removed", "pending", "notes",
+//!   "project_id"}` right after the rules are stored; the scan for candidates runs in the
+//!   background).
 //!
 //! - or a relayed HTTP request of the browser UI: `{"protocol": 1, "relay": "http", "port",
 //!   "method", "target", "headers", "body_length", "shim_version"}` followed by the body; one

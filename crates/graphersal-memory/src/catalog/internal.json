@@ -163,5 +163,44 @@
         }
       }
     ]
+  },
+  {
+    "name": "sync_instructions",
+    "description": "Internal (session start, import): the rules of the instruction files the harnesses load become instruction vertices of the project; moved lines updated, changed or removed ones dropped with their candidates.",
+    "params": [
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "rules",
+        "schema": {
+          "type": "array"
+        }
+      }
+    ]
+  },
+  {
+    "name": "scan_instructions",
+    "description": "Internal (after sync_instructions): the nearest memories of up to limit unscanned rules become unchecked candidates of the conflict check.",
+    "params": [
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "limit",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "default": 10
+      }
+    ]
   }
 ]

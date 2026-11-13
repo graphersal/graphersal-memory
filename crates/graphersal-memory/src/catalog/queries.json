@@ -285,7 +285,7 @@
   },
   {
     "name": "conflicts",
-    "description": "What waits for a decision among this project's and the global memories: open conflicts (both versions, their files), imported memories not yet checked (k, with their nearest memories), project memories that narrow a global one. Settle each with settle.",
+    "description": "What waits for a decision among this project's and the global memories: open conflicts (both versions, their files), imported memories not yet checked (k, with their nearest memories), project memories that narrow a global one, memories against lines of instruction files (open, and k still to check). Settle each with settle.",
     "params": [
       {
         "name": "k",
@@ -307,7 +307,7 @@
   },
   {
     "name": "settle",
-    "description": "Record a decision between the memory <slug> and <other>: compatible (both hold; without other: <slug> checked), narrows (project <slug> narrows the global <other>), supersedes (<slug> is the later decision), conflict (they contradict within one scope: ask the user which holds).",
+    "description": "Record a decision between the memory <slug> and <other>: compatible (both hold; without other: <slug> checked), narrows (project <slug> narrows the global <other>), supersedes (<slug> is the later decision), conflict (they contradict within one scope: ask the user which holds). With rule (a line of an instruction file, from conflicts()) instead of other: compatible or conflict.",
     "params": [
       {
         "name": "slug",
@@ -333,6 +333,14 @@
         "schema": {
           "type": "string",
           "pattern": "^([a-z0-9-]+)?$"
+        },
+        "default": ""
+      },
+      {
+        "name": "rule",
+        "schema": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{16})?$"
         },
         "default": ""
       },

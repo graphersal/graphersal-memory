@@ -292,7 +292,30 @@ pub fn run_cli(
             ..
         } => setup(cli).and_then(|setup| {
             let mut connect = daemon_connector(&setup);
-            run_import(&setup, *dry_run, &mut connect, &mut stdout)
+            let code = run_import(&setup, *dry_run, &mut connect, &mut stdout)?;
+            if !*dry_run {
+                // The instruction files of the current directory's project, for the conflict
+                // check (`crate::instructions`), compared again even when unchanged.
+                let root = current_project()
+                    .map(|root| root.display().to_string())
+                    .unwrap_or_default();
+                match sync_instructions(&setup, &setup_location(&setup), "claude-code", &root, true) {
+                    Ok(Some(synced)) => {
+                        let _ = writeln!(stdout, "{}", synced.line());
+                        for note in &synced.notes {
+                            let _ = writeln!(stdout, "  warning: {note}");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        let _ = writeln!(
+                            stdout,
+                            "  warning: cannot compare the memories with the instruction files: {err}"
+                        );
+                    }
+                }
+            }
+            Ok(code)
         }),
         Command::Summaries { action } => setup(cli).and_then(|setup| {
             run_summaries(&setup, action, &mut BufReader::new(stdin), &mut stdout)
@@ -1315,7 +1338,7 @@ fn run_hook(
                     setup.cursor.registry.clone(),
                     std::env::var("CURSOR_PROJECT_DIR").ok(),
                     Some(enqueue),
-                    Some(start_fetch(&setup)),
+                    Some(start_fetch(&setup, crate::agents::Kind::Cursor)),
                     stdin,
                     stdout,
                     stderr,
@@ -1341,7 +1364,7 @@ fn run_hook(
                     stderr,
                 );
             }
-            let fetch = start_fetch(&setup);
+            let fetch = start_fetch(&setup, crate::agents::Kind::ClaudeCode);
             hook::run_with_context(
                 event,
                 Ok(setup.paths.clone()),
@@ -1362,14 +1385,37 @@ fn run_hook(
 }
 
 /// The hooks' start context: asked from the daemon for the project of the session's directory
-/// (its git root; the daemon resolves its stable id).
-fn start_fetch(setup: &Setup) -> hook::StartFetch {
+/// (its git root; the daemon resolves its stable id), after the instruction files of the
+/// harnesses (installed, else the hook's `harness`) were synced for the conflict check
+/// (`crate::instructions`; nothing is sent when they are unchanged, a failure only leaves the
+/// counts as they were).
+fn start_fetch(setup: &Setup, harness: crate::agents::Kind) -> hook::StartFetch {
     let location = setup_location(setup);
+    let setup = setup.clone();
     Box::new(move |dir: Option<&Path>, max: usize| {
         let project = dir
             .map(|dir| mcp::project_key(None, dir))
             .unwrap_or_default();
+        let _ = sync_instructions(&setup, &location, harness.id(), &project, false);
         crate::start_context::request(&location, &project, Some(max))
+    })
+}
+
+/// Syncs the instruction files of the project at `root` (`""`: none, the user-level files
+/// only) with the daemon for the conflict check (`crate::instructions::sync`; `force`: even
+/// when unchanged since the last complete sync).
+fn sync_instructions(
+    setup: &Setup,
+    location: &DaemonLocation,
+    harness: &str,
+    root: &str,
+    force: bool,
+) -> Result<Option<crate::instructions::Synced>, String> {
+    let kinds = crate::instructions::kinds(setup, harness);
+    let project = (!root.is_empty()).then(|| Path::new(root));
+    let files = crate::instructions::files(setup, &kinds, project);
+    crate::instructions::sync(&setup.data_dir, root, &files, force, &mut |line| {
+        shim::request(location, line)
     })
 }
 
@@ -1615,11 +1661,21 @@ fn session_events(
     let location = setup_location(&setup);
     let run_dir = setup.run_dir.clone();
     let mut connect = daemon_connector(&setup);
+    let harness = options.harness.clone();
+    let root = options.project.clone();
     Some(shim::Events {
         start: Box::new(move || {
             let mut enqueue = |request: sessions::Request| enqueue_request(&location, &request);
             let deadline = std::time::Instant::now() + hook::BUDGET;
-            session_sync::start(&start_plan, &mut connect, &mut enqueue, deadline).notes
+            let mut notes =
+                session_sync::start(&start_plan, &mut connect, &mut enqueue, deadline).notes;
+            // Then the instruction files of the session's project, for the conflict check.
+            if let Err(err) = sync_instructions(&setup, &location, &harness, &root, false) {
+                notes.push(format!(
+                    "cannot compare the memories with the instruction files: {err}"
+                ));
+            }
+            notes
         }),
         end: Box::new(move || {
             // The session ended: queue only when the daemon still runs (never start one now).

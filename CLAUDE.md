@@ -152,6 +152,14 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `ignored` list (`import --ignore`) skipped by `plan`; a changed file that brings back a memory
     forgotten in the graph or changed there by an agent is still written and gets `returned` in
     its record, `returning_line` in the report);
+  - `src/instructions.rs`: memories against the instruction files the harnesses load (the
+    conflict check, `docs/how-it-works.md#memories-against-instruction-files`): `files` (the
+    installed harnesses' user-level and project files from `coexist::instruction_files`),
+    `rules_in` (list items, paragraphs, quotes; headings, tables, code, comments, front matter,
+    our managed block and short units left out), `rule_id` (project + relative file + text),
+    `read_rules` (the daemon's side of the control request `sync_instructions`), `sync` (skips
+    files unchanged since the last finished sync, `<data dir>/import/instructions.json`); called
+    by the shim's session start, the Claude Code / Cursor start-context fetch and `import`;
   - `src/coexist.rs` + `src/coexist/other_import.rs`: other memory beside ours (M15; files only,
     no other server started): `detect` (`BuiltIn` per harness, `Server` = another memory tool's
     MCP entry by the known `TOOLS`, a name saying memory or `MEMORY_TOOL_NAMES` from the entry or
@@ -410,8 +418,12 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
 
 ## Memory model
 
-- Labels `memory`, `session`, `turn`, `fact`; edges `relates_to`, `supersedes`,
-  `conflicts_with`, `narrows`, `about`, `contains`, `edited` (`src/catalog/schema.json`, mode `open`; `emb` is a vector rule over
+- Labels `memory`, `session`, `turn`, `fact`, `instruction` (a line of an instruction file, only
+  for the conflict check: never found by `recall`/`memories`); edges `relates_to`, `supersedes`,
+  `conflicts_with`, `narrows`, `about`, `contains`, `edited`, `wrote`, `compared_with`
+  (instruction -> memory, `decision` unchecked|compatible|conflict; written by the internal
+  `sync_instructions`/`scan_instructions`, by `remember` for a memory whose text changed, and by
+  `settle(slug, compatible|conflict, rule: <id>)`) (`src/catalog/schema.json`, mode `open`; `emb` is a vector rule over
   `embed_text`; the schema file names the built-in `hash-ngram/1`, `catalog::apply` keeps the
   embedder the store has, and the daemon switches it to `embedding.model` of `config.json`).
 - Project scoping: a vertex with a `project` property (the project's stable id, `crate::projects`)
@@ -438,8 +450,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   (`fact_kind` decision | correction | outcome | open_thread), all with the session's `project`;
   `session -contains-> turn|fact`. They are written only by the internal catalog functions
   (`src/catalog/internal.json`: `indexed_sessions`, `index_session`, `index_turns`,
-  `set_summary`; plus `merge_project`, `export_memories`, `start_context`, `open_conflicts` and
-  `migrate_import_sources`), which the daemon runs on the
+  `set_summary`; plus `merge_project`, `export_memories`, `start_context`, `open_conflicts`,
+  `migrate_import_sources`, `link_memories`, `sync_instructions` and `scan_instructions`), which the daemon runs on the
   store's session thread (`catalog::call`); they are never tools of the `use` server (its tool
   list is `FUNCTIONS`).
 - **No LLM call without consent**: summaries run only when `summaries.enabled` is true, only

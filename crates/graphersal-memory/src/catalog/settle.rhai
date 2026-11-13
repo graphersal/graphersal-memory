@@ -1,9 +1,38 @@
-fn settle(slug, decision, other, project) {
+fn settle(slug, decision, other, rule, project) {
     // The current project's memory of a slug first, then the global one.
     let id = "";
     if project != "" && g.v("memory:" + slug + "@" + project).has_label("memory").count().next() > 0 { id = "memory:" + slug + "@" + project; }
     else if g.v("memory:" + slug).has_label("memory").count().next() > 0 { id = "memory:" + slug; }
     if id == "" { return #{error: "no memory " + slug + " in this project or the global memory; list them with memories()"}; }
+    let visible = if project == "" { __.not(__.has("project")) }
+                  else { __.or(__.not(__.has("project")), __.has("project", project)) };
+    // rule: a line of an instruction file (conflicts() lists its id) instead of another memory.
+    if rule != "" {
+        if other != "" { return #{error: "settle a memory against another memory (other) or a line of an instruction file (rule), not both"}; }
+        if decision != "compatible" && decision != "conflict" {
+            return #{error: "against a line of an instruction file the decision is compatible or conflict; when the memory is outdated, forget it (or remember the new rule with supersedes: [" + slug + "]); when the file is outdated, the user edits that line"};
+        }
+        let rid = "instruction:" + rule;
+        if g.v(rid).has_label("instruction").filter(visible).count().next() == 0 {
+            return #{error: "no line " + rule + " of an instruction file in this project; conflicts() lists them"};
+        }
+        let at = g.gql("RETURN CURRENT_TIMESTAMP AS t").next()["t"];
+        g.v(rid).out_e("compared_with").filter(__.in_v().has_id(id)).drop().iterate();
+        g.merge_e(#{"T.label": "compared_with", "Direction.OUT": rid, "Direction.IN": id})
+            .option(Merge.onCreate, #{origin: "curated", source: "derived", visibility: "private", decision: decision, at: at}).iterate();
+        let r = g.v(rid).project("file", "line").by("file").by("line").next();
+        let out = #{slug: slug, decision: decision, rule: rule, file: r.file, line: r.line};
+        if decision == "conflict" {
+            let memory_file = "";
+            if g.v(id).has("imported_at").count().next() > 0 { memory_file = g.v(id).values("source").next(); }
+            out.note = "Ask the user which holds. If the memory is outdated: forget it, or remember the new rule with supersedes: [" + slug + "]"
+                + (if memory_file != "" { " (it was imported from " + memory_file + ": the user edits or deletes that file too)" } else { "" })
+                + ". If the file is outdated: the user edits " + r.file + " line " + r.line + " (graphersal-memory never edits instruction files); the conflict closes when that line changes or goes.";
+        }
+        out.rule_conflicts = g.v().has_label("instruction").filter(visible).out_e("compared_with").has("decision", "conflict").filter(__.in_v().filter(visible)).count().next();
+        out.rules_unchecked = g.v().has_label("instruction").filter(visible).out_e("compared_with").has("decision", "unchecked").filter(__.in_v().filter(visible)).count().next();
+        return out;
+    }
     let oid = "";
     if other != "" {
         if project != "" && g.v("memory:" + other + "@" + project).has_label("memory").count().next() > 0 { oid = "memory:" + other + "@" + project; }
@@ -13,8 +42,6 @@ fn settle(slug, decision, other, project) {
     } else if decision != "compatible" {
         return #{error: "the decision " + decision + " needs the other memory: settle(slug, decision, other)"};
     }
-    let visible = if project == "" { __.not(__.has("project")) }
-                  else { __.or(__.not(__.has("project")), __.has("project", project)) };
     let now = g.gql("RETURN CURRENT_TIMESTAMP AS t").next()["t"];
     let scope = if id.contains("@") { "project" } else { "global" };
     let other_scope = if oid.contains("@") { "project" } else { "global" };

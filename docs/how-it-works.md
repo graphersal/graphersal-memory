@@ -381,6 +381,55 @@ candidates; the agent's own model decides (no model call of graphersal-memory's,
   turns rather than a live tool loop, small samples. `graphersal-memory bench rule-changes`
   repeats the last measurement (arms plain / marked / file) through your `claude -p`.
 
+### Memories against instruction files
+
+The harness loads its own instruction files into every session (Claude Code: `~/.claude/CLAUDE.md`,
+`~/.claude/rules/*.md`, the project's `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md` and
+`.claude/rules/*.md`; opencode: its `AGENTS.md` and `instructions` entries, the project's
+`AGENTS.md`, Claude Code's files where it reads them; Codex: `~/.codex/AGENTS(.override).md`,
+the project's `AGENTS(.override).md` and its fallback names; Cursor: `~/.cursor/rules/*.mdc`,
+the project's `.cursor/rules/*.mdc`, `.cursorrules` and `AGENTS.md`). A memory can contradict
+one of their lines, for example a memory "use pnpm" against a `CLAUDE.md` line "always use npm".
+graphersal-memory never imports those rules (the agent would get them twice) and never edits
+those files; it finds the pairs worth a look, and the agent or you decide.
+
+- **Which files**: those of the harnesses graphersal-memory is installed in (else the harness
+  that started it), the user-level ones and the session project's; never graphersal-memory's own
+  rules files, the exported global memories, or its managed block inside a shared file.
+- **A rule** is one list item, paragraph or block quote (a wrapped line belongs to its item);
+  headings, tables, code blocks, HTML comments, a front matter and units under 20 characters or
+  4 words are left out, a long paragraph is cut at 400 characters. It is kept as an
+  `instruction` vertex with its file, line, text and harnesses, global for a user-level file,
+  else of the project, known by a fingerprint of the project, the file (a project's file by its
+  path inside the project, so two checkouts share it) and the text: a moved line keeps its
+  decisions, a changed or deleted line is dropped with them. These vertices are never found by
+  `recall` or `memories`.
+- **When**: at every session start (the MCP server's start, and Claude Code's and Cursor's
+  session-start hooks before the start context) and with `graphersal-memory import` (always);
+  nothing is sent when the files are unchanged since the last finished sync
+  (`<data dir>/import/instructions.json` records their fingerprint).
+- **Candidates**: the daemon looks up the nearest memories of each new rule with the `recall`
+  scoring (a project's rule against the project's and the global memories, a user-level rule
+  against the global ones) in the background, after it answered the sync, so a session start
+  never waits for it (batches of 10 rules, so the agent's calls wait for one batch at most;
+  the start context shows the candidates found so far), and
+  `remember` does the same the other way for a memory whose text changed (a project memory
+  against its project's lines, a global one against every line it sees). A pair is a candidate
+  when the memory is among the rule's three nearest, scores at least 0.15 and 1.5 times the 12th
+  best, shares a subject word with the rule or has a semantic similarity of 0.45, and is not
+  superseded; no new candidates while 50 wait for their check. These limits were chosen on a
+  handful of examples, not measured on real instruction files: every candidate is only a
+  question, and most are merely on a similar topic.
+- **Deciding**: `conflicts()` lists the candidates (`rules_unchecked`, both texts, the file and
+  line) and the open ones (`rules_open`); `remember` names the lines near a new memory
+  (`instruction_lines`). `settle(slug, "compatible", rule: <id>)` dismisses a pair until the
+  memory's text or the line changes; `settle(slug, "conflict", rule: <id>)` records an open
+  conflict, which the start context (at most five, then "N more"; a line counts the candidates
+  still to check), Claude Code's start line, `status`, `doctor` and the UI show until it is
+  resolved: the memory is outdated (forget it, or remember the new rule with `supersedes`; an
+  imported memory's file is edited instead), or the file is outdated (you edit that line; the
+  conflict closes by itself at the next sync, when the line changes or goes).
+
 ## The browser UI
 
 `graphersal-memory ui` opens your memory in the browser: what every session starts with, the
@@ -421,7 +470,11 @@ conflict checks, the history and the start context work exactly as for the agent
   mark. Warnings: a budget too small for the pinned memories, a pinned
   memory in an open conflict or replaced.
 - **Conflicts**: open conflicts side by side (which one replaces the other, both hold, forget
-  one, later), and imported memories still to check, one by one.
+  one, later), and imported memories still to check, one by one; then "Memory vs instruction
+  files": a memory beside the line of an instruction file it may contradict (file and line),
+  with "Both hold", "Memory is outdated" (forget it; not for an imported memory, whose file is
+  the one to edit) and "File is outdated: edit <file> line N" (recorded as a conflict; nothing
+  here writes the file, and the pair closes by itself when that line changes).
 - **Sessions** (read-only): the newest sessions by day, search of their decisions and other
   facts by meaning, a session in full with its conversation on demand.
 

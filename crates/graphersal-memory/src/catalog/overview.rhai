@@ -1,6 +1,7 @@
 fn overview(project) {
     // The counts of the browser UI's overview: this project's and the global memories (project
     // "" = the global ones only), the open conflicts, the imported memories not yet checked,
+    // the conflicts and unchecked candidates against lines of instruction files,
     // and the indexed sessions and facts of this project.
     let visible = if project == "" { __.not(__.has("project")) }
                   else { __.or(__.not(__.has("project")), __.has("project", project)) };
@@ -28,6 +29,9 @@ fn overview(project) {
     }
     out.open_conflicts = g.v().has_label("memory").filter(visible).out_e("conflicts_with")
         .filter(__.in_v().has_label("memory").filter(visible)).count().next();
+    let current = __.in_v().filter(visible).not(__.in_("supersedes").has_label("memory").filter(visible));
+    out.rule_conflicts = g.v().has_label("instruction").filter(visible).out_e("compared_with").has("decision", "conflict").filter(current).count().next();
+    out.rules_unchecked = g.v().has_label("instruction").filter(visible).out_e("compared_with").has("decision", "unchecked").filter(current).count().next();
     out.sessions = g.v().has_label("session").filter(visible).count().next();
     out.facts = g.v().has_label("fact").filter(visible).count().next();
     out

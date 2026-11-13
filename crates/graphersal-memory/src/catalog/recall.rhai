@@ -7,7 +7,9 @@ fn recall(text, k, label, project) {
         w.trim();
         if w.len() > 2 && !["how", "add", "the", "and", "for", "with", "does", "what", "where", "when", "from", "into", "use", "can", "should", "which", "who", "why", "new", "via"].contains(w) { words.push(if w.len() > 6 { w.sub_string(0, 6) } else { w }); }
     }
-    let t = if label == "" { g.v().has("emb") } else { g.v().has_label(label).has("emb") };
+    // The lines of instruction files are there only for the conflict check: the harness loads
+    // them itself, so a search for everything leaves them out.
+    let t = if label == "" { g.v().has("emb").not(__.has_label("instruction")) } else { g.v().has_label(label).has("emb") };
     let rows = t.filter(visible)
         .project("id", "label", "name", "summary", "semantic", "hay")
         .by(T.id).by(T.label).by(__.coalesce(__.values("name"), __.constant("")))
