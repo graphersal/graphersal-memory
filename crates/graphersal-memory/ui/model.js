@@ -194,11 +194,28 @@ export function tiers(entries = []) {
     .filter((tier) => tier.entries.length > 0);
 }
 
-/** The sections of the start context's text, in the order the agent reads them. */
+/**
+ * What is cut first when the start context runs out of room: the text keeps the memories in
+ * delivery order (`start_context::sort`: pinned, then feedback, then user) and cuts from the
+ * end, so About you goes first, then How to work, then Pinned.
+ */
+export const CUT_ORDER_NOTE = 'When the budget runs out, the end of the delivery order is cut first: About you, then How to work, then Pinned.';
+
+/**
+ * The sections of the start context's text, in the order the agent reads them. In How to work
+ * and About you every memory is loaded anyway (`pinBox` false: no pin checkbox, a pin there
+ * only moves a memory to the front of the cut order, `keptFirst`); the note says so.
+ */
 export const SECTIONS = Object.freeze([
-  { id: 'How to work', title: 'How to work (feedback)' },
-  { id: 'About you', title: 'About you (user)' },
-  { id: 'Pinned', title: 'Pinned' },
+  Object.freeze({
+    id: 'How to work', title: 'How to work (feedback)', pinBox: false,
+    note: `Always loaded: every "how to work" memory reaches each session. The order decides what is cut first when space runs out. ${CUT_ORDER_NOTE}`,
+  }),
+  Object.freeze({
+    id: 'About you', title: 'About you (user)', pinBox: false,
+    note: `Always loaded: every "about you" memory reaches each session. The order decides what is cut first when space runs out. ${CUT_ORDER_NOTE}`,
+  }),
+  Object.freeze({ id: 'Pinned', title: 'Pinned', pinBox: true, note: '' }),
 ]);
 
 /**
@@ -209,6 +226,41 @@ export const SECTIONS = Object.freeze([
 export function sections(entries = []) {
   return SECTIONS.map((section) => ({ ...section, entries: entries.filter((e) => e.group === section.id) }))
     .filter((section) => section.entries.length > 0);
+}
+
+/**
+ * The pin controls of an entry in its section: the checkbox only in a section with `pinBox`;
+ * elsewhere a pinned entry shows the "kept first" mark with a button that removes it.
+ */
+export function pinControls(section, entry) {
+  const box = Boolean(section && section.pinBox);
+  return { checkbox: box, keptFirst: !box && Boolean(entry && entry.pinned) };
+}
+
+/** The tooltip of the "kept first" mark. */
+export const KEPT_FIRST_TITLE = 'Marked pinned: it is listed first here and cut last, with the Pinned section. It is loaded either way; remove the mark to let it follow this section\'s order.';
+
+/**
+ * The labels of an entry that does not fully reach the agent: "cut: no room" (over the budget,
+ * not in the text) and "shortened" (its line's text cut at the line limit,
+ * `start_context::entries_json` `shortened`/`shown_hook_chars`); each with what the agent gets.
+ */
+export function reachLabels(entry) {
+  const out = [];
+  if (!entry) return out;
+  if (entry.shown === false) {
+    out.push({
+      id: 'cut', text: 'cut: no room',
+      title: `Not in the start context (over the budget): the agent is only told that more memories exist and can read this one with memory("${entry.slug}") or find it with memories(text).`,
+    });
+  } else if (entry.shortened) {
+    const n = Number(entry.shown_hook_chars) || 0;
+    out.push({
+      id: 'shortened', text: 'shortened',
+      title: `The agent gets only the first ${n ? grouped(n) + ' ' : ''}characters of this text, then "…"; the full memory through memory("${entry.slug}").`,
+    });
+  }
+  return out;
 }
 
 /**

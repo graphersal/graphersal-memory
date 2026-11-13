@@ -22,7 +22,9 @@ browser ──http───> ui (graphersal-memory ui)                 ──soc
 - **Shim** (`graphersal-memory mcp`). Your harness starts it, one per agent session, exactly like
   any other stdio MCP server. It finds the project (for a developer, the repository root of the
   working directory), connects to the daemon's socket, starting the daemon if none is running,
-  sends one handshake line, and then relays MCP messages in both directions. It holds no state.
+  sends one handshake line, and then relays MCP messages in both directions, one line at a time.
+  It holds no store; it remembers only what it needs to reconnect when the daemon restarts (see
+  Crashes below).
 - **Daemon** (`graphersal-memory daemon`). This is the only process that opens the stores. The
   first shim starts it, and it runs detached. It exits after an idle time: no connection, no
   background work and no `ui` command for two hours by default, which is configurable. It listens
@@ -57,6 +59,7 @@ anything changes.
 | `daemon.pid` | locked by the running daemon for its whole life; the OS releases the lock when the process ends, also on a crash |
 | `daemon.start.lock` | locked by the shim that starts a daemon |
 | `daemon.log` | the daemon's log (`daemon.log.1`: the previous one, kept once it passes 1 MiB) |
+| `daemon.stopped` | left by a daemon stopped on purpose (`uninstall`, `purge`); open sessions and `ui` do not start a new daemon while it exists, and the next daemon removes it |
 
 ### Start, idle exit, crashes and upgrades
 
@@ -69,10 +72,20 @@ anything changes.
   store cleanly and exits. The idle time is, in this order: `daemon --foreground --idle 30m`, the
   environment variable `GRAPHERSAL_MEMORY_IDLE` (a daemon started by a shim inherits it), the
   settings file, two hours.
-- **Crashes.** A socket file is treated as stale only when connecting fails and no process holds
-  `daemon.pid`. If the daemon dies, open sessions see their MCP server end with an error naming the
-  log (restarting the MCP server in the harness reconnects); the next session starts a new daemon,
-  and the store recovers at its next open.
+- **Crashes and restarts.** A socket file is treated as stale only when connecting fails and no
+  process holds `daemon.pid`. If the daemon dies (killed, crashed, or replaced by an upgrade), open
+  sessions keep their MCP server: each shim connects again, starting a new daemon when none
+  answers (the store recovers at its open), replays the session's `initialize` and
+  `notifications/initialized` itself (their answers stay with the shim) and goes on. A request
+  that was waiting for the old daemon's answer gets a JSON-RPC error (code `-32000`: the server
+  restarted, retry the call), so the agent never waits for an answer that is gone; requests sent
+  during the reconnect wait and go to the new daemon. When the new daemon has another version,
+  the shim tells the harness `notifications/tools/list_changed` so it lists the tools again. The
+  session's start work (the memory-file import, the indexing request) is not repeated, and its end
+  work goes to whichever daemon runs at the end. Only when no daemon answers within 30 seconds does
+  the MCP server end with an error naming the log, as before. `ui` reconnects the same way. A
+  daemon stopped on purpose (`uninstall`, `purge`) is not started again by open sessions, so a
+  purge does not see its data recreated.
 - **Upgrades.** When a shim meets an older daemon: with no other session open, the daemon exits
   and the shim starts the new binary; with sessions open, it serves the new shim too and exits
   when its last session closes, so nothing waits on an upgrade.
@@ -98,7 +111,8 @@ anything changes.
   with the codes `bad_handshake`, `protocol`, `unknown_profile`, `data_dir` (the shim works on
   another data directory), `store` (the store cannot be opened), and `restarting` or `stopping`
   (the shim tries again). After that, the connection carries plain MCP stdio framing in both
-  directions, and the shim only relays bytes.
+  directions, and the shim relays it line by line (keeping only the ids of unanswered requests and
+  the session's opening, for a reconnect).
 - A connection may instead start with a control line, `{"protocol": 1, "control": "status"}` (or
   `"stop"`), which gets one answer.
 
@@ -368,9 +382,14 @@ conflict checks, the history and the start context work exactly as for the agent
   decisions work). Before an edit is saved, the memory is read again: when an agent changed it
   meanwhile, nothing is saved.
 - **Always loaded**: exactly what a session of a project starts with, in delivery order and
-  grouped as the agent sees it, the budget bar, the literal text, what is cut for lack of room,
-  pin/unpin, move up/down, edit a memory's start line, and the budget
-  (`memory.start_context_chars`). Warnings: a budget too small for the pinned memories, a pinned
+  grouped as the agent sees it, the budget bar, the literal text, labels for what does not fully
+  reach the agent ("cut: no room" over the budget, "shortened" when a line's text is cut at 300
+  characters; the tooltip says what the agent gets instead), pin/unpin in "Pinned", move up/down,
+  edit a memory's start line, and the budget (`memory.start_context_chars`). "How to work" and
+  "About you" have no pin checkbox: those memories are always loaded, and a note says that the
+  order only decides what is cut first when space runs out (from the end: About you, then How to
+  work, then Pinned); one that is pinned anyway shows "kept first" with a button that removes the
+  mark. Warnings: a budget too small for the pinned memories, a pinned
   memory in an open conflict or replaced.
 - **Conflicts**: open conflicts side by side (which one replaces the other, both hold, forget
   one, later), and imported memories still to check, one by one.

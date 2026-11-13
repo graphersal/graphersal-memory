@@ -5234,6 +5234,7 @@ fn purge(setup: &Setup) -> Result<Vec<String>, String> {
             crate::ipc::PID_FILE,
             crate::ipc::START_LOCK_FILE,
             crate::ipc::LOG_FILE,
+            crate::ipc::STOPPED_FILE,
             "daemon.log.1",
         ] {
             let _ = std::fs::remove_file(setup.run_dir.join(name));

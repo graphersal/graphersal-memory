@@ -21,7 +21,9 @@
 //! - **Lifetime**: foreground until Ctrl+C, or until no page sent a heartbeat (`POST
 //!   /api/ui/heartbeat`, every 60 s from each tab) for [`HEARTBEAT_TIMEOUT`]. One open
 //!   connection to the daemon (a `use` handshake without traffic) keeps the daemon alive while
-//!   `ui` runs; it reconnects when the daemon restarted.
+//!   `ui` runs; it reconnects when the daemon restarted (killed, crashed, upgraded), starting a
+//!   new one as the shim does, and so do the relayed requests and the start context (unless a
+//!   daemon was stopped on purpose by `uninstall` or `purge`: `crate::shim::may_start`).
 //! - **Answers**: `/api/ui/*` itself ([`ui_api`]: status, projects, start context, the start
 //!   context budget, heartbeat), every other `/api/` path relayed to the daemon
 //!   (`crate::relay`), static files from the profile's own files first
@@ -256,8 +258,9 @@ fn open_browser(file: &Path) -> Result<(), String> {
 }
 
 /// Keeps one connection to the daemon open (it counts as activity, so the daemon does not exit
-/// idle while `ui` runs), reconnecting when the daemon restarted. The first connection is made
-/// here (an error is returned); later ones on the thread.
+/// idle while `ui` runs), reconnecting when the daemon restarted, killed or crashed (starting a
+/// new one, unless a daemon was stopped on purpose: `crate::shim::may_start`). The first
+/// connection is made here (an error is returned); later ones on the thread.
 fn keep_daemon(location: &DaemonLocation) -> Result<(), String> {
     let options = crate::shim::ShimOptions {
         location: location.clone(),
@@ -278,7 +281,10 @@ fn keep_daemon(location: &DaemonLocation) -> Result<(), String> {
                     drop(stream);
                 }
                 std::thread::sleep(Duration::from_secs(1));
-                connection = crate::shim::open(&options).ok();
+                let start = crate::shim::may_start(&options.location.run_dir);
+                connection = crate::shim::open_with(&options, start)
+                    .ok()
+                    .map(|opened| (opened.stream, opened.reader));
             }
         })
         .map_err(|err| format!("cannot start the daemon connection: {err}"))?;
@@ -440,14 +446,7 @@ pub fn answer(
     if let Some(rest) = path.strip_prefix("/api/ui/") {
         return ui_api(shared, method, rest, url, headers, &body);
     }
-    match crate::relay::send(
-        &shared.location.run_dir,
-        shared.port,
-        method,
-        url,
-        headers,
-        &body,
-    ) {
+    match crate::relay::send(&shared.location, shared.port, method, url, headers, &body) {
         Ok(answer) => Reply {
             status: answer.status,
             headers: answer
@@ -631,7 +630,13 @@ fn ui_api(
             let project = query_param(url, "project").unwrap_or_default();
             let line = json!({"protocol": crate::protocol::PROTOCOL, "control": "start_context",
                               "project_id": project, "entries": true});
-            match crate::shim::request_running(run_dir, &line) {
+            // Like the relay: a daemon that went away is started again.
+            let answer = if crate::shim::may_start(run_dir) {
+                crate::shim::request(&shared.location, &line).map(Some)
+            } else {
+                crate::shim::request_running(run_dir, &line)
+            };
+            match answer {
                 Ok(Some(answer)) if answer["ok"] == true => Reply::json(200, &answer),
                 Ok(Some(answer)) => Reply::error(
                     502,
@@ -639,7 +644,10 @@ fn ui_api(
                         .as_str()
                         .unwrap_or("the daemon refused the start context"),
                 ),
-                Ok(None) => Reply::error(503, "the daemon is not running; start the UI again"),
+                Ok(None) => Reply::error(
+                    503,
+                    "the daemon was stopped on purpose and is not running; start the UI again",
+                ),
                 Err(err) => Reply::error(502, &err),
             }
         }

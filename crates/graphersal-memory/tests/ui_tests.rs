@@ -552,3 +552,38 @@ fn the_ui_keeps_the_daemon_alive_and_exits_after_the_last_heartbeat() {
     }
     assert!(!alive(pid), "the daemon exits idle once ui is gone");
 }
+
+#[test]
+fn the_ui_keeps_answering_after_a_daemon_restart() {
+    let env = Env::start("2h", &[]);
+    env.query(
+        "remember",
+        json!({"slug": "ui-before", "kind": "project", "summary": "Before the restart",
+               "body": "Before.", "source": "ui", "project": "/work/r"}),
+    );
+    let pid = env.control("status").unwrap()["pid"].as_u64().unwrap();
+    kill(pid);
+    let deadline = Instant::now() + PATIENCE;
+    while alive(pid) {
+        assert!(Instant::now() < deadline, "the daemon did not die");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The relay starts (or finds) a new daemon: the memory is still there.
+    let rows = env.query("memory", json!({"slug": "ui-before", "project": "/work/r"}));
+    assert!(rows.to_string().contains("Before the restart"), "{rows}");
+    // `/api/ui/*` too: the start context goes to the daemon that runs now.
+    let answer = env.api("GET", "/api/ui/start-context?project=%2Fwork%2Fr", None);
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let status = env.control("status").unwrap();
+    let new = status["pid"].as_u64().unwrap();
+    assert_ne!(new, pid);
+    // The held connection reconnects too (the daemon counts it).
+    let deadline = Instant::now() + PATIENCE;
+    while env.control("status").unwrap()["connections"].as_u64() == Some(0) {
+        assert!(
+            Instant::now() < deadline,
+            "ui did not connect to the new daemon"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

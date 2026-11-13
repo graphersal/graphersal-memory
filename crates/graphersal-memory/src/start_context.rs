@@ -329,8 +329,8 @@ fn line(entry: &Entry) -> String {
         &entry.title
     });
     let hook = one_line(&entry.hook);
-    let hook: String = if hook.chars().count() > MAX_HOOK_CHARS {
-        let cut: String = hook.chars().take(MAX_HOOK_CHARS - 1).collect();
+    let hook: String = if shortened(entry) {
+        let cut: String = hook.chars().take(SHORTENED_HOOK_CHARS).collect();
         format!("{}…", cut.trim_end())
     } else {
         hook
@@ -340,6 +340,14 @@ fn line(entry: &Entry) -> String {
     } else {
         format!("- {title} — {hook} (memory: {})", entry.slug)
     }
+}
+
+/// How many characters of a shortened hook its line keeps (then "…").
+const SHORTENED_HOOK_CHARS: usize = MAX_HOOK_CHARS - 1;
+
+/// Whether the line of `entry` cuts its hook (or summary) at [`MAX_HOOK_CHARS`].
+fn shortened(entry: &Entry) -> bool {
+    one_line(&entry.hook).chars().count() > MAX_HOOK_CHARS
 }
 
 /// `text` on one line (line breaks and runs of white space become one space).
@@ -532,7 +540,9 @@ pub fn render_with(
 /// The always-loaded memories of `entries` in the selection order ([`sort`]) as the browser UI
 /// shows them: each with its `tier` (`pinned`, `feedback`, `user`: the order groups `set_order`
 /// renumbers), its `group` in the text (the heading it is listed under) and whether the text
-/// shows it (the first `shown` ones) or cuts it for lack of room.
+/// shows it (the first `shown` ones) or cuts it for lack of room, and whether its line is
+/// `shortened` (its hook cut at [`MAX_HOOK_CHARS`]: the line keeps `shown_hook_chars`
+/// characters, the rest only through `memory(slug)`).
 pub fn entries_json(mut entries: Vec<Entry>, shown: usize) -> Value {
     sort(&mut entries);
     let rows: Vec<Value> = entries
@@ -552,7 +562,9 @@ pub fn entries_json(mut entries: Vec<Entry>, shown: usize) -> Value {
             serde_json::json!({"slug": e.slug, "scope": e.scope, "kind": e.kind,
                                "pinned": e.pinned, "order": e.order, "title": e.title,
                                "hook": e.hook, "updated_at": e.updated_at, "tier": tier,
-                               "group": group, "shown": i < shown, "line": line(e)})
+                               "group": group, "shown": i < shown, "line": line(e),
+                               "shortened": shortened(e),
+                               "shown_hook_chars": SHORTENED_HOOK_CHARS})
         })
         .collect();
     Value::Array(rows)
@@ -745,6 +757,34 @@ mod tests {
         let text = line(&long);
         assert!(text.contains('…'));
         assert!(text.chars().count() < MAX_HOOK_CHARS + 60, "{text}");
+    }
+
+    #[test]
+    fn the_ui_rows_say_which_lines_are_shortened() {
+        let mut long = entry("long", "feedback", false, None, "x");
+        long.hook = format!("{}  tail", "a".repeat(MAX_HOOK_CHARS));
+        let mut exact = entry("exact", "user", false, None, "x");
+        // White space runs count as one, as on the line itself.
+        exact.hook = format!("{}\n\n{}", "b".repeat(10), "c".repeat(MAX_HOOK_CHARS - 11));
+        let short = entry("short", "user", false, None, "y");
+        let rows = entries_json(vec![long, exact, short], 3);
+        let by_slug = |slug: &str| {
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["slug"] == slug)
+                .unwrap()
+                .clone()
+        };
+        let long = by_slug("long");
+        assert_eq!(long["shortened"], true);
+        assert_eq!(long["shown_hook_chars"], SHORTENED_HOOK_CHARS);
+        assert!(long["line"].as_str().unwrap().contains('…'));
+        assert!(!long["line"].as_str().unwrap().contains("tail"));
+        let exact = by_slug("exact");
+        assert_eq!(exact["shortened"], false, "{exact}");
+        assert!(!exact["line"].as_str().unwrap().contains('…'));
+        assert_eq!(by_slug("short")["shortened"], false);
     }
 
     fn side(slug: &str, always: bool, file: &str) -> Side {
