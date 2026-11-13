@@ -29,9 +29,9 @@ mod harness;
 mod hook;
 mod import;
 mod install;
-mod instructions;
 #[cfg(test)]
 mod install_tests;
+mod instructions;
 mod ipc;
 mod jsonedit;
 mod language;

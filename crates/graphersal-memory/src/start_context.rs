@@ -308,8 +308,16 @@ impl StartContext {
                 "memory conflicts: {} memor{} contradict{} a line of your instruction files; \
                  ask your agent which holds (conflicts()), or edit the file",
                 self.rule_conflicts.len(),
-                if self.rule_conflicts.len() == 1 { "y" } else { "ies" },
-                if self.rule_conflicts.len() == 1 { "s" } else { "" }
+                if self.rule_conflicts.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+                if self.rule_conflicts.len() == 1 {
+                    "s"
+                } else {
+                    ""
+                }
             ));
             lines.extend(self.rule_conflicts.iter().map(|line| format!("  {line}")));
         }
@@ -318,7 +326,11 @@ impl StartContext {
                 "memory conflicts: {} memor{} near a line of your instruction files not yet \
                  checked (your agent: conflicts())",
                 self.rules_unchecked,
-                if self.rules_unchecked == 1 { "y" } else { "ies" }
+                if self.rules_unchecked == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
             ));
         }
         lines
@@ -345,15 +357,27 @@ impl StartContext {
             parts.push(format!(
                 "{} memor{} contradict{} your instruction files",
                 self.rule_conflicts.len(),
-                if self.rule_conflicts.len() == 1 { "y" } else { "ies" },
-                if self.rule_conflicts.len() == 1 { "s" } else { "" }
+                if self.rule_conflicts.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+                if self.rule_conflicts.len() == 1 {
+                    "s"
+                } else {
+                    ""
+                }
             ));
         }
         if self.rules_unchecked > 0 {
             parts.push(format!(
                 "{} memor{} to check against your instruction files",
                 self.rules_unchecked,
-                if self.rules_unchecked == 1 { "y" } else { "ies" }
+                if self.rules_unchecked == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
             ));
         }
         if parts.is_empty() {
@@ -557,7 +581,10 @@ fn conflicts_text(
             ));
         }
         if rules.len() > MAX_CONFLICTS {
-            out.push_str(&format!("\n{} more: conflicts().", rules.len() - MAX_CONFLICTS));
+            out.push_str(&format!(
+                "\n{} more: conflicts().",
+                rules.len() - MAX_CONFLICTS
+            ));
         }
     }
     if rules_unchecked > 0 {
@@ -1031,7 +1058,10 @@ mod tests {
                  for a contradiction: conflicts() lists them.\n\n{FOOTER}"
             )
         );
-        assert_eq!(context.rule_conflicts, ["use-pnpm (remember) vs /w/CLAUDE.md:12"]);
+        assert_eq!(
+            context.rule_conflicts,
+            ["use-pnpm (remember) vs /w/CLAUDE.md:12"]
+        );
         assert_eq!(context.rules_unchecked, 3);
         assert_eq!(
             context.start_note(),
@@ -1044,9 +1074,13 @@ mod tests {
         assert_eq!(lines[1], "  use-pnpm (remember) vs /w/CLAUDE.md:12");
         assert!(lines[2].contains("3 memories near a line of your instruction files"));
         // The daemon's answer carries both, and an older one's neither.
-        assert_eq!(StartContext::from_json(&context.to_json()), Some(context.clone()));
+        assert_eq!(
+            StartContext::from_json(&context.to_json()),
+            Some(context.clone())
+        );
         let older = StartContext::from_json(&json!({"text": "", "shown": 0, "total": 0,
-                                                    "budget": 10})).unwrap();
+                                                    "budget": 10}))
+        .unwrap();
         assert!(older.rule_conflicts.is_empty() && older.rules_unchecked == 0);
         // Nothing of it: no text.
         let none = render_all(Vec::new(), Vec::new(), 0, (Vec::new(), 0), DEFAULT_CHARS);

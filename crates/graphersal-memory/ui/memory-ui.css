@@ -72,3 +72,6 @@
 /* The Graph tab (graph.js): the engine's graph view under the header. */
 .mem-graph-tab { max-width: none; }
 .mem-graph-help { margin: 0 0 8px; font-size: 12.5px; }
+.mem-rules-heading { margin-top: 24px; }
+.mem-rule-open { border-color: var(--danger, #c0392b); }
+.mem-path { overflow-wrap: anywhere; }

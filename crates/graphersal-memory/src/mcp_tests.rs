@@ -1357,8 +1357,10 @@ fn memories_against_instruction_files_reach_conflicts_settle_and_the_start_conte
     .unwrap();
     let id = crate::projects::resolve(data.path(), "/work/a").unwrap().id;
     let (rules, notes) = crate::instructions::read_rules(
-        &[json!({"path": claude.display().to_string(), "global": false,
-                 "loaded_by": ["claude-code"]})],
+        &[
+            json!({"path": claude.display().to_string(), "global": false,
+                 "loaded_by": ["claude-code"]}),
+        ],
         &files.path().display().to_string(),
         &id,
     );
@@ -1381,8 +1383,11 @@ fn memories_against_instruction_files_reach_conflicts_settle_and_the_start_conte
         .unwrap_or_else(|| panic!("{answer}"))
         .to_string();
     assert_eq!(answer["instruction_lines"][0]["line"], 3, "{answer}");
-    let listed: Value = json_of(&client.ok("conflicts", json!({}))).unwrap();
-    assert_eq!(listed["rules_unchecked"][0]["memory"]["slug"], "use-pnpm", "{listed}");
+    let listed: Value = json_of(&client.ok("conflicts", json!({})));
+    assert_eq!(
+        listed["rules_unchecked"][0]["memory"]["slug"], "use-pnpm",
+        "{listed}"
+    );
     let settled: Value = json_of(&client.ok(
         "settle",
         json!({"slug": "use-pnpm", "decision": "conflict", "rule": rule}),

@@ -1,7 +1,10 @@
 // The Conflicts tab: open conflicts side by side with the decisions (settle: which one replaces
 // the other, both hold; or forget one, never an imported one), and the imported memories not yet
 // checked against their nearest memories, in a collapsed section, checked one by one (no bulk
-// button: user decision 9a).
+// button: user decision 9a). Then "Memory vs instruction files": a memory beside the line of an
+// instruction file the harness loads (CLAUDE.md, AGENTS.md, rules files) that may contradict it:
+// both hold, the memory is outdated (forget it; never an imported one), or the file is outdated
+// (recorded as a conflict; the user edits the file, nothing here writes it).
 
 import { ref, reactive, watch, onMounted, computed } from 'vue';
 import * as model from './model.js';
@@ -61,10 +64,25 @@ export default {
       });
     }
     const done = (memory) => act(memory.slug, () => one(props.api, 'settle', { slug: memory.slug, decision: 'compatible', other: '', project: memory.project }), `"${memory.slug}" is checked.`);
+    const rulePairs = computed(() => (data.value ? data.value.rules.filter((p) => !later.has(model.rulePairKey(p))) : []));
+    const fileNotes = reactive({});
+    const settleRule = (pair, args, done) => act(model.rulePairKey(pair), () => one(props.api, 'settle', args), done);
+    function forgetMemory(pair) {
+      const actions = model.ruleActions(pair);
+      if (!actions.canForget) return;
+      if (!window.confirm(`Forget the memory "${pair.memory.slug}" (${pair.memory.scope})? The line of ${model.fileLine(pair.rule)} stays; this cannot be undone here.`)) return;
+      act(model.rulePairKey(pair), () => one(props.api, 'forget', { slug: pair.memory.slug, source: 'ui', project: pair.project }), `Forgot "${pair.memory.slug}".`);
+    }
+    function fileOutdated(pair) {
+      const key = model.rulePairKey(pair);
+      fileNotes[key] = true;
+      if (pair.status !== 'conflict') settleRule(pair, model.ruleActions(pair).conflict, 'Recorded: the file is outdated; it stays listed until you edit that line.');
+    }
     const edit = (memory, project) => props.api.navigate('memory', { slug: memory.slug, project: memory.scope === 'global' ? (project || '') : project });
     return {
       data, error, busy, open, current, expanded, checking, checked, later, keyOf, state, model,
       settle, forget, choices, decide, done, edit, load,
+      rulePairs, fileNotes, settleRule, forgetMemory, fileOutdated,
     };
   },
   template: `
@@ -119,6 +137,33 @@ export default {
         </div>
         <p v-if="!current" class="mem-ok">Nothing to check.</p>
       </details>
+      <h3 class="mem-rules-heading">Memory vs instruction files</h3>
+      <p class="muted">Lines of the instruction files your agent's harness loads (CLAUDE.md, AGENTS.md, rules files) next to the memories near them. graphersal-memory only reads these files; most pairs are merely on a similar topic.</p>
+      <p v-if="!rulePairs.length" class="mem-ok">No memory waits for a check against your instruction files.</p>
+      <p v-else class="muted">{{ rulePairs.filter((p) => p.status === 'conflict').length }} contradicting · {{ data.rules_unchecked_total }} to check</p>
+      <section v-for="pair in rulePairs" :key="model.rulePairKey(pair)" class="mem-conflict mem-rule-pair" :class="{ 'mem-rule-open': pair.status === 'conflict' }">
+        <p class="muted"><strong v-if="pair.status === 'conflict'" class="mem-error">They contradict</strong><span v-else>To check</span> · since {{ pair.since || 'unknown' }}<span v-if="state.selection === model.ALL"> · {{ model.projectName(pair.project, state.projects) }}</span></p>
+        <div class="mem-sides">
+          <div class="mem-side">
+            <h4>Memory {{ pair.memory.slug }} <span class="muted">({{ model.sourceText(pair.memory) }})</span></h4>
+            <p class="muted">{{ pair.memory.kind }} · {{ pair.memory.scope }} · {{ String(pair.memory.updated_at || '').slice(0, 10) }}</p>
+            <p>{{ model.unmarked(pair.memory.summary) }}</p>
+            <button class="btn small" type="button" @click="edit(pair.memory, pair.project)">Open in Memory</button>
+          </div>
+          <div class="mem-side">
+            <h4>{{ model.baseName(pair.rule.file) }} line {{ pair.rule.line }}</h4>
+            <p class="muted mem-path" :title="pair.rule.file">{{ model.fileLine(pair.rule) }} · {{ pair.rule.scope === 'global' ? 'every project' : 'this project' }}<span v-if="model.loadedByText(pair.rule)"> · {{ model.loadedByText(pair.rule) }}</span></p>
+            <p>{{ pair.rule.text }}</p>
+          </div>
+        </div>
+        <div class="mem-conflict-actions">
+          <button class="btn" type="button" :disabled="!!busy" @click="settleRule(pair, model.ruleActions(pair).compatible, 'Recorded: both hold.')">Both hold</button>
+          <button class="btn" type="button" :disabled="!!busy || !model.ruleActions(pair).canForget" :title="model.ruleActions(pair).forgetTitle" @click="forgetMemory(pair)">Memory is outdated</button>
+          <button class="btn" type="button" :disabled="!!busy" @click="fileOutdated(pair)">{{ model.ruleActions(pair).fileText }}</button>
+          <button class="btn" type="button" @click="later.add(model.rulePairKey(pair))">Later</button>
+        </div>
+        <div v-if="fileNotes[model.rulePairKey(pair)] || pair.status === 'conflict'" class="mem-note-box">{{ model.ruleActions(pair).fileNote }}</div>
+      </section>
     </template>
   </div>`,
 };

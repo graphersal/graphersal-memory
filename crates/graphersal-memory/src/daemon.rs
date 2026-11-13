@@ -859,9 +859,11 @@ impl Daemon {
                 break;
             }
         }
-        Ok(json!({"ok": true, "rules": synced["rules"], "created": synced["created"],
+        Ok(
+            json!({"ok": true, "rules": synced["rules"], "created": synced["created"],
                   "updated": synced["updated"], "removed": synced["removed"], "found": found,
-                  "pending": pending, "notes": notes}))
+                  "pending": pending, "notes": notes, "project_id": project}),
+        )
     }
 
     /// `export_memories`: every memory (or one project's and the global ones) with what the

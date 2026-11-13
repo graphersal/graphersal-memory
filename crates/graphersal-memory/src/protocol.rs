@@ -27,7 +27,7 @@
 //!   "sync_instructions", "project", "files": [{"path", "global", "loaded_by"}]}` syncs the
 //!   rules of a project's instruction files for the conflict check (`crate::instructions`;
 //!   answer `{"ok": true, "rules", "created", "updated", "removed", "found", "pending",
-//!   "notes"}`).
+//!   "notes", "project_id"}`).
 //!
 //! - or a relayed HTTP request of the browser UI: `{"protocol": 1, "relay": "http", "port",
 //!   "method", "target", "headers", "body_length", "shim_version"}` followed by the body; one

@@ -18,6 +18,10 @@ graphersal-memory is designed so that nothing leaves your machine unless you ask
   cdn.jsdelivr.net: Vue and the playground's other libraries, each checked against a pinned
   checksum). The CDN sees that the page was opened and from which address; no memory data, token
   or file of yours is sent there. A version without CDNs is planned.
+- **Instruction files are read locally, never changed.** At a session start and on `import`,
+  the daemon reads the instruction files your harness loads (`CLAUDE.md`, `AGENTS.md`, rules
+  files) and keeps their lines in your store, only to compare them with your memories; nothing
+  of them leaves your machine, and graphersal-memory never writes them.
 - **Isolated stores** (planned) keep a project's memory in a store of its own, which you can hand
   over or delete on its own.
 

@@ -178,7 +178,10 @@ fn unit_text(lines: &[(usize, &str)]) -> Option<(usize, String)> {
         .map(|(_, line)| line.trim())
         .collect::<Vec<_>>()
         .join(" ");
-    let text = strip_marker(&joined).split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = strip_marker(&joined)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if text.chars().count() < MIN_RULE_CHARS || text.split_whitespace().count() < MIN_RULE_WORDS {
         return None;
     }
@@ -290,8 +293,10 @@ pub fn read_rules(files: &[Value], root: &str, project: &str) -> (Vec<Value>, Ve
                 ));
                 return (rules, notes);
             }
-            rules.push(json!({"id": id, "text": text, "file": path.display().to_string(),
-                              "line": line, "loaded_by": loaded_by, "global": global}));
+            rules.push(
+                json!({"id": id, "text": text, "file": path.display().to_string(),
+                              "line": line, "loaded_by": loaded_by, "global": global}),
+            );
         }
     }
     (rules, notes)
@@ -513,9 +518,18 @@ mod tests {
                      same item."
                         .to_string()
                 ),
-                (8, "Never push to the main branch without asking first.".to_string()),
-                (9, "Write commit messages in the imperative mood.".to_string()),
-                (10, "Keep the changelog current for every release.".to_string()),
+                (
+                    8,
+                    "Never push to the main branch without asking first.".to_string()
+                ),
+                (
+                    9,
+                    "Write commit messages in the imperative mood.".to_string()
+                ),
+                (
+                    10,
+                    "Keep the changelog current for every release.".to_string()
+                ),
                 (11, "Prefer small pull requests over big ones.".to_string()),
             ]
         );
@@ -608,11 +622,20 @@ mod tests {
             paths,
             vec![
                 setup.paths.instructions.as_path(),
-                setup.paths.config_dir.join("rules").join("style.md").as_path(),
+                setup
+                    .paths
+                    .config_dir
+                    .join("rules")
+                    .join("style.md")
+                    .as_path(),
                 project.join("CLAUDE.md").as_path(),
                 project.join("CLAUDE.local.md").as_path(),
                 project.join(".claude").join("CLAUDE.md").as_path(),
-                project.join(".claude").join("rules").join("testing.md").as_path(),
+                project
+                    .join(".claude")
+                    .join("rules")
+                    .join("testing.md")
+                    .as_path(),
             ]
         );
         assert!(claude[0].global && claude[1].global && !claude[2].global);
@@ -654,7 +677,11 @@ mod tests {
             )
             .unwrap();
         }
-        std::fs::write(home.path().join("notes.txt"), "Use pnpm for every package.\n").unwrap();
+        std::fs::write(
+            home.path().join("notes.txt"),
+            "Use pnpm for every package.\n",
+        )
+        .unwrap();
         let spec = |root: &Path| {
             vec![
                 json!({"path": root.join("CLAUDE.md").display().to_string(), "global": false,
@@ -696,21 +723,43 @@ mod tests {
             sent.push(line.clone());
             Ok(json!({"ok": true, "rules": 1, "created": 1, "pending": pending}))
         };
-        let first = sync(data.path(), "/w", &files, false, &mut send).unwrap().unwrap();
+        let first = sync(data.path(), "/w", &files, false, &mut send)
+            .unwrap()
+            .unwrap();
         assert_eq!(first.pending, 1);
         // The scan did not finish: sent again.
-        assert!(sync(data.path(), "/w", &files, false, &mut send).unwrap().is_some());
+        assert!(
+            sync(data.path(), "/w", &files, false, &mut send)
+                .unwrap()
+                .is_some()
+        );
         pending = 0;
         let mut send = |line: &Value| {
             sent.push(line.clone());
             Ok(json!({"ok": true, "rules": 1, "pending": pending}))
         };
-        assert!(sync(data.path(), "/w", &files, false, &mut send).unwrap().is_some());
+        assert!(
+            sync(data.path(), "/w", &files, false, &mut send)
+                .unwrap()
+                .is_some()
+        );
         // Finished and unchanged: nothing sent; forced, or changed: sent.
-        assert!(sync(data.path(), "/w", &files, false, &mut send).unwrap().is_none());
-        assert!(sync(data.path(), "/w", &files, true, &mut send).unwrap().is_some());
+        assert!(
+            sync(data.path(), "/w", &files, false, &mut send)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            sync(data.path(), "/w", &files, true, &mut send)
+                .unwrap()
+                .is_some()
+        );
         std::fs::write(&file, "Always use pnpm for every package.\n").unwrap();
-        assert!(sync(data.path(), "/w", &files, false, &mut send).unwrap().is_some());
+        assert!(
+            sync(data.path(), "/w", &files, false, &mut send)
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(sent.len(), 5);
         assert_eq!(sent[0]["control"], CONTROL);
         assert_eq!(sent[0]["project"], "/w");

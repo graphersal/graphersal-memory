@@ -440,7 +440,76 @@ export function mergeConflicts(answers) {
   const total = answers.length === 1 && answers[0].rows && typeof answers[0].rows.unchecked_total === 'number'
     ? answers[0].rows.unchecked_total
     : unchecked.length;
-  return { open, unchecked, unchecked_total: total };
+  const rules = mergeRulePairs(answers);
+  const rulesTotal = answers.length === 1 && answers[0].rows && typeof answers[0].rows.rules_unchecked_total === 'number'
+    ? answers[0].rows.rules_unchecked_total
+    : rules.filter((r) => r.status === 'unchecked').length;
+  return { open, unchecked, unchecked_total: total, rules, rules_unchecked_total: rulesTotal };
+}
+
+/**
+ * The pairs of a memory and a line of an instruction file of the `conflicts` answers
+ * (`rules_open`: open conflicts, `rules_unchecked`: candidates still to check), each once, the
+ * open conflicts first, with `status` ('conflict' | 'unchecked') and the call's project.
+ */
+export function mergeRulePairs(answers) {
+  const seen = new Set();
+  const pairs = [];
+  for (const status of ['conflict', 'unchecked']) {
+    for (const { call, rows } of answers) {
+      const answer = rows || {};
+      for (const pair of (status === 'conflict' ? answer.rules_open : answer.rules_unchecked) || []) {
+        if (!pair || !pair.memory || !pair.rule) continue;
+        // "All projects": a project's call keeps the pairs with a project side (a global memory
+        // against a project's line is that project's); the global call keeps the rest.
+        if (call.only === 'project' && pair.memory.scope === 'global' && pair.rule.scope === 'global') continue;
+        const key = rulePairKey(pair, call.project);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pairs.push({ ...pair, status, project: call.project });
+      }
+    }
+  }
+  return pairs;
+}
+
+/** The key of a memory / instruction line pair (a pair of global ones is the same in every project). */
+export function rulePairKey(pair, project = pair.project) {
+  const memory = pair.memory.scope === 'global' && pair.rule.scope === 'global' ? `global/${pair.memory.slug}` : `${project}/${pair.memory.slug}`;
+  return `${pair.rule.rule}|${memory}`;
+}
+
+/** "file:line" of an instruction line. */
+export function fileLine(rule) {
+  return `${rule.file}:${rule.line}`;
+}
+
+/** The harnesses that load an instruction file, readable. */
+export function loadedByText(rule) {
+  const names = { 'claude-code': 'Claude Code', opencode: 'opencode', codex: 'Codex', cursor: 'Cursor' };
+  const list = String(rule.loaded_by || '').split(',').filter(Boolean).map((id) => names[id] || id);
+  return list.length ? `loaded by ${list.join(', ')}` : '';
+}
+
+/**
+ * What the buttons of a memory / instruction line pair do: `settle` arguments for "Both hold"
+ * and "File is outdated" (recorded as a conflict, so it stays listed until the line changes),
+ * whether "Memory is outdated" may forget it (never an imported memory: its file is the one to
+ * edit), and the texts the UI shows.
+ */
+export function ruleActions(pair) {
+  const imported = isImported(pair.memory);
+  const where = `${pair.rule.file} line ${pair.rule.line}`;
+  return {
+    compatible: { slug: pair.memory.slug, decision: 'compatible', other: '', rule: pair.rule.rule, project: pair.project },
+    conflict: { slug: pair.memory.slug, decision: 'conflict', other: '', rule: pair.rule.rule, project: pair.project },
+    canForget: !imported,
+    forgetTitle: imported
+      ? `Imported from ${pair.memory.source}: edit or delete that file instead (an imported memory is read-only here).`
+      : 'Forget this memory: the instruction file\'s line stays the rule.',
+    fileText: `File is outdated: edit ${where}`,
+    fileNote: `Edit ${where} yourself: graphersal-memory never changes instruction files. The conflict stays listed and closes by itself when that line changes or goes (at the next session start, or with \`graphersal-memory import\`).`,
+  };
 }
 
 /** The status lines of `/api/ui/status` that need the user: problems and actions. */

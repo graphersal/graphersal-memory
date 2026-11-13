@@ -1630,7 +1630,10 @@ mod tests {
         assert_eq!(instruction["required"], json!(["text", "file", "line"]));
         assert_eq!(instruction["properties"]["emb"]["from"], "embed_text");
         let edge = &schema["edges"]["compared_with"];
-        assert_eq!(edge["connections"], json!([{"from": "instruction", "to": "memory"}]));
+        assert_eq!(
+            edge["connections"],
+            json!([{"from": "instruction", "to": "memory"}])
+        );
         assert_eq!(
             edge["schema"]["properties"]["decision"]["enum"],
             json!(["unchecked", "compatible", "conflict"])
@@ -1640,14 +1643,28 @@ mod tests {
     #[test]
     fn a_rule_near_a_memory_becomes_a_candidate_and_settles_compatible_or_conflict() {
         let mut session = conflict_store(&[
-            ("use-pnpm", "project", "Install dependencies with pnpm, not npm"),
-            ("dark-theme", "global", "The user prefers a dark editor theme"),
+            (
+                "use-pnpm",
+                "project",
+                "Install dependencies with pnpm, not npm",
+            ),
+            (
+                "dark-theme",
+                "global",
+                "The user prefers a dark editor theme",
+            ),
         ]);
         let synced = sync_rules(
             &mut session,
             vec![
                 rule("00000000000000a1", NPM, "/p/CLAUDE.md", 3, false),
-                rule("00000000000000a2", "Write commit messages in the imperative mood.", "/p/CLAUDE.md", 5, false),
+                rule(
+                    "00000000000000a2",
+                    "Write commit messages in the imperative mood.",
+                    "/p/CLAUDE.md",
+                    5,
+                    false,
+                ),
             ],
         );
         assert_eq!(synced["created"], 2, "{synced}");
@@ -1662,7 +1679,12 @@ mod tests {
         assert_eq!(npm["rule"]["line"], 3);
         assert_eq!(npm["rule"]["text"], NPM);
         assert_eq!(npm["rule"]["scope"], "project");
-        assert!(listed["check_rules"].as_str().unwrap().contains("rule: <rule>"));
+        assert!(
+            listed["check_rules"]
+                .as_str()
+                .unwrap()
+                .contains("rule: <rule>")
+        );
         let total = listed["rules_unchecked_total"].as_u64().unwrap();
         let internal = call_in(&mut session, "open_conflicts", json!({}));
         assert_eq!(internal["rules_unchecked"], total, "{internal}");
@@ -1675,12 +1697,29 @@ mod tests {
             json!({"slug": "use-pnpm", "decision": "conflict", "rule": "00000000000000a1"}),
         );
         assert_eq!(settled["rule_conflicts"], 1, "{settled}");
-        assert!(settled["note"].as_str().unwrap().contains("/p/CLAUDE.md line 3"), "{settled}");
+        assert!(
+            settled["note"]
+                .as_str()
+                .unwrap()
+                .contains("/p/CLAUDE.md line 3"),
+            "{settled}"
+        );
         let listed = call_in(&mut session, "conflicts", json!({"k": 5}));
-        assert_eq!(listed["rules_open"][0]["memory"]["slug"], "use-pnpm", "{listed}");
-        assert!(listed["settle_rules"].as_str().unwrap().contains("never edit it yourself"));
+        assert_eq!(
+            listed["rules_open"][0]["memory"]["slug"], "use-pnpm",
+            "{listed}"
+        );
+        assert!(
+            listed["settle_rules"]
+                .as_str()
+                .unwrap()
+                .contains("never edit it yourself")
+        );
         let internal = call_in(&mut session, "open_conflicts", json!({}));
-        assert_eq!(internal["rules_open"][0]["memory"]["slug"], "use-pnpm", "{internal}");
+        assert_eq!(
+            internal["rules_open"][0]["memory"]["slug"], "use-pnpm",
+            "{internal}"
+        );
         assert_eq!(internal["rules_open"][0]["line"], 3);
         let overview = call_in(&mut session, "overview", json!({}));
         assert_eq!(overview["rule_conflicts"], 1, "{overview}");
@@ -1699,7 +1738,8 @@ mod tests {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .all(|p| p["rule"]["rule"] != "00000000000000a1" || p["memory"]["slug"] != "use-pnpm"),
+                .all(|p| p["rule"]["rule"] != "00000000000000a1"
+                    || p["memory"]["slug"] != "use-pnpm"),
             "{listed}"
         );
         // A scan again (nothing changed) brings nothing back.
@@ -1707,7 +1747,13 @@ mod tests {
             &mut session,
             vec![
                 rule("00000000000000a1", NPM, "/p/CLAUDE.md", 3, false),
-                rule("00000000000000a2", "Write commit messages in the imperative mood.", "/p/CLAUDE.md", 5, false),
+                rule(
+                    "00000000000000a2",
+                    "Write commit messages in the imperative mood.",
+                    "/p/CLAUDE.md",
+                    5,
+                    false,
+                ),
             ],
         );
         let again = call_in(&mut session, "conflicts", json!({"k": 5}));
@@ -1716,15 +1762,25 @@ mod tests {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .all(|p| p["memory"]["slug"] != "use-pnpm" || p["rule"]["rule"] != "00000000000000a1"),
+                .all(|p| p["memory"]["slug"] != "use-pnpm"
+                    || p["rule"]["rule"] != "00000000000000a1"),
             "{again}"
         );
 
         // Wrong uses are refused with the way out.
         for (args, word) in [
-            (json!({"slug": "use-pnpm", "decision": "supersedes", "rule": "00000000000000a1"}), "forget it"),
-            (json!({"slug": "use-pnpm", "decision": "conflict", "rule": "00000000000000a1", "other": "dark-theme"}), "not both"),
-            (json!({"slug": "use-pnpm", "decision": "conflict", "rule": "00000000000000ff"}), "conflicts() lists"),
+            (
+                json!({"slug": "use-pnpm", "decision": "supersedes", "rule": "00000000000000a1"}),
+                "forget it",
+            ),
+            (
+                json!({"slug": "use-pnpm", "decision": "conflict", "rule": "00000000000000a1", "other": "dark-theme"}),
+                "not both",
+            ),
+            (
+                json!({"slug": "use-pnpm", "decision": "conflict", "rule": "00000000000000ff"}),
+                "conflicts() lists",
+            ),
         ] {
             let mut full = args.clone();
             full["project"] = json!("/p");
@@ -1736,18 +1792,32 @@ mod tests {
     #[test]
     fn a_moved_line_keeps_its_decision_and_a_changed_or_removed_one_drops_it() {
         let mut session = conflict_store(&[
-            ("use-pnpm", "project", "Install dependencies with pnpm, not npm"),
-            ("dark-theme", "global", "The user prefers a dark editor theme"),
+            (
+                "use-pnpm",
+                "project",
+                "Install dependencies with pnpm, not npm",
+            ),
+            (
+                "dark-theme",
+                "global",
+                "The user prefers a dark editor theme",
+            ),
             ("small-commits", "project", "Keep commits small and focused"),
         ]);
-        sync_rules(&mut session, vec![rule("00000000000000b1", NPM, "/p/CLAUDE.md", 3, false)]);
+        sync_rules(
+            &mut session,
+            vec![rule("00000000000000b1", NPM, "/p/CLAUDE.md", 3, false)],
+        );
         call_in(
             &mut session,
             "settle",
             json!({"slug": "use-pnpm", "decision": "conflict", "rule": "00000000000000b1"}),
         );
         // Moved: the same id at another line.
-        let moved = sync_rules(&mut session, vec![rule("00000000000000b1", NPM, "/p/CLAUDE.md", 9, false)]);
+        let moved = sync_rules(
+            &mut session,
+            vec![rule("00000000000000b1", NPM, "/p/CLAUDE.md", 9, false)],
+        );
         assert_eq!(moved["updated"], 1, "{moved}");
         assert_eq!(moved["created"], 0);
         let listed = call_in(&mut session, "conflicts", json!({"k": 5}));
@@ -1755,12 +1825,21 @@ mod tests {
         // Changed text = a new id: the old line goes with its conflict, the new one is a candidate.
         let changed = sync_rules(
             &mut session,
-            vec![rule("00000000000000b2", "Always use pnpm for installing packages.", "/p/CLAUDE.md", 9, false)],
+            vec![rule(
+                "00000000000000b2",
+                "Always use pnpm for installing packages.",
+                "/p/CLAUDE.md",
+                9,
+                false,
+            )],
         );
         assert_eq!(changed["removed"], 1, "{changed}");
         let listed = call_in(&mut session, "conflicts", json!({"k": 5}));
         assert!(listed.get("rules_open").is_none(), "{listed}");
-        assert_eq!(listed["rules_unchecked"][0]["rule"]["rule"], "00000000000000b2", "{listed}");
+        assert_eq!(
+            listed["rules_unchecked"][0]["rule"]["rule"], "00000000000000b2",
+            "{listed}"
+        );
         // Removed: nothing is left.
         let removed = sync_rules(&mut session, vec![]);
         assert_eq!(removed["removed"], 1, "{removed}");
@@ -1774,12 +1853,22 @@ mod tests {
 
     #[test]
     fn a_changed_memory_is_checked_again_and_remember_names_the_lines_near_it() {
-        let mut session = conflict_store(&[("dark-theme", "global", "The user prefers a dark editor theme")]);
+        let mut session = conflict_store(&[(
+            "dark-theme",
+            "global",
+            "The user prefers a dark editor theme",
+        )]);
         sync_rules(
             &mut session,
             vec![
                 rule("00000000000000c1", NPM, "/p/CLAUDE.md", 3, false),
-                rule("00000000000000c2", "Answer in short sentences without filler words.", "/home/u/.claude/CLAUDE.md", 1, true),
+                rule(
+                    "00000000000000c2",
+                    "Answer in short sentences without filler words.",
+                    "/home/u/.claude/CLAUDE.md",
+                    1,
+                    true,
+                ),
             ],
         );
         // A new memory near a line: remember names it, and conflicts() lists it.
@@ -1787,14 +1876,21 @@ mod tests {
             &mut session,
             json!({"slug": "use-pnpm", "summary": "Install dependencies with pnpm, not npm"}),
         );
-        let lines = answer["instruction_lines"].as_array().unwrap_or_else(|| panic!("{answer}"));
+        let lines = answer["instruction_lines"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{answer}"));
         assert_eq!(lines[0]["rule"], "00000000000000c1", "{answer}");
         assert_eq!(lines[0]["file"], "/p/CLAUDE.md");
         assert!(
             lines.iter().all(|l| l["rule"] != "00000000000000c2"),
             "a project memory is not checked against a user-level line: {answer}"
         );
-        assert!(answer["check_lines"].as_str().unwrap().contains("settle(\"use-pnpm\", \"conflict\", rule: <rule>)"));
+        assert!(
+            answer["check_lines"]
+                .as_str()
+                .unwrap()
+                .contains("settle(\"use-pnpm\", \"conflict\", rule: <rule>)")
+        );
         call_in(
             &mut session,
             "settle",
@@ -1814,7 +1910,10 @@ mod tests {
             json!({"slug": "use-pnpm", "summary": "Install dependencies with pnpm only, never npm"}),
         );
         let listed = call_in(&mut session, "conflicts", json!({"k": 5}));
-        assert_eq!(listed["rules_unchecked"][0]["memory"]["slug"], "use-pnpm", "{listed}");
+        assert_eq!(
+            listed["rules_unchecked"][0]["memory"]["slug"], "use-pnpm",
+            "{listed}"
+        );
         // A forgotten memory takes its candidates with it.
         call_in(&mut session, "forget", json!({"slug": "use-pnpm"}));
         let listed = call_in(&mut session, "conflicts", json!({"k": 5}));
@@ -1823,14 +1922,29 @@ mod tests {
 
     #[test]
     fn instruction_lines_are_never_found_as_memories() {
-        let mut session = conflict_store(&[("use-pnpm", "project", "Install dependencies with pnpm")]);
-        sync_rules(&mut session, vec![rule("00000000000000d1", NPM, "/p/CLAUDE.md", 3, false)]);
-        let hits = call_in(&mut session, "recall", json!({"text": NPM, "k": 10, "label": ""}));
+        let mut session =
+            conflict_store(&[("use-pnpm", "project", "Install dependencies with pnpm")]);
+        sync_rules(
+            &mut session,
+            vec![rule("00000000000000d1", NPM, "/p/CLAUDE.md", 3, false)],
+        );
+        let hits = call_in(
+            &mut session,
+            "recall",
+            json!({"text": NPM, "k": 10, "label": ""}),
+        );
         assert!(
-            hits.as_array().unwrap().iter().all(|h| h["label"] != "instruction"),
+            hits.as_array()
+                .unwrap()
+                .iter()
+                .all(|h| h["label"] != "instruction"),
             "{hits}"
         );
-        let found = call_in(&mut session, "memories", json!({"text": NPM, "k": 10, "kind": ""}));
+        let found = call_in(
+            &mut session,
+            "memories",
+            json!({"text": NPM, "k": 10, "kind": ""}),
+        );
         assert!(!found.to_string().contains("instruction:"), "{found}");
     }
 }
