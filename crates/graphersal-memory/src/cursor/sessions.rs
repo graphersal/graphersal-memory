@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::sessions::Unit;
-use crate::transcript::{CAP, Transcript, Turn, clip};
+use crate::transcript::{CAP, Transcript, Turn, clip, memory_writes};
 
 /// The registry's format version.
 const FORMAT: u64 = 1;
@@ -306,6 +306,15 @@ pub fn parse(bytes: &[u8], fallback_id: &str, project: &str) -> Transcript {
                 });
             }
             "assistant" => {
+                // The memories its calls of our memory tools name (bare tool names here).
+                for part in content.as_array().into_iter().flatten() {
+                    if part["type"] == "tool_use"
+                        && let Some(name) = part["name"].as_str()
+                    {
+                        out.memory_writes
+                            .extend(memory_writes(name, &part["input"], at));
+                    }
+                }
                 let Some(turn) = out.turns.last_mut() else {
                     continue;
                 };
@@ -472,5 +481,17 @@ pub(crate) mod tests {
         );
         assert_eq!(session_id(&transcript), "c1");
         assert_eq!(read(&transcript, "/w/app").unwrap().turns.len(), 2);
+    }
+
+    #[test]
+    fn a_cursor_transcript_records_the_memories_it_wrote() {
+        let t = parse(fixture().as_bytes(), "x", "/w/app");
+        let got: Vec<(&str, &str)> = t
+            .memory_writes
+            .iter()
+            .map(|w| (w.action.as_str(), w.slug.as_str()))
+            .collect();
+        // Cursor records bare tool names: `remember` with a slug is ours; `Write` is not.
+        assert_eq!(got, vec![("remember", "tabs")]);
     }
 }

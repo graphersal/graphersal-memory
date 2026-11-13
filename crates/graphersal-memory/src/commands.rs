@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::cli::{
-    BenchAction, BenchArm, Cli, Command, Harness, Profile, ProjectsAction, QuestionsEdit,
-    SummariesAction,
+    BenchAction, BenchArm, Cli, Command, DaemonAction, Harness, Profile, ProjectsAction,
+    QuestionsEdit, SummariesAction,
 };
 use crate::config::{self, Config};
 use crate::daemon::{self, DaemonOptions};
@@ -329,6 +329,23 @@ pub fn run_cli(
             })
             .map(|()| 0),
         Command::Daemon {
+            action: Some(action),
+            idle,
+            foreground,
+            version_as,
+        } => {
+            if idle.is_some() || *foreground || version_as.is_some() {
+                Err(
+                    "`daemon stop` and `daemon restart` take no --idle, --foreground or \
+                     --version-as"
+                        .to_string(),
+                )
+            } else {
+                daemon_action(cli, *action, stdout).map(|()| 0)
+            }
+        }
+        Command::Daemon {
+            action: None,
             idle,
             foreground,
             version_as,
@@ -1196,10 +1213,10 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
         ));
     }
     let mut shared = install::shared_doctor(setup);
-    if ipc::connect(&setup.run_dir).is_ok() {
-        for line in start_context_lines(&setup.run_dir) {
-            shared.push(install::ok(line));
-        }
+    // Asked of a running daemon only (one `start_context` control request; no bare probe
+    // connection, which the daemon would see as a connection without a line).
+    for line in running_start_context_lines(&setup.run_dir) {
+        shared.push(install::ok(line));
     }
     sections.push(("Memory and daemon".to_string(), shared));
     let _ = writeln!(
@@ -1670,6 +1687,109 @@ fn run_daemon(
     Ok(())
 }
 
+/// How long `daemon stop`/`restart` waits for the daemon to close its stores and exit.
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `daemon stop` and `daemon restart`: the control request, then the wait until the process is
+/// gone (it closes its stores first); `restart` then starts a new daemon (open sessions may have
+/// started it already: either way one runs). Prints what happened; no daemon is not an error.
+fn daemon_action(cli: &Cli, action: DaemonAction, mut stdout: impl Write) -> Result<(), String> {
+    let location = location(cli)?;
+    let run_dir = &location.run_dir;
+    let old_pid = match shim::control(run_dir, "status")? {
+        Some(status) => status["pid"].as_u64(),
+        None => None,
+    };
+    let request = match action {
+        DaemonAction::Stop => "stop",
+        DaemonAction::Restart => "restart",
+    };
+    let stopped = match old_pid {
+        None => false,
+        Some(_) => match shim::control(run_dir, request)? {
+            None => false,
+            Some(answer) if answer["ok"] == serde_json::Value::Bool(true) => true,
+            Some(_) if action == DaemonAction::Restart => {
+                // A daemon older than `restart`: a `stop`, then its marker taken away, so open
+                // sessions start the new daemon.
+                let stopped = shim::control(run_dir, "stop")?.is_some();
+                wait_gone(run_dir, old_pid)?;
+                let _ = std::fs::remove_file(run_dir.join(ipc::STOPPED_FILE));
+                stopped
+            }
+            Some(answer) => {
+                return Err(format!(
+                    "the daemon refused to stop: {}",
+                    answer["message"].as_str().unwrap_or("no reason given")
+                ));
+            }
+        },
+    };
+    let successor = if stopped {
+        wait_gone(run_dir, old_pid)?
+    } else {
+        None
+    };
+    let pid_text = |pid: Option<u64>| pid.map_or_else(String::new, |pid| format!(" (pid {pid})"));
+    match action {
+        DaemonAction::Stop => {
+            let _ = if stopped {
+                writeln!(
+                    stdout,
+                    "daemon: stopped{}; open sessions do not start it again, the next new \
+                     session (or `graphersal-memory daemon`) does",
+                    pid_text(old_pid)
+                )
+            } else {
+                writeln!(stdout, "daemon: not running")
+            };
+        }
+        DaemonAction::Restart => {
+            if stopped {
+                let _ = writeln!(stdout, "daemon: stopped{}", pid_text(old_pid));
+            } else {
+                let _ = writeln!(stdout, "daemon: was not running");
+            }
+            let status = match successor {
+                // An open session already started the new one.
+                Some(status) => status,
+                None => {
+                    drop(shim::connect_or_start(&location)?);
+                    shim::control(run_dir, "status")?
+                        .ok_or_else(|| "the daemon stopped right after its start".to_string())?
+                }
+            };
+            let _ = writeln!(stdout, "{}", describe(&status));
+        }
+    }
+    Ok(())
+}
+
+/// Waits until the daemon `old_pid` is gone: no daemon holds the run directory's pid lock any
+/// more (`None`), or another daemon answers already (an open session started it: its status).
+fn wait_gone(run_dir: &Path, old_pid: Option<u64>) -> Result<Option<serde_json::Value>, String> {
+    let deadline = std::time::Instant::now() + STOP_WAIT;
+    loop {
+        if let Some(status) = shim::control(run_dir, "status").ok().flatten()
+            && status["pid"].as_u64().is_some()
+            && status["pid"].as_u64() != old_pid
+        {
+            return Ok(Some(status));
+        }
+        if !ipc::daemon_alive(run_dir)? {
+            return Ok(None);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "the daemon did not exit within {}s after the request; see {}",
+                STOP_WAIT.as_secs(),
+                run_dir.join(ipc::LOG_FILE).display()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// One line about a running daemon.
 fn describe(status: &serde_json::Value) -> String {
     let stores: Vec<&str> = status["stores"]
@@ -1744,6 +1864,17 @@ fn status(cli: &Cli, mut stdout: impl Write) -> Result<(), String> {
 /// from the running daemon (none is started): the start context, then the open memory
 /// conflicts with their files and the imported memories not yet checked.
 fn start_context_lines(run_dir: &Path) -> Vec<String> {
+    start_context_answer(run_dir)
+        .unwrap_or_else(|| vec!["start context: the daemon is not running".to_string()])
+}
+
+/// [`start_context_lines`] of a running daemon; nothing when none runs.
+fn running_start_context_lines(run_dir: &Path) -> Vec<String> {
+    start_context_answer(run_dir).unwrap_or_default()
+}
+
+/// The start context lines of the current directory's project; `None` when no daemon runs.
+fn start_context_answer(run_dir: &Path) -> Option<Vec<String>> {
     let project = std::env::current_dir()
         .map(|dir| mcp::project_key(None, &dir))
         .unwrap_or_default();
@@ -1751,10 +1882,10 @@ fn start_context_lines(run_dir: &Path) -> Vec<String> {
         Ok(Some(context)) => {
             let mut lines = vec![context.status_line()];
             lines.extend(context.conflict_lines());
-            lines
+            Some(lines)
         }
-        Ok(None) => vec!["start context: the daemon is not running".to_string()],
-        Err(err) => vec![format!("start context: {err}")],
+        Ok(None) => None,
+        Err(err) => Some(vec![format!("start context: {err}")]),
     }
 }
 

@@ -144,5 +144,24 @@
         }
       }
     ]
+  },
+  {
+    "name": "link_memories",
+    "description": "Internal (session indexing): links a session to the memories its transcript wrote through the memory tools (wrote edges, replaced as a whole on every call, so a repeated call changes nothing).",
+    "params": [
+      {
+        "name": "id",
+        "schema": {
+          "type": "string",
+          "pattern": "^session:"
+        }
+      },
+      {
+        "name": "links",
+        "schema": {
+          "type": "array"
+        }
+      }
+    ]
   }
 ]

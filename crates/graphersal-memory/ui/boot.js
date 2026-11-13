@@ -1,10 +1,12 @@
 // graphersal-memory ui: the first script of the page (a classic script, before the playground's
 // modules). It takes the token out of the address (`#token=<hex>`, put there by the launch file
 // `ui-<pid>.html` or the printed address) into this tab's sessionStorage and clears it from the
-// address, adds `Authorization: Bearer <token>` to every request of this page to its own
-// `/api/`, and sends the heartbeat that keeps `graphersal-memory ui` running (every 60 s; the
-// server stops 15 minutes after the last one). A tab whose server is gone says how to start it
-// again. Never a cookie, never the token in a URL that leaves the fragment.
+// address, hands `Authorization: Bearer <token>` to the playground's engine through its host hook
+// (`window.GRAPHERSAL_ENGINE = {headers}`, read once when the engine starts; every request of the
+// engine to `/api/` carries it; ui/api-ui.js adds it to the `/api/ui/*` calls), and sends the
+// heartbeat that keeps `graphersal-memory ui` running (every 60 s; the server stops 15 minutes
+// after the last one). A tab whose server is gone says how to start it again. Never a cookie,
+// never the token in a URL that leaves the fragment, never `window.fetch` replaced.
 (function () {
   'use strict';
   var KEY = 'graphersal-memory.ui.token';
@@ -25,21 +27,9 @@
     token = '';
   }
 
-  var nativeFetch = window.fetch.bind(window);
-  window.fetch = function (input, init) {
-    try {
-      var raw = typeof input === 'string' || input instanceof URL ? String(input) : input.url;
-      var url = new URL(raw, window.location.href);
-      if (token && url.origin === window.location.origin && url.pathname.indexOf('/api/') === 0) {
-        var options = Object.assign({}, init || {});
-        var headers = new Headers(options.headers || (input instanceof Request ? input.headers : undefined));
-        headers.set('Authorization', 'Bearer ' + token);
-        options.headers = headers;
-        return nativeFetch(input, options);
-      }
-    } catch (e) { /* not a URL we know: sent as it is */ }
-    return nativeFetch(input, init);
-  };
+  if (token) {
+    window.GRAPHERSAL_ENGINE = { headers: { Authorization: 'Bearer ' + token } };
+  }
 
   function banner(text) {
     var show = function () {
@@ -65,7 +55,11 @@
   }
 
   function heartbeat() {
-    window.fetch('/api/ui/heartbeat', { method: 'POST', cache: 'no-store' }).then(function (r) {
+    window.fetch('/api/ui/heartbeat', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { Authorization: 'Bearer ' + token },
+    }).then(function (r) {
       if (r.status === 401) {
         banner('This tab\'s access token is no longer valid (the UI was started again). Open the new address that "graphersal-memory ui" printed.');
       } else if (r.ok) {

@@ -459,6 +459,8 @@ Code:
 graphersal-memory install --dry-run   # the plan, nothing changes
 graphersal-memory install             # shows the plan again and asks
 graphersal-memory status              # what is installed, whether the daemon runs
+graphersal-memory daemon restart      # after installing a new binary: open sessions reconnect
+graphersal-memory daemon stop         # stop it; open sessions do not start it again
 ```
 
 Restart your Claude Code sessions afterwards. Details:

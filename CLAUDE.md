@@ -15,7 +15,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/main.rs`: the entry point (parse, run, exit code);
   - `src/cli.rs`: the clap command definitions and help text, plus parsing tests;
   - `src/commands.rs`: running a command (`run_cli`): `mcp` runs the shim (`--no-daemon`:
-    serves in this process), `daemon` runs (`--foreground`) or starts the daemon, `install`,
+    serves in this process), `daemon` runs (`--foreground`) or starts the daemon (`daemon stop`:
+    the `stop` control request, marker left; `daemon restart`: the `restart` control request, no
+    marker, then a new daemon; both wait until the old process is gone, `daemon_action`), `install`,
     `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects`, `start-context` and the
     hidden `hook` work on Claude Code, opencode, Codex and Cursor (`Setup` from the environment, with the model download
     `Source`; `bench_options` for `bench`; `DaemonSource` reads the memories for the export);
@@ -192,7 +194,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `store.checkpoint_after|keep_history`;
     `with_summaries` and `with_values` edit in place); flag > env > file > default;
   - `src/transcript.rs`: the Claude Code transcript parser (turns, title, times, branches, edited
-    files, compaction summaries; sidechains and generated records left out; unknown records,
+    files, compaction summaries, `memory_writes`: `memory_tool`/`memory_writes` recognise our
+    memory tools in every harness's spelling (also bare names with a `slug`, Cursor) and are
+    called by every harness's reader; sidechains and generated records left out; unknown records,
     bad lines and a partial last line skipped; fingerprint of the complete lines);
   - `src/sessions.rs`: the session indexing per harness (`Request.harness`; the daemon keeps one
     pending request per harness): `units` (Claude Code: `scan`, top-level `*.jsonl` only;
@@ -203,7 +207,10 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     40 turns, then summaries; a failing or panicking file is recorded in its state entry,
     `failed`, and skipped after `INDEX_ATTEMPTS` tries of the same version under the same binary
     version, the rest goes on), `estimate`, `plan`, the control lines `index_sessions` /
-    `sessions_status`;
+    `sessions_status`; the session -> memory links (`memory_links`, `link_session`: the
+    transcript's `memory_writes` become `wrote` edges through the internal `link_memories`, only
+    when there are writes; `backfill_links` once per state entry without `memory_links` =
+    `LINKS_VERSION`);
   - `src/summaries.rs`: the opt-in summaries: the prompt and JSON schema (ported from the
     prototype), `harness_args` (`claude` gets `--output-format json --json-schema ... --tools ""
     --strict-mcp-config --no-session-persistence`), `run_harness_with` (prompt on stdin, timeout; an `opencode` command in its sandbox with
@@ -255,7 +262,7 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/ipc.rs`: the run directory (`--run-dir`, `GRAPHERSAL_MEMORY_RUN_DIR`, `<data dir>/run`
     for an explicit data directory, the platform's default), its files (`daemon.sock`,
     `daemon.pid`, `daemon.start.lock`, `daemon.log`, `daemon.stopped` (`STOPPED_FILE`: written by a `stop`
-    control request, removed by the next daemon's start; `stopped_on_purpose`); a default whose socket path is too long
+    control request (never by `restart`), removed by the next daemon's start; `stopped_on_purpose`); a default whose socket path is too long
     becomes `short_run_dir`, `/tmp/graphersal-memory-<fingerprint of the data dir>`), the socket types per platform (std on
     Unix, `uds_windows` on Windows), `LockFile` (`fd-lock`);
   - `src/ui.rs`: `graphersal-memory ui` (stage UI): the loopback HTTP server (`tiny_http`, port 0 or
@@ -281,8 +288,11 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     always loaded / imported / superseded, legend: the engine's `api.graph`, EXPERIMENTAL);
     `graph-model.js` the Graph tab's pure logic (graph data of `memory_graph` /
     `memory_neighbours`, classes, card buttons and their writes; `ui/tests/graph-model.test.mjs`);
-    `boot.js` takes the token from `#token=` into sessionStorage, adds the header to the
-    page's `/api/` fetches and sends the heartbeat; `model.js` the pure logic, tested by
+    `boot.js` takes the token from `#token=` into sessionStorage, hands it to the engine as
+    `window.GRAPHERSAL_ENGINE = {headers: {Authorization}}` (the playground's host hook; never a
+    `window.fetch` wrapper; `api-ui.js` sends the same headers to `/api/ui/*`) and sends the
+    heartbeat (`ui/tests/boot.test.mjs`); `ui_assets::profile` adds the binary's version as the
+    profile's `version` (the header shows it); `model.js` the pure logic, tested by
     `node --test crates/graphersal-memory/ui/tests/*.test.mjs`; `shared.js` the project switcher,
     calls per selection ("All projects" = once per project + global once), the memory form with
     the "changed meanwhile" check and the nearest check; one module per tab);

@@ -147,8 +147,13 @@ pub enum Command {
         #[arg(long, value_name = "ROOT")]
         project: Option<PathBuf>,
     },
-    /// Run the background daemon that owns the stores (started on demand by `mcp`).
+    /// Run the background daemon that owns the stores (started on demand by `mcp`), or stop or
+    /// restart the running one.
     Daemon {
+        /// `stop` or `restart` the running daemon (without: start it if it does not run, and
+        /// show it).
+        #[command(subcommand)]
+        action: Option<DaemonAction>,
         /// Exit after this long without a connection (examples: 90s, 30m, 2h; default 2h; the
         /// environment variable GRAPHERSAL_MEMORY_IDLE sets it too).
         #[arg(long, value_name = "DURATION", value_parser = parse_idle)]
@@ -281,6 +286,18 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = Harness::ClaudeCode)]
         harness: Harness,
     },
+}
+
+/// What `daemon` does besides starting.
+#[derive(Debug, Subcommand, PartialEq, Clone, Copy)]
+pub enum DaemonAction {
+    /// Stop the running daemon after it closed its stores. Open sessions do not start it again
+    /// (their memory tools answer that it was stopped); the next new session or `ui` starts a
+    /// new one.
+    Stop,
+    /// Stop the running daemon and start a new one (to pick up a new binary): open sessions
+    /// and `ui` reconnect to the new daemon by themselves.
+    Restart,
 }
 
 /// What `projects` does.
@@ -1041,11 +1058,24 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Daemon {
+                action: None,
                 idle: Some(std::time::Duration::from_secs(90)),
                 foreground: true,
                 version_as: None
             }
         );
+        for (word, action) in [
+            ("stop", DaemonAction::Stop),
+            ("restart", DaemonAction::Restart),
+        ] {
+            match parse(&["daemon", word]).unwrap().command {
+                Command::Daemon {
+                    action: Some(parsed),
+                    ..
+                } => assert_eq!(parsed, action),
+                other => panic!("{other:?}"),
+            }
+        }
         assert_eq!(
             parse(&["daemon", "--idle", "soon"]).unwrap_err().kind(),
             ErrorKind::ValueValidation

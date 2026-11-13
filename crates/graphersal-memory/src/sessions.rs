@@ -22,6 +22,12 @@
 //!   [`BATCH_TURNS`] turns ([`BATCH_CHARS`] characters), each a short job on the store's session
 //!   thread, so an agent's memory call never waits long behind the indexing. The daemon runs
 //!   this on a thread of its own (`crate::daemon`); writes go through [`Writer`].
+//! - **Memories written**: the calls of our memory tools a transcript records
+//!   (`crate::transcript::MemoryWrite`, every harness's reader) link the session to each memory
+//!   it wrote (`wrote` edges, internal function `link_memories`, replaced as a whole per
+//!   session). A session indexed before this existed is linked once, at the next run, from its
+//!   transcript if it still exists (the state entry's `memory_links` is [`LINKS_VERSION`]
+//!   afterwards; a repeated link changes nothing).
 //! - **Project**: the transcript's working directory, mapped to the project key as a session
 //!   started there would be (its git root); else the project directory's name, decoded like the
 //!   file-memory import does. Every vertex carries the project, so sessions are scoped like
@@ -58,6 +64,10 @@ const INDEX_ATTEMPTS: u64 = 2;
 
 /// The state file's format version.
 const FORMAT: u64 = 1;
+
+/// The version of the session -> memory links an entry of the state file records
+/// (`memory_links`): an indexed session whose entry has another one is linked again once.
+pub const LINKS_VERSION: u64 = 1;
 
 /// The writes and reads of the indexing, by project (the daemon routes each to the project's
 /// store; tests call a session directly).
@@ -218,6 +228,9 @@ pub struct Report {
     pub budget_reached: bool,
     /// Session files skipped because this version of them failed [`INDEX_ATTEMPTS`] times.
     pub failed: usize,
+    /// Sessions linked to the memories they wrote (`wrote` edges; also an unchanged session
+    /// linked once by the backfill).
+    pub linked: usize,
     /// What failed, one line each.
     pub problems: Vec<String>,
 }
@@ -231,7 +244,7 @@ impl Report {
             "unchanged": self.unchanged, "empty": self.empty, "turns": self.turns,
             "summarized": self.summarized, "facts": self.facts,
             "summaries_pending": self.summaries_pending, "budget_reached": self.budget_reached,
-            "failed": self.failed, "problems": self.problems,
+            "failed": self.failed, "linked": self.linked, "problems": self.problems,
         })
     }
 }
@@ -671,6 +684,77 @@ fn write_session(writer: &mut dyn Writer, parsed: &Parsed) -> Result<usize, Stri
     Ok(total)
 }
 
+/// The memories a session wrote, one row per slug in first-write order: `{slug, actions (the
+/// tool calls in first-use order), at, last_at, count}` (the `links` of `link_memories`).
+pub fn memory_links(writes: &[transcript::MemoryWrite]) -> Vec<Value> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut rows: BTreeMap<&str, (Vec<&str>, &str, &str, u64)> = BTreeMap::new();
+    for write in writes {
+        let row = rows.entry(write.slug.as_str()).or_insert_with(|| {
+            order.push(write.slug.as_str());
+            (Vec::new(), write.at.as_str(), write.at.as_str(), 0)
+        });
+        if !row.0.contains(&write.action.as_str()) {
+            row.0.push(write.action.as_str());
+        }
+        if row.1.is_empty() {
+            row.1 = write.at.as_str();
+        }
+        if !write.at.is_empty() {
+            row.2 = write.at.as_str();
+        }
+        row.3 += 1;
+    }
+    order
+        .into_iter()
+        .filter_map(|slug| {
+            rows.get(slug).map(|(actions, at, last, count)| {
+                json!({"slug": slug, "actions": actions, "at": at, "last_at": last,
+                       "count": count})
+            })
+        })
+        .collect()
+}
+
+/// Links the session to the memories it wrote (replacing its earlier links); `false` without
+/// a memory write (nothing to link: a transcript only grows, so a session without writes never
+/// had links).
+fn link_session(writer: &mut dyn Writer, parsed: &Parsed) -> Result<bool, String> {
+    if parsed.transcript.memory_writes.is_empty() {
+        return Ok(false);
+    }
+    let links = memory_links(&parsed.transcript.memory_writes);
+    let answer = writer.call(
+        &parsed.key,
+        "link_memories",
+        json!({"id": parsed.id, "links": links}),
+    )?;
+    match answer["error"].as_str() {
+        Some(err) => Err(format!("{}: {err}", parsed.id)),
+        None => Ok(true),
+    }
+}
+
+/// The one-time link of a session indexed before the links existed (its state entry has no
+/// current `memory_links`): read its transcript again, link, record the version.
+fn backfill_links(
+    file: &Path,
+    modified: u64,
+    data_dir: &Path,
+    writer: &mut dyn Writer,
+    state: &mut State,
+) -> Result<bool, String> {
+    let linked = match parse_file(file, modified, data_dir, true)? {
+        Some(parsed) => link_session(writer, &parsed)?,
+        None => false,
+    };
+    let slot = state.entry_mut(file);
+    if slot.is_object() {
+        slot["memory_links"] = json!(LINKS_VERSION);
+    }
+    Ok(linked)
+}
+
 /// What the graph knows of each session of a project: id -> (fingerprint, summarized).
 type Known = BTreeMap<String, (String, String)>;
 
@@ -759,6 +843,24 @@ pub fn run(
         }
         if same_file && entry["fingerprint"].is_string() {
             report.unchanged += 1;
+            if entry["memory_links"].as_u64() != Some(LINKS_VERSION) {
+                let linked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _doing = crate::daemon::doing(format!("linking {}", file.display()));
+                    backfill_links(&file, modified, data_dir, writer, &mut state)
+                }))
+                .unwrap_or_else(|_| Err("linking it panicked (a bug, logged)".to_string()));
+                match linked {
+                    Ok(true) => report.linked += 1,
+                    Ok(false) => {}
+                    Err(err) => report.problems.push(format!(
+                        "{}: the memories it wrote are not linked: {err}",
+                        file.display()
+                    )),
+                }
+                if let Err(err) = state.save(data_dir) {
+                    report.problems.push(err);
+                }
+            }
             if entry["summarized"] != entry["fingerprint"] {
                 to_summarize.push(file);
             }
@@ -781,14 +883,16 @@ pub fn run(
         .unwrap_or_else(|_| Err("indexing it panicked (a bug, logged)".to_string()));
         match indexed {
             Ok(Indexed::Empty) => report.empty += 1,
-            Ok(Indexed::Unchanged { summarized }) => {
+            Ok(Indexed::Unchanged { summarized, linked }) => {
                 report.unchanged += 1;
+                report.linked += usize::from(linked);
                 if !summarized {
                     to_summarize.push(file.clone());
                 }
             }
-            Ok(Indexed::Written { turns }) => {
+            Ok(Indexed::Written { turns, linked }) => {
                 report.indexed += 1;
+                report.linked += usize::from(linked);
                 report.turns += turns;
                 to_summarize.push(file.clone());
             }
@@ -890,8 +994,8 @@ fn record_failure(state: &mut State, file: &Path, size: u64, modified: u64, atte
 
 enum Indexed {
     Empty,
-    Unchanged { summarized: bool },
-    Written { turns: usize },
+    Unchanged { summarized: bool, linked: bool },
+    Written { turns: usize, linked: bool },
 }
 
 fn index_one(
@@ -910,14 +1014,18 @@ fn index_one(
     let known = known_of(writer, cache, &parsed.key)?;
     let fingerprint = parsed.transcript.fingerprint.clone();
     let (stored, summarized) = known.get(&parsed.id).cloned().unwrap_or_default();
-    let outcome = if stored == fingerprint {
-        Indexed::Unchanged {
-            summarized: summarized == fingerprint,
-        }
+    let written = if stored == fingerprint {
+        None
     } else {
-        Indexed::Written {
-            turns: write_session(writer, &parsed)?,
-        }
+        Some(write_session(writer, &parsed)?)
+    };
+    let linked = link_session(writer, &parsed)?;
+    let outcome = match written {
+        None => Indexed::Unchanged {
+            summarized: summarized == fingerprint,
+            linked,
+        },
+        Some(turns) => Indexed::Written { turns, linked },
     };
     let previous = state.entry(file).cloned().unwrap_or(Value::Null);
     let summary_of = if summarized == fingerprint {
@@ -933,6 +1041,7 @@ fn index_one(
             .chars().count(),
         "summarized": summary_of,
         "indexed_at": crate::daemon::now_utc(),
+        "memory_links": LINKS_VERSION,
     });
     Ok(outcome)
 }
@@ -1257,6 +1366,136 @@ mod tests {
             store.query("g.v(\"session:abc\").values(\"turns\").next()"),
             json!([4])
         );
+    }
+
+    /// Takes `memory_links` out of every entry of the state file (a state written before the
+    /// links existed).
+    fn forget_links_in_state(data: &Path) {
+        fn strip(value: &mut Value) {
+            match value {
+                Value::Object(map) => {
+                    map.remove("memory_links");
+                    map.values_mut().for_each(strip);
+                }
+                Value::Array(items) => items.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        let path = State::path(data);
+        let mut state: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        strip(&mut state);
+        std::fs::write(&path, state.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_session_is_linked_to_the_memories_it_wrote_and_old_sessions_are_backfilled_once() {
+        let tmp = crate::mcp_tests::TempDir::new("sess-links");
+        let data = crate::mcp_tests::TempDir::new("sess-links-data");
+        let (projects, work, file) = setup(tmp.path());
+        let project = work.display().to_string();
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str(&format!(
+            "{}\n",
+            json!({"type": "assistant", "sessionId": "s-1", "timestamp": "2026-01-02T11:00:09.000Z",
+                   "message": {"content": [
+                       {"type": "tool_use", "name": "mcp__graphersal-memory__remember",
+                        "input": {"slug": "parser-cache", "summary": "LRU"}},
+                       {"type": "tool_use", "name": "mcp__graphersal-memory__pin",
+                        "input": {"slug": "parser-cache"}},
+                       {"type": "tool_use", "name": "mcp__graphersal-memory__remember",
+                        "input": {"slug": "g-rule", "scope": "global"}},
+                       {"type": "tool_use", "name": "mcp__graphersal-memory__remember",
+                        "input": {"slug": "never-written"}}]}})
+        ));
+        std::fs::write(&file, text).unwrap();
+        let mut store = Direct::new();
+        for (slug, scope) in [("parser-cache", "project"), ("g-rule", "global")] {
+            crate::catalog::call(
+                &mut store.session,
+                "remember",
+                &json!({"slug": slug, "kind": "project", "summary": slug, "body": slug,
+                        "scope": scope, "project": project}),
+            )
+            .unwrap();
+        }
+        let wrote = |store: &mut Direct| {
+            store.query(
+                "g.v(\"session:abc\").out_e(\"wrote\").order().by(__.in_v().id())\
+                 .project(\"to\", \"actions\", \"count\", \"at\").by(__.in_v().id())\
+                 .by(\"actions\").by(\"count\").by(\"at\").to_list()",
+            )
+        };
+        let first = index(&request(&projects), data.path(), &mut store);
+        assert_eq!(first.problems, Vec::<String>::new());
+        assert_eq!((first.indexed, first.linked), (1, 1));
+        let edges = wrote(&mut store).as_array().unwrap().clone();
+        assert_eq!(edges.len(), 2, "the missing memory has no edge: {edges:?}");
+        assert_eq!(edges[0]["to"], "memory:g-rule", "{edges:?}");
+        assert_eq!(edges[1]["to"], format!("memory:parser-cache@{project}"));
+        assert_eq!(edges[1]["actions"], json!(["remember", "pin"]));
+        assert_eq!(edges[1]["count"], 2);
+        assert_eq!(edges[1]["at"], "2026-01-02T11:00:09.000Z");
+
+        // The UI's Graph tab: expanding the memory finds the session through its wrote edge.
+        let around = crate::catalog::call(
+            &mut store.session,
+            "memory_neighbours",
+            &json!({"slug": "parser-cache", "project": project}),
+        )
+        .unwrap();
+        assert!(
+            around["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n["id"] == "session:abc" && n["label"] == "session"),
+            "{around}"
+        );
+        assert!(
+            around["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["label"] == "wrote"
+                    && e["source"] == "session:abc"
+                    && e["actions"] == json!(["remember", "pin"])),
+            "{around}"
+        );
+        assert_eq!(around["imported"], "");
+
+        // Unchanged and linked: nothing is read or written again.
+        store.calls.clear();
+        let second = index(&request(&projects), data.path(), &mut store);
+        assert_eq!((second.unchanged, second.linked), (1, 0));
+        assert!(store.calls.is_empty(), "{:?}", store.calls);
+
+        // A state written before the links existed: one backfill pass, the same edges.
+        forget_links_in_state(data.path());
+        let backfill = index(&request(&projects), data.path(), &mut store);
+        assert_eq!(
+            (backfill.unchanged, backfill.linked, backfill.problems.len()),
+            (1, 1, 0)
+        );
+        assert_eq!(store.calls, vec!["link_memories"]);
+        assert_eq!(wrote(&mut store).as_array().unwrap().len(), 2);
+        store.calls.clear();
+        let after = index(&request(&projects), data.path(), &mut store);
+        assert_eq!(after.linked, 0);
+        assert!(
+            store.calls.is_empty(),
+            "the backfill runs once: {:?}",
+            store.calls
+        );
+
+        // Sessions indexed before this version have no edges: the backfill adds them, and a
+        // repeated one changes nothing.
+        store.query("g.e().has_label(\"wrote\").drop().iterate()");
+        for _ in 0..2 {
+            forget_links_in_state(data.path());
+            index(&request(&projects), data.path(), &mut store);
+            assert_eq!(wrote(&mut store).as_array().unwrap(), &edges);
+        }
     }
 
     #[test]
