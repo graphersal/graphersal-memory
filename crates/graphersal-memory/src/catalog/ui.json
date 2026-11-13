@@ -158,7 +158,7 @@
   },
   {
     "name": "memory_neighbours",
-    "description": "UI: the sessions and facts around the memory <slug> (about, contains, edited) with the edges among them and the memory, as {memory, nodes, edges, memories}.",
+    "description": "UI: the sessions and facts around the memory <slug> (the sessions that wrote it, about, contains, edited) with the edges among them and the memory, as {memory, nodes, edges, memories, imported (the file of an imported memory, else empty)}.",
     "params": [
       {
         "name": "slug",

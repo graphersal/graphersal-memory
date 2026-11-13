@@ -1163,3 +1163,104 @@ fn a_daemon_of_another_version_after_the_restart_announces_a_new_tool_list() {
     assert_eq!(env.status().unwrap()["daemon_version"], VERSION);
     close_ok(shim);
 }
+
+#[test]
+fn a_connection_without_a_line_and_doctor_leave_no_refusal_in_the_log() {
+    let env = Env::new("10m");
+    let shim = env.shim("/w/probe");
+    // A bare probe: connect, send nothing, close.
+    drop(UnixStream::connect(env.socket()).unwrap());
+    // doctor asks the running daemon for the start context (one control request).
+    let output = env.command().arg("doctor").output().unwrap();
+    assert!(
+        output.status.code().is_some(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The daemon still serves, and logged no refusal.
+    assert!(env.status().is_some());
+    let log = env.log();
+    assert!(!log.contains("refused a connection"), "{log}");
+    assert!(!log.contains("not JSON"), "{log}");
+    // A line that is not JSON is still refused (and logged).
+    let answer = env.raw("hello");
+    assert_eq!(answer["error"]["code"], "bad_handshake", "{answer}");
+    assert!(env.log().contains("refused a connection"), "{}", env.log());
+    close_ok(shim);
+}
+
+#[test]
+fn daemon_stop_stops_it_for_open_sessions_and_says_when_none_runs() {
+    let env = Env::new("10m");
+    let output = env.command().args(["daemon", "stop"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "daemon: not running"
+    );
+
+    let mut shim = env.shim("/w/stop");
+    let pid = env.status().unwrap()["pid"].as_u64().unwrap();
+    let output = env.command().args(["daemon", "stop"]).output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.starts_with(&format!("daemon: stopped (pid {pid})")),
+        "{text}"
+    );
+    assert!(!alive(pid), "stop returns once the daemon is gone");
+    // The open session does not start it again.
+    assert!(shim.answer().is_none(), "the shim ends");
+    let (ok, stderr) = shim.close();
+    assert!(!ok);
+    assert!(stderr.contains("stopped on purpose"), "{stderr}");
+    assert!(env.status().is_none(), "no daemon was started again");
+}
+
+#[test]
+fn daemon_restart_starts_a_new_daemon_and_open_sessions_reconnect_to_it() {
+    let env = Env::new("10m");
+    let mut shim = env.shim("/w/restart");
+    shim.remember("kept", "Kept across the restart", "project");
+    let pid = env.status().unwrap()["pid"].as_u64().unwrap();
+    let output = env.command().args(["daemon", "restart"]).output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.starts_with(&format!("daemon: stopped (pid {pid})")),
+        "{text}"
+    );
+    assert!(text.contains("daemon: running (pid "), "{text}");
+    assert!(!alive(pid));
+    let new = new_daemon(&env, pid);
+    assert!(
+        !env.run_dir().join("daemon.stopped").exists(),
+        "no stop marker"
+    );
+    // The open session reconnects to the new daemon by itself.
+    let read = shim.ok("memory", json!({"slug": "kept"}));
+    assert!(read.contains("Kept across the restart"), "{read}");
+    assert_eq!(env.status().unwrap()["pid"].as_u64(), Some(new));
+    let (ok, stderr) = shim.close();
+    assert!(ok, "{stderr}");
+    assert!(stderr.contains("reconnected to the daemon"), "{stderr}");
+
+    // Without a daemon, restart starts one.
+    let _ = env.control("stop");
+    env.wait_for("the stop", || !alive(new));
+    let output = env.command().args(["daemon", "restart"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.starts_with("daemon: was not running"), "{text}");
+    assert!(env.status().is_some());
+}

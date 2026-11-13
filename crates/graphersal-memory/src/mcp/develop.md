@@ -3,7 +3,7 @@ the memory functions themselves (memories, memory, remember, forget, pin, confli
 sessions, session, recall; each a tool of its own, folder "memory").
 
 - Read first: get_schema (the labels memory, session, turn, fact; edges relates_to, supersedes,
-  conflicts_with, narrows, about, contains, edited), list_saved_queries, statistics.
+  conflicts_with, narrows, about, contains, edited, wrote), list_saved_queries, statistics.
 - Decisions between memories are data: supersedes (newer -> older, `at`), conflicts_with (an
   open conflict), narrows (project -> global); an imported memory has `source` (its file),
   `imported_at` and, until checked, `unchecked`. Settle them with remember(supersedes) and

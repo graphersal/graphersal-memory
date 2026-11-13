@@ -8,8 +8,10 @@
 //!   `{"ok": true,
 //!   "daemon_version", "store"}`, then the connection carries plain MCP stdio framing
 //!   (newline-delimited JSON-RPC) in both directions until either side closes it;
-//! - or a control request: `{"protocol": 1, "control": "status"|"stop"}` -> one answer, then
-//!   the daemon closes the connection. `{"protocol": 1, "control": "index_sessions",
+//! - or a control request: `{"protocol": 1, "control": "status"|"stop"|"restart"}` -> one
+//!   answer, then the daemon closes the connection (`stop` and `restart` then shut the daemon
+//!   down; only `stop` leaves `crate::ipc::STOPPED_FILE`, so open shims do not start a new one
+//!   after it). A connection closed before its first line is dropped without a log line. `{"protocol": 1, "control": "index_sessions",
 //!   "projects_dir", "ended": [..], "active": [..]}` queues a session indexing run (answer `{"ok":
 //!   true, "run": n}`), `{"protocol": 1, "control": "sessions_status"}` reports it (`running`,
 //!   `requested`, `completed`, `report`); see `crate::sessions`. An older daemon refuses them as

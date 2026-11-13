@@ -59,7 +59,7 @@ anything changes.
 | `daemon.pid` | locked by the running daemon for its whole life; the OS releases the lock when the process ends, also on a crash |
 | `daemon.start.lock` | locked by the shim that starts a daemon |
 | `daemon.log` | the daemon's log (`daemon.log.1`: the previous one, kept once it passes 1 MiB) |
-| `daemon.stopped` | left by a daemon stopped on purpose (`uninstall`, `purge`); open sessions and `ui` do not start a new daemon while it exists, and the next daemon removes it |
+| `daemon.stopped` | left by a daemon stopped on purpose (`uninstall`, `purge`, `daemon stop`; not `daemon restart`); open sessions and `ui` do not start a new daemon while it exists, and the next daemon removes it |
 
 ### Start, idle exit, crashes and upgrades
 
@@ -92,6 +92,17 @@ anything changes.
 - `graphersal-memory daemon` (without `--foreground`) starts the daemon detached, or reports the
   one that runs; `graphersal-memory status` shows whether it runs (process id, version, uptime,
   connections, open stores).
+- `graphersal-memory daemon stop` stops the running daemon and returns once it closed its stores
+  and exited. Like `uninstall` and `purge`, it leaves `daemon.stopped`: open sessions do not start
+  it again (their memory tools answer that it was stopped), but the next new session, `ui` or
+  `graphersal-memory daemon` does. With no daemon it prints `daemon: not running` and exits 0.
+- `graphersal-memory daemon restart` stops it the same way without the marker and starts a new
+  one, for example after installing a new binary: open sessions and `ui` reconnect to the new
+  daemon by themselves (an open session may start it first; either way one runs). With no daemon
+  it just starts one.
+- A connection that closes before sending its first line (a probe that only checks that the
+  socket answers) is dropped without a log line; `doctor` asks the running daemon with a real
+  request instead of such a probe.
 
 ## Socket, trust and the handshake
 
@@ -244,7 +255,13 @@ anything changes.
   turns, Claude Code's own compaction summaries) and one `turn` per prompt
   (`turn:<session>:<n>`: the prompt with the messages sent while the assistant worked and the
   answers to its questions, the assistant's text replies until the next prompt, the names of the
-  tools it used). Tool inputs and results are not kept. Every vertex carries the session's
+  tools it used). Tool inputs and results are not kept, except the names of the memories the
+  session wrote through the memory tools: each call of `remember`, `pin`, `settle` or `forget`
+  (in every harness's transcript: Claude Code, opencode 1.x and 2.x, Codex, Cursor) links the
+  session to that memory with a `wrote` edge (the calls in order, the first and last time, how
+  many), when the memory still exists. A session indexed before this was added is linked once,
+  at the next indexing run, from its transcript if that still exists. Memories written in the
+  browser UI and imported from files have no session. Every vertex carries the session's
   project: its working directory's git root, as for an agent session started there; a session's
   vertices are visible only from that project.
 - **Robust parsing.** A line that is not JSON, a record type this version does not know and a
@@ -386,7 +403,11 @@ conflict checks, the history and the start context work exactly as for the agent
   exception to) and related memories (thin grey); colour by kind, a thick border for the
   memories every session starts with, a dashed one for imported memories, faded when replaced,
   with a legend. Sessions and facts appear only when you expand a memory (double click, or
-  Expand on its card): what it is about and what is about it. The graph only reads; its cards
+  Expand on its card): the sessions that wrote it (an arrow from the session, its card naming the
+  tool calls), what it is about and what is about it, and the facts of those sessions. A session
+  is linked once it has ended and was indexed, so a memory written in the running session shows
+  none yet; a memory imported from a file says so instead (no session wrote it), and one written
+  in the UI has no session either. The graph only reads; its cards
   write as the other tabs do (open in Memory, pin, settle a conflict, forget with a question,
   never an imported memory).
 - **Always loaded**: exactly what a session of a project starts with, in delivery order and
@@ -407,10 +428,15 @@ conflict checks, the history and the start context work exactly as for the agent
 A project switcher shows one project (its memories and the global ones), the global memories
 alone, or all projects.
 
+The header shows graphersal-memory's own version; the engine's version is in its tooltip and on
+the Overview.
+
 How it is guarded: `ui` listens on `127.0.0.1` only (a random port, `--port` to choose); every
 API request needs a token of 256 random bits that only the opened tab has (it reaches the
 browser through a launch file in the run directory, never through a command line, and lives in
-the tab's session storage); requests from another site are refused (Host and Origin checks, no
+the tab's session storage, from where the page hands it to the engine as the request header
+`Authorization: Bearer <token>` through the playground's host hook `window.GRAPHERSAL_ENGINE`;
+it is never put into an address); requests from another site are refused (Host and Origin checks, no
 cross-origin headers); `GET` never changes anything. The daemon stays socket-only: `ui` hands
 each request over the socket to the daemon, which answers only the memory functions and the
 UI's own read and reorder functions (`overview`, `memory_list`, `set_order`, `session_list`,

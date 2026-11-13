@@ -182,3 +182,35 @@ test('the profile has the Graph tab, styles for the classes this module sets and
   assert.equal(profile.graph.edges.supersedes.arrow, true, 'newer -> older');
   assert.ok(profile.cards.session.subtitle.includes('project_name'), 'a session card names its project');
 });
+
+test('neighbourGraph: a session that wrote the memory comes with a wrote edge naming its tool calls', () => {
+  const answer = {
+    memory: 'memory:tabs@/w/app',
+    nodes: [{ id: 'session:s2', label: 'session', name: 'Set the style', project: '/w/app', started_at: '2026-11-13T09:00:00Z', harness: 'codex', turns: 3 }],
+    edges: [{ id: 'w1', label: 'wrote', source: 'session:s2', target: 'memory:tabs@/w/app', actions: ['remember', 'pin'], at: '2026-11-13T09:01:00Z' }],
+    memories: ['memory:tabs@/w/app'],
+    imported: '',
+  };
+  const more = gm.neighbourGraph([{ call: { project: '/w/app' }, rows: answer }], projects, new Set(['memory:tabs@/w/app']));
+  assert.deepEqual(more.nodes.map((n) => n.id), ['session:s2']);
+  assert.equal(more.edges.length, 1);
+  const edge = more.edges[0];
+  assert.deepEqual([edge.label, edge.source, edge.target], ['wrote', 'session:s2', 'memory:tabs@/w/app']);
+  assert.equal(edge.data.title, 'wrote tabs (remember, pin)');
+  assert.equal(edge.data.actions, 'remember, pin');
+  assert.equal(edge.data.at, '2026-11-13T09:01:00Z');
+});
+
+test('an Expand that adds nothing says why: imported from a file, or no indexed session wrote it', () => {
+  const imported = gm.emptyExpandText('tabs', [{ call: {}, rows: { nodes: [], edges: [], imported: '/h/.claude/memory/tabs.md' } }]);
+  assert.match(imported, /imported from \/h\/\.claude\/memory\/tabs\.md, not written in a session/);
+  const plain = gm.emptyExpandText('tabs', [{ call: {}, rows: { nodes: [], edges: [], imported: '' } }, { call: {}, rows: { error: 'x' } }]);
+  assert.match(plain, /No indexed session wrote "tabs"/);
+  assert.match(plain, /written here in the UI has no session/);
+});
+
+test('the profile styles wrote edges and has their card', () => {
+  const profile = JSON.parse(readFileSync(new URL('../profile.json', import.meta.url), 'utf8'));
+  assert.equal(profile.graph.edges.wrote.arrow, true, 'session -> memory');
+  assert.equal(profile.cards.wrote.title, 'title');
+});
