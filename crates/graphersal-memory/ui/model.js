@@ -194,19 +194,39 @@ export function tiers(entries = []) {
     .filter((tier) => tier.entries.length > 0);
 }
 
+/** The sections of the start context's text, in the order the agent reads them. */
+export const SECTIONS = Object.freeze([
+  { id: 'How to work', title: 'How to work (feedback)' },
+  { id: 'About you', title: 'About you (user)' },
+  { id: 'Pinned', title: 'Pinned' },
+]);
+
 /**
- * The slugs of `slug`'s tier in their new order after a move by `delta` (-1 up, +1 down), or
- * null when it cannot move (first/last of its tier, or unknown).
+ * The entries of the start context grouped exactly as its text lists them
+ * (`start_context::entries_json` `group`): How to work, About you, Pinned; within a section in
+ * delivery order (the pinned ones first). The order groups of `set_order` stay the tiers.
+ */
+export function sections(entries = []) {
+  return SECTIONS.map((section) => ({ ...section, entries: entries.filter((e) => e.group === section.id) }))
+    .filter((section) => section.entries.length > 0);
+}
+
+/**
+ * The slugs of `slug`'s tier in their new order after a move by `delta` (-1 up, +1 down): it
+ * swaps places with the next entry of the same tier in the same text section, or null when it
+ * cannot move (first/last there, or unknown).
  */
 export function moved(entries, slug, delta) {
   const entry = entries.find((e) => e.slug === slug);
   if (!entry) return null;
-  const tier = entries.filter((e) => e.tier === entry.tier).map((e) => e.slug);
-  const at = tier.indexOf(slug);
-  const to = at + delta;
+  const tier = entries.filter((e) => e.tier === entry.tier);
+  const at = tier.indexOf(entry);
+  let to = at + delta;
+  while (to >= 0 && to < tier.length && tier[to].group !== entry.group) to += delta;
   if (to < 0 || to >= tier.length) return null;
-  [tier[at], tier[to]] = [tier[to], tier[at]];
-  return tier;
+  const slugs = tier.map((e) => e.slug);
+  [slugs[at], slugs[to]] = [slugs[to], slugs[at]];
+  return slugs;
 }
 
 /**

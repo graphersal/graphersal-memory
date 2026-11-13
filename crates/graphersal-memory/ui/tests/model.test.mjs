@@ -181,3 +181,21 @@ test('the profile passes the playground\'s own validation in allow-list mode', a
     assert.equal(valid.name, 'memory');
   }
 });
+
+test('the Always loaded list follows the text: How to work, About you, Pinned', () => {
+  const entries = [
+    { slug: 'fp', tier: 'pinned', group: 'How to work', pinned: true, shown: true },
+    { slug: 'p1', tier: 'pinned', group: 'Pinned', pinned: true, shown: true },
+    { slug: 'p2', tier: 'pinned', group: 'Pinned', pinned: true, shown: true },
+    { slug: 'f1', tier: 'feedback', group: 'How to work', shown: true },
+    { slug: 'u1', tier: 'user', group: 'About you', shown: true },
+  ];
+  assert.deepEqual(
+    m.sections(entries).map((s) => [s.id, s.entries.map((e) => e.slug)]),
+    [['How to work', ['fp', 'f1']], ['About you', ['u1']], ['Pinned', ['p1', 'p2']]],
+  );
+  // A pinned feedback memory moves only among the pinned ones of its own section.
+  assert.equal(m.moved(entries, 'fp', 1), null, 'never past the unpinned or into Pinned');
+  assert.equal(m.moved(entries, 'p1', -1), null, 'never into How to work');
+  assert.deepEqual(m.moved(entries, 'p2', -1), ['fp', 'p2', 'p1']);
+});

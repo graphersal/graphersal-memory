@@ -46,7 +46,7 @@ export default {
     watch(() => [state.selection, state.version], load);
 
     const entries = computed(() => (context.value && context.value.entries) || []);
-    const groups = computed(() => model.tiers(entries.value));
+    const groups = computed(() => model.sections(entries.value));
     const cut = computed(() => entries.value.filter((e) => !e.shown));
     const bar = computed(() => model.budgetBar(context.value));
     const warnings = computed(() => model.warnings(entries.value, rows.value));
