@@ -3,9 +3,11 @@
 // (red), narrows (project -> global) and relates_to (thin grey); colour by kind, a thick border
 // for the memories every session starts with, a dashed one for imported memories, faded when
 // replaced (profile.json `graph`). Sessions and facts are not shown until a memory is expanded
-// (double click, or Expand on its card): `memory_neighbours` adds what it is about and what is
-// about it. The graph never writes; the card's buttons do what the Memory and Conflicts tabs do
-// (pin, settle, forget with a confirmation, never an imported memory) or open those tabs.
+// (double click, or Expand on its card): `memory_neighbours` adds the sessions that wrote it
+// (from their transcripts' memory tool calls), what it is about and what is about it; an
+// imported memory, which no session wrote, says so. The graph never writes; the card's buttons
+// do what the Memory and Conflicts tabs do (pin, settle, forget with a confirmation, never an
+// imported memory) or open those tabs.
 
 import { ref, shallowRef, watch, onMounted, h } from 'vue';
 import * as model from './model.js';
@@ -67,7 +69,8 @@ export default {
       }
       const row = selection.data;
       try {
-        const more = gm.neighbourGraph(await neighbours(row), state.projects, new Set(graph.value.nodes.map((n) => n.id)));
+        const answers = await neighbours(row);
+        const more = gm.neighbourGraph(answers, state.projects, new Set(graph.value.nodes.map((n) => n.id)));
         const { graph: merged, added } = props.api.mergeGraph(graph.value, more);
         graph.value = merged;
         expanded.set(selection.id, row);
@@ -75,7 +78,7 @@ export default {
           ? `Added ${added.nodes.length} ${added.nodes.length === 1 ? 'session or fact' : 'sessions and facts'} around "${row.slug}".`
           : added.edges.length
             ? `"${row.slug}" is linked to memories already shown.`
-            : `No session or fact is linked to "${row.slug}" (nothing it is about, nothing about it).`);
+            : gm.emptyExpandText(row.slug, answers));
       } catch (err) {
         props.api.toast('error', errorText(err));
       }

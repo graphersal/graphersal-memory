@@ -12,7 +12,9 @@
 //!   assistant's text: what Codex persists in its default history mode (`legacy`,
 //!   `codex-rs/rollout/src/policy.rs`); in the `paginated` mode the same comes as
 //!   `event_msg` `item_completed` with an `item` of type `UserMessage`/`AgentMessage`;
-//! - `response_item` `function_call`/`custom_tool_call` (`name`): the tools of a turn;
+//! - `response_item` `function_call`/`custom_tool_call` (`name`): the tools of a turn, and the
+//!   slugs of the memories a call of our memory tools names (`arguments`/`input`, also from
+//!   `event_msg` `mcp_tool_call_end`'s `invocation`; `crate::transcript::memory_writes`);
 //! - `event_msg` `patch_apply_end` (`changes`: path -> change): files edited;
 //! - `compacted` (`message`) and `event_msg` `context_compacted`: Codex's compaction summaries;
 //! - `turn_context` (`cwd`): the working directory when no `session_meta` names one.
@@ -26,7 +28,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::sessions::Unit;
-use crate::transcript::{CAP, Transcript, Turn, clip};
+use crate::transcript::{CAP, Transcript, Turn, clip, memory_writes};
 
 /// Whether `path` is a Codex rollout file (`rollout-*.jsonl`).
 pub fn is_rollout(path: &Path) -> bool {
@@ -219,10 +221,18 @@ pub fn parse(bytes: &[u8], fallback_id: &str) -> Transcript {
                     payload["type"].as_str(),
                     Some("function_call" | "custom_tool_call")
                 ) && let Some(name) = payload["name"].as_str().filter(|n| !n.is_empty())
-                    && let Some(turn) = out.turns.last_mut()
-                    && !turn.tools.iter().any(|t| t == name)
                 {
-                    turn.tools.push(name.to_string());
+                    let input = if payload["arguments"].is_null() {
+                        &payload["input"]
+                    } else {
+                        &payload["arguments"]
+                    };
+                    out.memory_writes.extend(memory_writes(name, input, at));
+                    if let Some(turn) = out.turns.last_mut()
+                        && !turn.tools.iter().any(|t| t == name)
+                    {
+                        turn.tools.push(name.to_string());
+                    }
                 }
             }
             "event_msg" => match payload["type"].as_str().unwrap_or_default() {
@@ -240,6 +250,21 @@ pub fn parse(bytes: &[u8], fallback_id: &str) -> Transcript {
                         "UserMessage" => new_turn(&mut out, &content_text(&item["content"]), at),
                         "AgentMessage" => add_answer(&mut out, &content_text(&item["content"])),
                         _ => {}
+                    }
+                }
+                // An MCP call as an event (`invocation`: server, tool, arguments); a call seen
+                // both here and as a `function_call` links the same memory twice, which the
+                // link counts once per memory.
+                "mcp_tool_call_end" => {
+                    let invocation = &payload["invocation"];
+                    if let (Some(server), Some(tool)) =
+                        (invocation["server"].as_str(), invocation["tool"].as_str())
+                    {
+                        out.memory_writes.extend(memory_writes(
+                            &format!("{server}__{tool}"),
+                            &invocation["arguments"],
+                            at,
+                        ));
                     }
                 }
                 "patch_apply_end" => {
@@ -396,5 +421,37 @@ pub(crate) mod tests {
         assert_eq!(of_project(&sessions, Path::new("/w/app")).len(), 1);
         assert!(of_project(&sessions, Path::new("/w/other")).is_empty());
         assert!(scan(&tmp.path().join("missing")).is_empty());
+    }
+
+    #[test]
+    fn a_rollout_records_the_memories_its_tool_calls_wrote() {
+        let mut text = fixture("/w/app");
+        for line in [
+            json!({"timestamp": "2026-11-09T10:02:00.000Z", "type": "response_item", "payload": {
+                "type": "function_call", "name": "mcp__graphersal_memory__remember",
+                "arguments": "{\"slug\":\"tabs\",\"summary\":\"Tabs\"}", "call_id": "c3"}}),
+            json!({"timestamp": "2026-11-09T10:02:05.000Z", "type": "event_msg", "payload": {
+                "type": "mcp_tool_call_end", "call_id": "c4", "invocation": {
+                    "server": "graphersal-memory", "tool": "settle",
+                    "arguments": {"slug": "tabs", "other": "spaces", "decision": "supersedes"}}}}),
+        ] {
+            text.push_str(&format!("{line}\n"));
+        }
+        let t = parse(text.as_bytes(), "x");
+        let got: Vec<(&str, &str)> = t
+            .memory_writes
+            .iter()
+            .map(|w| (w.action.as_str(), w.slug.as_str()))
+            .collect();
+        // The fixture's own call has no slug (`{}`): no write.
+        assert_eq!(
+            got,
+            vec![
+                ("remember", "tabs"),
+                ("settle", "tabs"),
+                ("settle", "spaces")
+            ]
+        );
+        assert_eq!(t.memory_writes[0].at, "2026-11-09T10:02:00.000Z");
     }
 }

@@ -1224,6 +1224,11 @@ fn the_relay_answers_only_the_memory_and_ui_functions_behind_the_host_check() {
     assert_eq!(status, 200, "{info}");
     assert_eq!(info["apiMode"], "allow-list", "{info}");
     assert_eq!(info["uiProfile"]["name"], "memory", "{info}");
+    assert_eq!(
+        info["uiProfile"]["version"],
+        env!("CARGO_PKG_VERSION"),
+        "{info}"
+    );
     let (status, _) = relay(&runtime, "GET", "/api/changes", "127.0.0.1:4100", None);
     assert_eq!(status, 200);
     for (method, target) in [

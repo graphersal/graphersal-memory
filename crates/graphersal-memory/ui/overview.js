@@ -89,7 +89,7 @@ export default {
     <p v-else-if="busy" class="muted">Loading…</p>
     <section class="mem-health">
       <h3>Health</h3>
-      <p>{{ model.daemonText(state.status) }}<span v-if="state.status"> · graphersal-memory {{ state.status.version }}</span></p>
+      <p>{{ model.daemonText(state.status) }}<span v-if="state.status"> · graphersal-memory {{ state.status.version }}</span><span v-if="api.info && api.info.version" class="muted"> · Graphersal engine {{ api.info.version }}</span></p>
       <ul v-if="problems.length" class="mem-problems-list">
         <li v-for="line in problems" :key="line">{{ line }}</li>
       </ul>

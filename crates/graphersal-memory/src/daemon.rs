@@ -1041,6 +1041,11 @@ impl Daemon {
             log(&format!("no handshake: {err}"));
             return;
         }
+        if line.is_empty() {
+            // Closed before its first line (a probe that only checks that the socket answers):
+            // nothing to refuse and nothing worth a log line.
+            return;
+        }
         let mut answer = |text: String| {
             let _ = writer
                 .write_all(text.as_bytes())
@@ -1072,6 +1077,9 @@ impl Daemon {
                 }));
                 match answered {
                     Ok(text) => {
+                        // `restart` stops like `stop` but leaves no marker: open shims start
+                        // (and reconnect to) a new daemon, which runs the binary installed now.
+                        let stops = control == "stop" || control == "restart";
                         if control == "stop" {
                             // Before the answer and the socket's end: an open shim that sees
                             // its connection end finds it and does not start a new daemon.
@@ -1081,8 +1089,12 @@ impl Daemon {
                             }
                         }
                         answer(text);
-                        if control == "stop" {
-                            self.shutdown("stop requested");
+                        if stops {
+                            self.shutdown(if control == "stop" {
+                                "stop requested"
+                            } else {
+                                "restart requested"
+                            });
                         }
                     }
                     Err(_) => answer(protocol::refusal(
@@ -1300,13 +1312,17 @@ impl Daemon {
                 Ok(done) => done.to_string(),
                 Err(err) => protocol::refusal(Refusal::Store, &self.with_log(&err)),
             },
-            // Answered first; `handle` then shuts the daemon down.
-            "stop" => json!({"ok": true, "daemon_version": self.options.version}).to_string(),
+            // Answered first; `handle` then shuts the daemon down (`stop` leaves the marker
+            // `ipc::STOPPED_FILE`, `restart` does not).
+            "stop" | "restart" => {
+                json!({"ok": true, "daemon_version": self.options.version, "pid": std::process::id()})
+                    .to_string()
+            }
             other => protocol::refusal(
                 Refusal::BadHandshake,
                 &format!(
-                    "unknown control request '{other}' (expected status, stop, index_sessions, \
-                     sessions_status, apply_settings, export_memories, merge_projects, \
+                    "unknown control request '{other}' (expected status, stop, restart, \
+                     index_sessions, sessions_status, apply_settings, export_memories, merge_projects, \
                      start_context or sync_instructions)"
                 ),
             ),

@@ -1,11 +1,22 @@
 // The `/api/ui/*` endpoints that `graphersal-memory ui` answers itself (the profile API does not
-// know them): status, projects, start context, the start context budget. The token header is
-// added by ui/boot.js to every request of the page to its own `/api/`.
+// know them): status, projects, start context, the start context budget. Each call carries the
+// headers ui/boot.js handed to the playground's engine (`window.GRAPHERSAL_ENGINE.headers`: the
+// token as `Authorization: Bearer <token>`).
+
+/** The page's request headers for its own server (set by ui/boot.js), or none. */
+export function hostHeaders(scope = globalThis) {
+  const config = scope && scope.GRAPHERSAL_ENGINE;
+  return config && config.headers && typeof config.headers === 'object' ? { ...config.headers } : {};
+}
 
 async function call(path, options = {}) {
   let r;
   try {
-    r = await fetch(path, { cache: 'no-store', ...options });
+    r = await fetch(path, {
+      cache: 'no-store',
+      ...options,
+      headers: { ...hostHeaders(), ...(options.headers || {}) },
+    });
   } catch (err) {
     throw new Error('The memory UI is not running any more. Start it again: graphersal-memory ui');
   }

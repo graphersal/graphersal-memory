@@ -26,6 +26,7 @@ const EDGE_WORDS = Object.freeze({
   about: 'is about',
   contains: 'contains',
   edited: 'edited',
+  wrote: 'wrote',
 });
 
 /**
@@ -135,8 +136,8 @@ const clip = (text, n) => {
 /**
  * The graph data of `memory_neighbours` answers (`[{call, rows}]`, each `{memory, nodes, edges,
  * memories}` or `{error}`): sessions and facts as nodes with the rows their cards show (the
- * profile's `session` and `fact` templates, plus the project's name), the about / contains /
- * edited edges. An edge whose ends are neither in these nodes nor in `known` (the ids drawn
+ * profile's `session` and `fact` templates, plus the project's name), the wrote (session -> a
+ * memory it wrote, with its tool calls) / about / contains / edited edges. An edge whose ends are neither in these nodes nor in `known` (the ids drawn
  * already) is left out.
  * @param {Array} answers
  * @param {Array} projects
@@ -179,13 +180,32 @@ export function neighbourGraph(answers, projects = [], known = new Set()) {
       const id = String(raw.id);
       if (edgeIds.has(id) || !has(String(raw.source)) || !has(String(raw.target))) continue;
       edgeIds.add(id);
-      edges.push({
-        id, source: String(raw.source), target: String(raw.target), label: raw.label,
-        data: { label: raw.label, title: `${slugOfId(raw.source)} ${EDGE_WORDS[raw.label] || raw.label} ${slugOfId(raw.target)}` },
-      });
+      const data = { label: raw.label, title: `${slugOfId(raw.source)} ${EDGE_WORDS[raw.label] || raw.label} ${slugOfId(raw.target)}` };
+      if (raw.label === 'wrote') {
+        // session -> a memory it wrote: the tool calls (remember, pin, settle, ...) and when.
+        const actions = Array.isArray(raw.actions) ? raw.actions.join(', ') : '';
+        data.title = `wrote ${slugOfId(raw.target)}${actions ? ` (${actions})` : ''}`;
+        data.actions = actions;
+        data.at = raw.at || '';
+      }
+      edges.push({ id, source: String(raw.source), target: String(raw.target), label: raw.label, data });
     }
   }
   return { nodes, edges };
+}
+
+/**
+ * The toast of an Expand that added nothing: an imported memory was written by no session (its
+ * file is named); any other memory was written by no indexed session (a session is linked when
+ * it is indexed, after it ended; a memory written in the UI has no session) and nothing is
+ * about it. `answers` are the `memory_neighbours` answers.
+ */
+export function emptyExpandText(slug, answers) {
+  const file = (answers || []).map((a) => a && a.rows && a.rows.imported).find((f) => f);
+  if (file) {
+    return `"${slug}" was imported from ${file}, not written in a session: no session or fact is linked to it.`;
+  }
+  return `No indexed session wrote "${slug}" and nothing is linked to it (a session is linked once it ended and was indexed; a memory written here in the UI has no session).`;
 }
 
 /**

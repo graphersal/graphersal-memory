@@ -29,10 +29,19 @@ const FILES: [(&str, &[u8]); 13] = [
     ("profile.json", PROFILE.as_bytes()),
 ];
 
-/// The profile object (the engine's playground validates it).
+/// The profile object (the engine's playground validates it), with this binary's version as
+/// its `version`: the page's header shows graphersal-memory's own version (the engine's moves
+/// into the header's tooltip).
 pub fn profile() -> Result<Value, String> {
-    serde_json::from_str(PROFILE)
-        .map_err(|err| format!("the built-in UI profile is invalid: {err}"))
+    let mut profile: Value = serde_json::from_str(PROFILE)
+        .map_err(|err| format!("the built-in UI profile is invalid: {err}"))?;
+    if let Some(object) = profile.as_object_mut() {
+        object.insert(
+            "version".to_string(),
+            Value::String(env!("CARGO_PKG_VERSION").to_string()),
+        );
+    }
+    Ok(profile)
 }
 
 /// The bytes and content type of the profile file `name` (the path after [`FILES_PREFIX`]).
@@ -67,6 +76,7 @@ mod tests {
     fn the_profile_names_its_files_and_every_module_is_built_in() {
         let profile = profile().unwrap();
         assert_eq!(profile["name"], "memory");
+        assert_eq!(profile["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(profile["files"], FILES_PREFIX);
         let tabs = profile["tabs"].as_array().unwrap();
         assert_eq!(tabs.len(), 6);

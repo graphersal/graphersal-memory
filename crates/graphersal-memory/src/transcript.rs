@@ -6,7 +6,8 @@
 //! A turn is one prompt of the user (with the messages sent while the assistant worked and the
 //! answers to its questions) and the assistant's text replies until the next prompt, with the
 //! names of the tools it used. Tool inputs and tool results are not kept (only the paths of the
-//! files the assistant edited). Records of sub-agents (`isSidechain`, and the transcripts in a
+//! files the assistant edited, and the slugs of the memories it wrote through our memory tools,
+//! [`MemoryWrite`]). Records of sub-agents (`isSidechain`, and the transcripts in a
 //! session's `subagents/` directory, which are never read) are left out, and so are records the
 //! harness generates itself (task notifications, command output, reminders, hand-backs of
 //! sub-agents).
@@ -61,6 +62,87 @@ pub struct Turn {
     pub tools: Vec<String>,
 }
 
+/// One call of a graphersal-memory memory tool that names a memory (`remember`, `forget`,
+/// `pin`/unpin, `settle`), as a session's transcript records it: the link between the session
+/// and the memory (`crate::sessions`, the `wrote` edge). A `settle` names two memories (`slug`
+/// and `other`): one write each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryWrite {
+    /// `remember`, `forget`, `pin`, `unpin` or `settle`.
+    pub action: String,
+    /// The memory's slug.
+    pub slug: String,
+    /// When (the record's timestamp; may be empty).
+    pub at: String,
+}
+
+/// The memory tool a harness's tool name calls, when it is one of graphersal-memory's (either
+/// server, `use` or `develop`): the name ends in `remember`, `forget`, `pin` or `settle`, and
+/// what comes before is nothing (Cursor records bare names) or names the server, in any
+/// harness's spelling (`mcp__graphersal-memory__remember` (Claude Code),
+/// `mcp__graphersal_memory__remember` (Codex), `graphersal-memory_remember` (opencode)).
+pub fn memory_tool(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase().replace('-', "_");
+    for tool in ["remember", "forget", "pin", "settle"] {
+        let Some(prefix) = lower.strip_suffix(tool) else {
+            continue;
+        };
+        if prefix.is_empty() {
+            return Some(tool);
+        }
+        let Some(server) = prefix.strip_suffix(['_', '.', '/', ':']) else {
+            continue;
+        };
+        if server.contains("graphersal") && server.contains("memory") {
+            return Some(tool);
+        }
+    }
+    None
+}
+
+/// The memory writes of one tool call: `name` the harness's tool name, `input` its arguments
+/// (an object, or its JSON text as Codex records it), `at` the record's time. Nothing for
+/// another tool or a call without a `slug`.
+pub fn memory_writes(name: &str, input: &Value, at: &str) -> Vec<MemoryWrite> {
+    let Some(tool) = memory_tool(name) else {
+        return Vec::new();
+    };
+    let parsed;
+    let input = match input {
+        Value::String(text) => {
+            parsed = serde_json::from_str::<Value>(text).unwrap_or(Value::Null);
+            &parsed
+        }
+        other => other,
+    };
+    let slug_of = |key: &str| {
+        input[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|slug| !slug.is_empty() && slug.len() <= 200)
+            .map(str::to_string)
+    };
+    let action = if tool == "pin" && input["pinned"] == Value::Bool(false) {
+        "unpin"
+    } else {
+        tool
+    };
+    let mut out = Vec::new();
+    for key in ["slug", "other"] {
+        if key == "other" && tool != "settle" {
+            break;
+        }
+        if let Some(slug) = slug_of(key) {
+            out.push(MemoryWrite {
+                action: action.to_string(),
+                slug,
+                at: at.to_string(),
+            });
+        }
+    }
+    out
+}
+
 /// One parsed transcript.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Transcript {
@@ -80,6 +162,8 @@ pub struct Transcript {
     pub files: Vec<String>,
     /// The harness's compaction summaries, verbatim (cut at 20 000 characters each).
     pub compact: Vec<String>,
+    /// The memories the session wrote through graphersal-memory's memory tools, in order.
+    pub memory_writes: Vec<MemoryWrite>,
     /// The turns.
     pub turns: Vec<Turn>,
     /// The records read.
@@ -253,7 +337,7 @@ fn read_record(record: &Value, out: &mut Transcript, summary_title: &mut String)
             }
         }
         "user" => read_user(record, out, at),
-        "assistant" => read_assistant(record, out),
+        "assistant" => read_assistant(record, out, &at),
         // Every other record type (snapshots, API records, modes, ...) carries no dialogue.
         _ => {}
     }
@@ -304,7 +388,7 @@ fn read_user(record: &Value, out: &mut Transcript, at: String) {
     }
 }
 
-fn read_assistant(record: &Value, out: &mut Transcript) {
+fn read_assistant(record: &Value, out: &mut Transcript, at: &str) {
     let Some(turn) = out.turns.last_mut() else {
         return;
     };
@@ -327,6 +411,8 @@ fn read_assistant(record: &Value, out: &mut Transcript) {
                 if !name.is_empty() && !turn.tools.iter().any(|t| t == name) {
                     turn.tools.push(name.to_string());
                 }
+                out.memory_writes
+                    .extend(memory_writes(name, &block["input"], at));
                 if matches!(name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
                     && let Some(path) = block["input"]["file_path"]
                         .as_str()
@@ -615,5 +701,87 @@ pub(crate) mod tests {
         assert_eq!(join_text("/w", ""), "");
         assert!(is_absolute_text("/x") && is_absolute_text(r"C:\x") && is_absolute_text(r"\\s\x"));
         assert!(!is_absolute_text("x") && !is_absolute_text("C:x"));
+    }
+
+    #[test]
+    fn memory_tools_are_recognised_in_every_harness_spelling() {
+        for name in [
+            "mcp__graphersal-memory__remember",
+            "mcp__graphersal_memory__remember",
+            "graphersal-memory_remember",
+            "mcp__graphersal-memory-develop__remember",
+            "remember",
+        ] {
+            assert_eq!(memory_tool(name), Some("remember"), "{name}");
+        }
+        assert_eq!(memory_tool("graphersal-memory_settle"), Some("settle"));
+        for name in [
+            "mcp__other__remember",
+            "Edit",
+            "remembered",
+            "my_pin",
+            "spin",
+            "",
+        ] {
+            assert_eq!(memory_tool(name), None, "{name}");
+        }
+        // Inputs: an object or its JSON text; settle names two memories; no slug, no write.
+        let w = memory_writes("remember", &json!({"slug": "tabs"}), "t1");
+        assert_eq!(
+            w,
+            vec![MemoryWrite {
+                action: "remember".into(),
+                slug: "tabs".into(),
+                at: "t1".into()
+            }]
+        );
+        let w = memory_writes(
+            "x_graphersal_memory__pin",
+            &json!("{\"slug\":\"a\",\"pinned\":false}"),
+            "",
+        );
+        assert_eq!(w[0].action, "unpin");
+        let w = memory_writes(
+            "graphersal-memory_settle",
+            &json!({"slug": "a", "other": "b", "decision": "both"}),
+            "",
+        );
+        assert_eq!(
+            w.iter().map(|w| w.slug.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(memory_writes("remember", &json!({"summary": "no slug"}), "").is_empty());
+        assert!(memory_writes("Edit", &json!({"slug": "x"}), "").is_empty());
+    }
+
+    #[test]
+    fn a_claude_code_transcript_records_the_memories_it_wrote() {
+        let mut text = fixture();
+        text.push_str(&format!(
+            "{}\n",
+            json!({"type": "assistant", "sessionId": "s-1", "timestamp": "2026-01-02T11:00:09.000Z",
+                   "message": {"content": [
+                       {"type": "tool_use", "name": "mcp__graphersal-memory__remember",
+                        "input": {"slug": "parser-cache", "kind": "project", "summary": "LRU"}},
+                       {"type": "tool_use", "name": "mcp__graphersal-memory__pin",
+                        "input": {"slug": "parser-cache"}},
+                       {"type": "tool_use", "name": "mcp__other-server__remember",
+                        "input": {"slug": "not-ours"}}]}})
+        ));
+        let t = parse(text.as_bytes(), "x");
+        let got: Vec<(&str, &str, &str)> = t
+            .memory_writes
+            .iter()
+            .map(|w| (w.action.as_str(), w.slug.as_str(), w.at.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("remember", "parser-cache", "2026-01-02T11:00:09.000Z"),
+                ("pin", "parser-cache", "2026-01-02T11:00:09.000Z"),
+            ]
+        );
+        // The fixture alone wrote no memory.
+        assert!(parse(fixture().as_bytes(), "x").memory_writes.is_empty());
     }
 }

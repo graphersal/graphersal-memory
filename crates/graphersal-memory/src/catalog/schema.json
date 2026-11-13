@@ -615,6 +615,54 @@
         }
       }
     },
+    "wrote": {
+      "connections": [
+        {
+          "from": "session",
+          "to": "memory"
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "description": "session -> a memory it wrote through the memory tools (remember, pin, settle; forget when the memory came back later), found in the session's transcript by the session indexing; the browser UI's own writes are not sessions and have none",
+        "properties": {
+          "origin": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "private"
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "the tool calls in first-use order: remember, pin, unpin, settle, forget"
+          },
+          "at": {
+            "type": "string",
+            "description": "when the session first wrote it (the transcript's time; may be empty)"
+          },
+          "last_at": {
+            "type": "string",
+            "description": "when the session last wrote it"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "how many calls named it"
+          }
+        }
+      }
+    },
     "conflicts_with": {
       "connections": [
         {

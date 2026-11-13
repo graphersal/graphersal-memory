@@ -43,7 +43,7 @@ pub const UI_FUNCTIONS: [&str; 6] = [
 ];
 
 /// The internal functions, in the order of `catalog/internal.json`.
-pub const INTERNAL_FUNCTIONS: [&str; 11] = [
+pub const INTERNAL_FUNCTIONS: [&str; 12] = [
     "indexed_sessions",
     "index_session",
     "index_turns",
@@ -53,6 +53,7 @@ pub const INTERNAL_FUNCTIONS: [&str; 11] = [
     "start_context",
     "open_conflicts",
     "migrate_import_sources",
+    "link_memories",
     "sync_instructions",
     "scan_instructions",
 ];
@@ -126,6 +127,7 @@ fn body(name: &str) -> Option<&'static str> {
         "start_context" => include_str!("catalog/start_context.rhai"),
         "open_conflicts" => include_str!("catalog/open_conflicts.rhai"),
         "migrate_import_sources" => include_str!("catalog/migrate_import_sources.rhai"),
+        "link_memories" => include_str!("catalog/link_memories.rhai"),
         "sync_instructions" => include_str!("catalog/sync_instructions.rhai"),
         "scan_instructions" => include_str!("catalog/scan_instructions.rhai"),
         _ => return None,
@@ -1536,6 +1538,60 @@ mod tests {
                 .any(|n| n["id"] == "session:q1"),
             "{from_p}"
         );
+    }
+
+    #[test]
+    fn expanding_an_imported_memory_names_its_file_and_link_memories_is_idempotent() {
+        let mut session = Session::new();
+        apply(&mut session).unwrap();
+        remember_in(
+            &mut session,
+            json!({"slug": "tabs", "summary": "Indent with tabs"}),
+        );
+        let answer: Value = serde_json::from_str(&session.execute(
+            "g.v(\"memory:tabs@/p\").property(\"imported_at\", \"2026-11-01T00:00:00Z\")\
+             .property(\"source\", \"/h/memory/tabs.md\").iterate()",
+            &graphersal_session::RunOptions::default(),
+        ))
+        .unwrap();
+        assert_eq!(answer["ok"], true, "{answer}");
+        let around = call_in(&mut session, "memory_neighbours", json!({"slug": "tabs"}));
+        assert_eq!(around["imported"], "/h/memory/tabs.md", "{around}");
+        assert_eq!(around["nodes"], json!([]));
+        // link_memories: an unknown session is an error answer; a repeated call the same edges.
+        let unknown = call(
+            &mut session,
+            "link_memories",
+            &json!({"id": "session:nope", "links": []}),
+        )
+        .unwrap_err();
+        assert!(unknown.contains("no session"), "{unknown}");
+        let answer: Value = serde_json::from_str(&session.execute(
+            "g.add_v(\"session\").property(T.id, \"session:s9\").property(\"name\", \"s9\").property(\"started_at\", \"2026-11-12T09:00:00Z\").property(\"project\", \"/p\").iterate()",
+            &graphersal_session::RunOptions::default(),
+        ))
+        .unwrap();
+        assert_eq!(answer["ok"], true, "{answer}");
+        let links = json!([{"slug": "tabs", "actions": ["remember"], "at": "", "last_at": "", "count": 1},
+                           {"slug": "gone", "actions": ["forget"], "at": "", "last_at": "", "count": 1}]);
+        for _ in 0..2 {
+            let done = call(
+                &mut session,
+                "link_memories",
+                &json!({"id": "session:s9", "links": links}),
+            )
+            .unwrap();
+            assert_eq!(done["linked"], json!(["memory:tabs@/p"]), "{done}");
+            assert_eq!(done["missing"], json!(["gone"]), "{done}");
+        }
+        let around = call_in(&mut session, "memory_neighbours", json!({"slug": "tabs"}));
+        let wrote: Vec<&Value> = around["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["label"] == "wrote")
+            .collect();
+        assert_eq!(wrote.len(), 1, "{around}");
     }
 
     #[test]

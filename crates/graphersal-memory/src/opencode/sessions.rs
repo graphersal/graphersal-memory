@@ -26,7 +26,8 @@
 //!   `patch` (`state.metadata.files[].file`); a completed `compaction` row's `summary` is kept
 //!   as a compaction summary. Other rows (switches, shell, synthetic, system, idle) are left
 //!   out.
-//! - Reasoning, tool input and tool output are never kept.
+//! - Reasoning, tool input and tool output are never kept (but the slugs of the memories a call
+//!   of our memory tools names, `crate::transcript::memory_writes`).
 //! - **Change detection**: a session's unit size is the bytes of its message and part data, its
 //!   modification time the newest `time_updated` of the session and its parts (2.x: and its
 //!   messages); the fingerprint covers exactly the data the transcript is built from, in order.
@@ -40,7 +41,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 
 use crate::sessions::Unit;
-use crate::transcript::{Transcript, Turn, clip};
+use crate::transcript::{Transcript, Turn, clip, memory_writes};
 
 /// The separator between the database path and a session id in a unit path.
 const SEPARATOR: char = '#';
@@ -494,6 +495,8 @@ fn build_v2(
                         turn.tools.push(tool.to_string());
                     }
                     let state = &part["state"];
+                    out.memory_writes
+                        .extend(memory_writes(tool, &state["input"], &timestamp(*at)));
                     let mut files: Vec<String> = Vec::new();
                     if matches!(tool, "edit" | "write")
                         && let Some(file) = state["input"]["path"].as_str()
@@ -619,6 +622,11 @@ fn build(
                     if part["type"] == "tool"
                         && let Some(tool) = part["tool"].as_str()
                     {
+                        out.memory_writes.extend(memory_writes(
+                            tool,
+                            &part["state"]["input"],
+                            &timestamp(*at),
+                        ));
                         if let Some(turn) = out.turns.last_mut()
                             && !turn.tools.iter().any(|t| t == tool)
                         {
@@ -1171,5 +1179,58 @@ pub(crate) mod tests {
         assert!(split_unit(Path::new("/x/abc.jsonl")).is_none());
         assert_eq!(of_project(&db, Path::new("/w/app")).unwrap().len(), 1);
         assert!(of_project(&db, Path::new("/w/other")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn opencode_sessions_of_both_lines_record_the_memories_they_wrote() {
+        let tmp = crate::mcp_tests::TempDir::new("oc-mem");
+        // 1.x: a tool part of msg_04 (its tool name is `<server>_<tool>`).
+        let db = tmp.path().join("v1").join("opencode.db");
+        fixture(&db, "/w/app");
+        let part = json!({"type": "tool", "callID": "c9", "tool": "graphersal-memory_remember",
+            "state": {"status": "completed", "input": {"slug": "lru-cache", "summary": "LRU"},
+              "output": "saved", "title": "remember", "metadata": {}, "time": {"start": 1, "end": 2}}});
+        Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO part VALUES ('prt_mem', 'msg_04', 'ses_abc', 1767430911000, \
+                 1767430911000, ?1)",
+                [part.to_string()],
+            )
+            .unwrap();
+        let t = read(&db, "ses_abc").unwrap();
+        let got: Vec<(&str, &str)> = t
+            .memory_writes
+            .iter()
+            .map(|w| (w.action.as_str(), w.slug.as_str()))
+            .collect();
+        assert_eq!(got, vec![("remember", "lru-cache")]);
+        assert!(
+            t.memory_writes[0].at.starts_with("2026-01-03"),
+            "{:?}",
+            t.memory_writes
+        );
+
+        // 2.x: a tool part of msg_14 in `session_part` (named by `name`).
+        let db = tmp.path().join("v2").join("opencode.db");
+        fixture_v2(&db, "/w/app");
+        let part = json!({"type": "tool", "id": "c9", "name": "graphersal-memory_pin",
+            "time": {"created": 6}, "state": {"status": "completed",
+              "input": {"slug": "flags", "pinned": true}, "content": []}});
+        Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO session_part VALUES ('msg_14', 'ses_v2a', 2, 'tool', NULL, \
+                 1767520808000, 1767520808000, ?1)",
+                [part.to_string()],
+            )
+            .unwrap();
+        let t = read(&db, "ses_v2a").unwrap();
+        let got: Vec<(&str, &str)> = t
+            .memory_writes
+            .iter()
+            .map(|w| (w.action.as_str(), w.slug.as_str()))
+            .collect();
+        assert_eq!(got, vec![("pin", "flags")]);
     }
 }
