@@ -33,7 +33,14 @@ const INTERNAL: &str = include_str!("catalog/internal.json");
 const UI: &str = include_str!("catalog/ui.json");
 
 /// The browser UI's functions, in the order of `catalog/ui.json`.
-pub const UI_FUNCTIONS: [&str; 4] = ["overview", "memory_list", "set_order", "session_list"];
+pub const UI_FUNCTIONS: [&str; 6] = [
+    "overview",
+    "memory_list",
+    "set_order",
+    "session_list",
+    "memory_graph",
+    "memory_neighbours",
+];
 
 /// The internal functions, in the order of `catalog/internal.json`.
 pub const INTERNAL_FUNCTIONS: [&str; 9] = [
@@ -106,6 +113,8 @@ fn body(name: &str) -> Option<&'static str> {
         "memory_list" => include_str!("catalog/memory_list.rhai"),
         "set_order" => include_str!("catalog/set_order.rhai"),
         "session_list" => include_str!("catalog/session_list.rhai"),
+        "memory_graph" => include_str!("catalog/memory_graph.rhai"),
+        "memory_neighbours" => include_str!("catalog/memory_neighbours.rhai"),
         "indexed_sessions" => include_str!("catalog/indexed_sessions.rhai"),
         "index_session" => include_str!("catalog/index_session.rhai"),
         "index_turns" => include_str!("catalog/index_turns.rhai"),
@@ -1328,6 +1337,201 @@ mod tests {
         )
         .unwrap();
         assert_eq!(other, json!([]));
+    }
+
+    #[test]
+    fn memory_graph_has_the_memories_and_their_decision_edges_and_neighbours_add_sessions() {
+        let mut session = conflict_store(&[
+            ("tabs", "project", "Indent with tabs"),
+            ("spaces", "project", "Indent with spaces"),
+            ("old-style", "project", "The old style"),
+            ("g", "global", "Global rule"),
+        ]);
+        call_in(
+            &mut session,
+            "settle",
+            json!({"slug": "spaces", "decision": "conflict", "other": "tabs"}),
+        );
+        remember_in(
+            &mut session,
+            json!({"slug": "new-style", "summary": "The new style", "supersedes": ["old-style"],
+                   "links": ["tabs"]}),
+        );
+        call_in(
+            &mut session,
+            "settle",
+            json!({"slug": "tabs", "decision": "narrows", "other": "g"}),
+        );
+        remember_in(
+            &mut session,
+            json!({"slug": "imported", "summary": "From a file", "kind": "feedback",
+                   "from_file": {"path": "/f/imported.md"}}),
+        );
+        // Another project's memory is not in this project's graph.
+        call(
+            &mut session,
+            "remember",
+            &json!({"slug": "elsewhere", "kind": "project", "summary": "x", "body": "x",
+                    "project": "/q"}),
+        )
+        .unwrap();
+        let graph = call_in(&mut session, "memory_graph", json!({}));
+        let nodes = graph["nodes"].as_array().unwrap();
+        let slugs: Vec<&str> = nodes.iter().map(|n| n["slug"].as_str().unwrap()).collect();
+        for slug in ["tabs", "spaces", "old-style", "new-style", "g", "imported"] {
+            assert!(slugs.contains(&slug), "{slug}: {graph}");
+        }
+        assert!(!slugs.contains(&"elsewhere"), "{graph}");
+        let node = |slug: &str| nodes.iter().find(|n| n["slug"] == slug).unwrap().clone();
+        assert_eq!(node("old-style")["superseded_by"], "new-style", "{graph}");
+        assert_eq!(node("old-style")["always"], false);
+        assert_eq!(node("g")["scope"], "global");
+        assert_eq!(node("g")["project"], "");
+        assert_eq!(node("tabs")["id"], "memory:tabs@/p");
+        assert_eq!(node("tabs")["conflicts"], json!(["spaces"]));
+        assert_eq!(node("imported")["source_kind"], "file");
+        assert_eq!(node("imported")["always"], true, "a feedback memory");
+        assert!(node("imported")["imported_at"].is_string());
+        let edges = graph["edges"].as_array().unwrap();
+        let has = |label: &str, from: &str, to: &str| {
+            edges
+                .iter()
+                .any(|e| e["label"] == label && e["source"] == from && e["target"] == to)
+        };
+        assert!(
+            has("supersedes", "memory:new-style@/p", "memory:old-style@/p"),
+            "{graph}"
+        );
+        assert!(
+            has("relates_to", "memory:new-style@/p", "memory:tabs@/p"),
+            "{graph}"
+        );
+        assert!(has("narrows", "memory:tabs@/p", "memory:g"), "{graph}");
+        assert!(
+            edges.iter().any(|e| e["label"] == "conflicts_with"
+                && [e["source"].clone(), e["target"].clone()].contains(&json!("memory:tabs@/p"))),
+            "{graph}"
+        );
+        assert!(
+            edges
+                .iter()
+                .all(|e| e["id"].is_string() || e["id"].is_number())
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|e| e["label"] == "supersedes" && e["at"].as_str().unwrap().starts_with("20"))
+        );
+        // The global graph: the global memory only.
+        let global = call(&mut session, "memory_graph", &json!({"project": ""})).unwrap();
+        assert_eq!(global["nodes"].as_array().unwrap().len(), 1, "{global}");
+        assert_eq!(global["edges"], json!([]));
+
+        // A session with a fact; the memory tabs is about the fact.
+        let run = |session: &mut Session, script: &str| {
+            let answer: Value = serde_json::from_str(
+                &session.execute(script, &graphersal_session::RunOptions::default()),
+            )
+            .unwrap();
+            assert_eq!(answer["ok"], true, "{answer}");
+        };
+        run(
+            &mut session,
+            "g.add_v(\"session\").property(T.id, \"session:s1\").property(\"name\", \"headline s1\").property(\"started_at\", \"2026-11-12T09:00:00Z\").property(\"harness\", \"claude-code\").property(\"project\", \"/p\").iterate()",
+        );
+        run(
+            &mut session,
+            "g.add_v(\"fact\").property(T.id, \"fact:s1:decision:0\").property(\"name\", \"d\").property(\"summary\", \"Decided tabs\").property(\"why\", \"style\").property(\"fact_kind\", \"decision\").property(\"project\", \"/p\").as(\"f\").V(\"session:s1\").add_e(\"contains\").to(\"f\").iterate()",
+        );
+        run(
+            &mut session,
+            "g.add_v(\"session\").property(T.id, \"session:q1\").property(\"name\", \"other project\").property(\"started_at\", \"2026-11-12T09:00:00Z\").property(\"project\", \"/q\").iterate()",
+        );
+        remember_in(
+            &mut session,
+            json!({"slug": "tabs", "summary": "Indent with tabs",
+                   "about": ["fact:s1:decision:0", "memory:g"]}),
+        );
+        let around = call_in(&mut session, "memory_neighbours", json!({"slug": "tabs"}));
+        assert_eq!(around["memory"], "memory:tabs@/p", "{around}");
+        let ids: Vec<&str> = around["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "the fact and its session, no memory: {around}"
+        );
+        assert!(
+            ids.contains(&"fact:s1:decision:0") && ids.contains(&"session:s1"),
+            "{around}"
+        );
+        let fact = around["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["label"] == "fact")
+            .unwrap();
+        assert_eq!(fact["fact_kind"], "decision");
+        assert_eq!(fact["why"], "style");
+        assert_eq!(fact["session"], "session:s1");
+        assert_eq!(fact["headline"], "headline s1");
+        assert_eq!(fact["project"], "/p");
+        let edges = around["edges"].as_array().unwrap();
+        let has = |label: &str, from: &str, to: &str| {
+            edges
+                .iter()
+                .any(|e| e["label"] == label && e["source"] == from && e["target"] == to)
+        };
+        assert!(
+            has("about", "memory:tabs@/p", "fact:s1:decision:0"),
+            "{around}"
+        );
+        assert!(
+            has("contains", "session:s1", "fact:s1:decision:0"),
+            "{around}"
+        );
+        assert!(
+            has("about", "memory:tabs@/p", "memory:g"),
+            "an edge may end at a memory: {around}"
+        );
+        assert!(
+            around["memories"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("memory:g"))
+        );
+        // Nothing around a memory without about edges; an unknown memory is an error answer.
+        let lonely = call_in(&mut session, "memory_neighbours", json!({"slug": "spaces"}));
+        assert_eq!(lonely["nodes"], json!([]), "{lonely}");
+        assert_eq!(lonely["edges"], json!([]), "{lonely}");
+        let unknown = call(
+            &mut session,
+            "memory_neighbours",
+            &json!({"slug": "nope", "project": "/p"}),
+        )
+        .unwrap_err();
+        assert!(unknown.contains("no memory nope"), "{unknown}");
+        // Another project sees neither the session nor the fact.
+        call(
+            &mut session,
+            "remember",
+            &json!({"slug": "g", "kind": "project", "summary": "Global rule", "body": "x",
+                    "about": ["session:q1"], "scope": "global", "project": "/q"}),
+        )
+        .unwrap();
+        let from_p = call_in(&mut session, "memory_neighbours", json!({"slug": "g"}));
+        assert!(
+            !from_p["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n["id"] == "session:q1"),
+            "{from_p}"
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@
   "tabs": [
     { "id": "overview", "title": "Overview", "module": "overview.js" },
     { "id": "memory", "title": "Memory", "module": "memory.js" },
+    { "id": "graph", "title": "Graph", "module": "graph.js" },
     { "id": "always", "title": "Always loaded", "module": "always.js" },
     { "id": "conflicts", "title": "Conflicts", "module": "conflicts.js" },
     { "id": "sessions", "title": "Sessions", "module": "sessions.js" }
@@ -47,7 +48,7 @@
     },
     "session": {
       "title": ["headline", "title", "id"],
-      "subtitle": [{ "field": "started_at", "format": "datetime" }, "harness", { "field": "turns", "prefix": "turns " }],
+      "subtitle": [{ "field": "started_at", "format": "datetime" }, "harness", { "field": "turns", "prefix": "turns " }, "project_name"],
       "badges": [
         { "field": "decisions", "prefix": "decisions ", "tone": "accent" },
         { "field": "corrections", "prefix": "corrections ", "tone": "warn" },
@@ -63,6 +64,77 @@
       "subtitle": [{ "field": "at", "format": "date" }, "headline", "project_name"],
       "body": "why",
       "fields": []
+    },
+    "supersedes": {
+      "title": "title",
+      "subtitle": [{ "field": "at", "format": "datetime" }, "where"],
+      "fields": []
+    },
+    "conflicts_with": {
+      "title": "title",
+      "subtitle": [{ "field": "at", "format": "datetime" }, "where"],
+      "fields": []
+    },
+    "narrows": {
+      "title": "title",
+      "subtitle": [{ "field": "at", "format": "datetime" }, "where"],
+      "fields": []
+    },
+    "relates_to": {
+      "title": "title",
+      "subtitle": [{ "field": "at", "format": "datetime" }, "where"],
+      "fields": []
+    },
+    "about": {
+      "title": "title",
+      "subtitle": [{ "field": "at", "format": "datetime" }, "where"],
+      "fields": []
+    },
+    "contains": {
+      "title": "title",
+      "subtitle": [{ "field": "at", "format": "datetime" }, "where"],
+      "fields": []
     }
+  },
+  "graph": {
+    "nodes": {
+      "memory": { "color": "--text-faint", "size": 26 },
+      "session": { "shape": "round-rectangle", "color": "--text-faint", "size": 22 },
+      "fact": { "shape": "diamond", "color": "--text-faint", "size": 18 }
+    },
+    "edges": {
+      "supersedes": { "color": "--text-muted", "width": 2, "arrow": true },
+      "conflicts_with": { "color": "--danger", "width": 2.4, "arrow": false },
+      "narrows": { "color": "--accent", "style": "dotted", "width": 1.8, "arrow": true },
+      "relates_to": { "color": "--text-faint", "width": 0.8, "arrow": false },
+      "about": { "color": "--text-faint", "style": "dashed", "width": 1, "arrow": true },
+      "contains": { "color": "--text-faint", "width": 1, "arrow": true },
+      "edited": { "color": "--text-faint", "style": "dotted", "width": 1, "arrow": true }
+    },
+    "classes": {
+      "kind-user": { "color": "--ai-accent" },
+      "kind-feedback": { "color": "--accent" },
+      "kind-project": { "color": "--ok" },
+      "kind-reference": { "color": "--warn" },
+      "imported": { "border": { "width": 2.5, "style": "dashed", "color": "--text" } },
+      "always": { "border": { "width": 4.5, "color": "--text" } },
+      "superseded": { "opacity": 0.3 },
+      "fact-decision": { "color": "--accent" },
+      "fact-correction": { "color": "--warn" },
+      "fact-outcome": { "color": "--ok" },
+      "fact-open-thread": { "color": "--danger" }
+    },
+    "legendLabels": "edges",
+    "legend": [
+      { "text": "how to work (feedback)", "node": { "color": "--accent" } },
+      { "text": "about you (user)", "node": { "color": "--ai-accent" } },
+      { "text": "project fact or decision", "node": { "color": "--ok" } },
+      { "text": "where things are (reference)", "node": { "color": "--warn" } },
+      { "text": "loaded at every session start", "node": { "border": { "width": 4.5, "color": "--text" } } },
+      { "text": "imported from a file (read-only)", "node": { "border": { "width": 2.5, "style": "dashed", "color": "--text" } } },
+      { "text": "replaced", "node": { "opacity": 0.3 } },
+      { "text": "session", "node": { "shape": "round-rectangle" } },
+      { "text": "fact", "node": { "shape": "diamond" } }
+    ]
   }
 }

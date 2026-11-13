@@ -449,6 +449,53 @@ fn reads_change_nothing_and_a_round_trip_writes_through_the_memory_functions() {
 }
 
 #[test]
+fn the_graph_tab_reads_its_functions_through_the_relay_and_writes_nothing() {
+    let env = Env::start("2h", &[]);
+    let p = "/work/p";
+    let host = env.host();
+    let module = env.raw("GET", "/memory-ui/graph.js", &[("Host", &host)], "");
+    assert_eq!(module.status, 200, "{}", module.body);
+    let remember = |slug: &str, summary: &str| {
+        json!({"slug": slug, "kind": "project", "summary": summary, "body": format!("{summary}."),
+               "source": "ui", "project": p})
+    };
+    env.query("remember", remember("use-npm", "Install with npm"));
+    env.query("remember", remember("use-pnpm", "Install with pnpm"));
+    env.query(
+        "settle",
+        json!({"slug": "use-pnpm", "decision": "supersedes", "other": "use-npm", "project": p}),
+    );
+    let before = env.commit();
+    let graph = env.query("memory_graph", json!({"project": p}));
+    let nodes = graph[0]["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 2, "{graph}");
+    let old = nodes.iter().find(|n| n["slug"] == "use-npm").unwrap();
+    assert_eq!(old["superseded_by"], "use-pnpm", "{graph}");
+    let edges = graph[0]["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 1, "{graph}");
+    assert_eq!(edges[0]["label"], "supersedes");
+    assert_eq!(edges[0]["source"], "memory:use-pnpm@/work/p");
+    let around = env.query(
+        "memory_neighbours",
+        json!({"slug": "use-pnpm", "project": p}),
+    );
+    assert_eq!(around[0]["memory"], "memory:use-pnpm@/work/p", "{around}");
+    assert_eq!(around[0]["nodes"], json!([]), "{around}");
+    assert_eq!(env.commit(), before, "the graph's reads write nothing");
+    // The relay answers exactly the selected functions: internal ones and unknown names stay
+    // refused next to the new ones.
+    for name in ["start_context", "open_conflicts", "memory_graphs"] {
+        let answer = env.api(
+            "POST",
+            "/api/query",
+            Some(json!({"name": name, "params": {"project": p}})),
+        );
+        assert_eq!(answer.status, 403, "{name}: {}", answer.body);
+    }
+    assert_eq!(env.commit(), before, "a refused call writes nothing");
+}
+
+#[test]
 fn an_imported_memory_refuses_edit_and_forget_from_the_ui() {
     let env = Env::start("2h", &[]);
     let p = "/work/p";

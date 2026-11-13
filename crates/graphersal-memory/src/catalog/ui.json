@@ -142,5 +142,38 @@
         "default": ""
       }
     ]
+  },
+  {
+    "name": "memory_graph",
+    "description": "UI: this project's and the global memories (superseded ones too) with the supersedes, conflicts_with, narrows and relates_to edges among them, as {nodes, edges}.",
+    "params": [
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
+  },
+  {
+    "name": "memory_neighbours",
+    "description": "UI: the sessions and facts around the memory <slug> (about, contains, edited) with the edges among them and the memory, as {memory, nodes, edges, memories}.",
+    "params": [
+      {
+        "name": "slug",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        }
+      },
+      {
+        "name": "project",
+        "schema": {
+          "type": "string"
+        },
+        "default": ""
+      }
+    ]
   }
 ]

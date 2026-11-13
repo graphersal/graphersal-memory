@@ -276,8 +276,12 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `shim::connect_again`: a daemon that went away is started again) and
     `selection` (the memory functions + `catalog::UI_FUNCTIONS`, never an internal one);
   - `src/ui_assets.rs` + `ui/`: the `memory` profile built into the binary (`profile.json`: tabs
-    Overview, Memory, Always loaded, Conflicts, Sessions as modules, cards `memory`, `session`,
-    `fact`; `boot.js` takes the token from `#token=` into sessionStorage, adds the header to the
+    Overview, Memory, Graph, Always loaded, Conflicts, Sessions as modules, cards `memory`, `session`,
+    `fact` and the Graph tab's edge cards, the `graph` key (styles per label, classes per kind /
+    always loaded / imported / superseded, legend: the engine's `api.graph`, EXPERIMENTAL);
+    `graph-model.js` the Graph tab's pure logic (graph data of `memory_graph` /
+    `memory_neighbours`, classes, card buttons and their writes; `ui/tests/graph-model.test.mjs`);
+    `boot.js` takes the token from `#token=` into sessionStorage, adds the header to the
     page's `/api/` fetches and sends the heartbeat; `model.js` the pure logic, tested by
     `node --test crates/graphersal-memory/ui/tests/*.test.mjs`; `shared.js` the project switcher,
     calls per selection ("All projects" = once per project + global once), the memory form with
@@ -324,7 +328,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/catalog.rs` + `src/catalog/`: the product catalog built into the binary: `schema.json`,
     `queries.json` (name, description, parameters of each memory function) and one
     `<name>.rhai` body per function (`pin` sets `pinned`/`order`), `ui.json` the browser UI's
-    functions (`UI_FUNCTIONS`: `overview`, `memory_list`, `set_order`, `session_list`; no tools of
+    functions (`UI_FUNCTIONS`: `overview`, `memory_list`, `set_order`, `session_list`,
+    `memory_graph`, `memory_neighbours` (the Graph tab); no tools of
     any MCP server, `ui_policy` adds their effects) (folder `memory`, `meta` `{"origin": "product", "catalog":
     <fingerprint>}`); `apply` writes it to a store whose product queries carry another
     fingerprint; `use_policy` builds the `use` access policy from the functions' inferred effects;
