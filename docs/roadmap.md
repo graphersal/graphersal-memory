@@ -1,16 +1,16 @@
 # Roadmap
 
-What graphersal-memory 0.1.0 does today, and what we plan next. Planned work is tracked in
+What graphersal-memory 0.2.0 does today, and what we plan next. Planned work is tracked in
 [GitHub issues](https://github.com/graphersal/graphersal-memory/issues); a use case we have not
 thought of is welcome there.
 
-## In 0.1.0
+## In 0.2.0
 
 | Area | What you get |
 |---|---|
 | Memory core | A local graph store with the memory tools over MCP (search, read, remember, forget, pin, past sessions), project and global memories, and two MCP servers: `use` (on) and `develop` (structure tools, off by default). |
 | Shared daemon | Several agent sessions share one memory at once. A small background daemon starts on demand and exits after two idle hours, with no ports and no setup; upgrades and crashes are handled without your help. |
-| One-command install | `install` (a short wizard) and `uninstall` for Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI and Cursor, any combination on one store; `status` and `doctor`; the import of Claude Code's file memory; the export back into files on `uninstall` (`export --to-files`); a moved repository keeps its memories (`projects`). |
+| One-command install | `install` (a short wizard) and `uninstall` for Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI, Cursor and CodeWhale (new in 0.2.0, a preview), any combination on one store; `status` and `doctor`; the import of Claude Code's file memory; the export back into files on `uninstall` (`export --to-files`); a moved repository keeps its memories (`projects`). |
 | Embedding model | `minishlab/potion-retrieval-32M` (English) or `minishlab/potion-multilingual-128M`, downloaded once from Hugging Face and run locally on the CPU, or a built-in embedder with no download. |
 | Start context | Pinned, "how to work" and "about you" memories at the start of every session, within a character budget (8,000 by default), so a harness's own file memory can be switched off without losing your rules. |
 | Conflicts | `remember` checks a new memory against its nearest neighbours; a later decision supersedes an older one and keeps its history; open conflicts and unchecked imported memories in `conflicts()`, settled with `settle`. |
@@ -23,10 +23,8 @@ thought of is welcome there.
 
 ## Next
 
-- **CodeWhale** (preview on `main`, for 0.2.0): install, the rule block, past sessions, the
-  import of its own memory and summaries are built and tested against fixtures, and one live run
-  on macOS passed ([codewhale-live-check.md](codewhale-live-check.md) for the rest). `bench` through `codewhale exec`
-  is planned.
+- **CodeWhale beyond the preview**: a memory written through it, Linux and Windows
+  ([codewhale-live-check.md](codewhale-live-check.md)), and `bench` through `codewhale exec`.
 - **Verify what is built but not yet run live**: Cursor with a live login
   ([cursor-live-check.md](cursor-live-check.md)), the harnesses on Windows, the browser UI on
   Linux and Windows, and the memory tools through Codex with a stronger local model.

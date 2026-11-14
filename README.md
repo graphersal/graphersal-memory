@@ -3,8 +3,8 @@
 **Local graph memory for AI coding agents: your agent's rules, decisions and past sessions in a
 graph on your machine, searched through MCP instead of loaded on every turn.**
 
-Works with Claude Code, opencode, OpenAI Codex CLI and Cursor (CodeWhale in preview). One binary,
-no account, no telemetry. Version 0.1.0 is the first public release: early, and honest about its limits
+Works with Claude Code, opencode, OpenAI Codex CLI, Cursor and CodeWhale (preview). One binary,
+no account, no telemetry. Version 0.2.0 is an early release, and honest about its limits
 ([status](#status)).
 
 <picture>
@@ -232,16 +232,16 @@ session indexing itself. Details per harness: [docs/harnesses.md](docs/harnesses
 
 ## Status
 
-graphersal-memory 0.1.0 is an early release. Prebuilt binaries are published for **Linux**
+graphersal-memory 0.2.0 is an early release. Prebuilt binaries are published for **Linux**
 (x86_64 and arm64, static), **macOS** (arm64 and x86_64) and **Windows** (x86_64). It has been
 used most on macOS. The test suite runs on Linux, macOS and Windows, and the release workflow
 smoke-tests every binary on its platform.
 
-Known limits of 0.1.0:
+Known limits of 0.2.0:
 
 - **Cursor** support is built from Cursor's documentation and tested against fixtures; it has not
   been run with a live Cursor yet. You can help: [docs/cursor-live-check.md](docs/cursor-live-check.md).
-- **CodeWhale** support (a preview on `main`, in the next release) is built from CodeWhale's
+- **CodeWhale** support (new in 0.2.0, a preview) is built from CodeWhale's
   source (v0.10.2), tested against fixtures and run live once on macOS with a local model; a
   memory written through CodeWhale, Linux and Windows are not checked yet, and CodeWhale asks once
   per memory tool per run (it has no permanent approval for MCP tools):

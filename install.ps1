@@ -1,7 +1,7 @@
 # Installs the graphersal-memory binary from a GitHub Release (Windows).
 #
 #   irm https://github.com/graphersal/graphersal-memory/releases/latest/download/install.ps1 | iex
-#   & ([scriptblock]::Create((irm .../install.ps1))) -Version v0.1.0 -Dir C:\Tools
+#   & ([scriptblock]::Create((irm .../install.ps1))) -Version v0.2.0 -Dir C:\Tools
 #
 # It downloads the Windows archive, checks it against the release's SHA256SUMS, and puts
 # graphersal-memory.exe into %LOCALAPPDATA%\Programs\graphersal-memory (or -Dir). It changes

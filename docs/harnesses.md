@@ -1,10 +1,10 @@
 # Supported harnesses
 
-> graphersal-memory 0.1.0 supports Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI and Cursor
-> (Cursor without summaries and `bench`, and checked against its documentation and fixtures only:
-> a live check is pending). Any of them can be installed at once and share one store and one
-> daemon. CodeWhale support (built for the next release) is a **preview**: built from CodeWhale's
-> source (v0.10.2), tested against fixtures and run live once on macOS (details in its section).
+> graphersal-memory 0.2.0 supports Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI, Cursor and
+> CodeWhale (Cursor without summaries and `bench`, and checked against its documentation and
+> fixtures only: a live check is pending; CodeWhale, new in 0.2.0, is a **preview**: built from its
+> source (v0.10.2), tested against fixtures and run live once on macOS, details in its section).
+> Any of them can be installed at once and share one store and one daemon.
 
 Every harness below supports MCP, so the memory tools work the same way everywhere. What differs is
 how graphersal-memory is installed into the harness, where the harness keeps its rules and
