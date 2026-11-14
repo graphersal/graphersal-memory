@@ -157,8 +157,7 @@ export default {
               <span v-for="label in model.reachLabels(entry)" :key="label.id" class="mem-cut-badge" :title="label.title">{{ label.text }}</span>
             </template>
           </div>
-          <button v-if="!(line.slug === entry.slug && line.scope === entry.scope) && !rowOf(entry).imported" class="btn small" type="button" @click="editLine(entry)">Edit line</button>
-          <span v-else-if="rowOf(entry).imported" class="muted mem-ro" :title="'Edit ' + rowOf(entry).file + ' instead'">read-only</span>
+          <button v-if="!(line.slug === entry.slug && line.scope === entry.scope)" class="btn small" type="button" :title="model.importNote(rowOf(entry))" @click="editLine(entry)">Edit line</button>
         </div>
       </section>
       <p v-if="groups.some((g) => g.entries.some((e) => e.scope === 'global'))" class="muted">Moving a global memory changes its place in every project.</p>

@@ -8,6 +8,7 @@ fn migrate_import_sources(records) {
         let id = if type_of(r.project) == "string" && r.project != "" { "memory:" + r.slug + "@" + r.project } else { "memory:" + r.slug };
         if g.v(id).has_label("memory").has("source", "user").count().next() == 0 { continue; }
         if g.v(id).has("imported_at").count().next() > 0 { continue; }
+        if g.v(id).has("edited_from").count().next() > 0 { continue; }
         g.v(id).property("source", r.path).iterate();
         if type_of(r.imported_at) == "string" && r.imported_at != "" {
             g.v(id).property("imported_at", r.imported_at).iterate();

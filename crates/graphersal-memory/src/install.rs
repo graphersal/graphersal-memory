@@ -3337,6 +3337,9 @@ pub fn install(
             }
         }
     }
+    // The data directory first, private to the user (Unix: 0700); the daemon tightens it at
+    // its start too, and says so in its log when it cannot.
+    crate::store::create_private_dir(&setup.data_dir)?;
     // Nothing is written while another install or uninstall runs.
     let _lock = InstallLock::take(setup, true)?;
     let mut report = Vec::new();
@@ -3346,8 +3349,7 @@ pub fn install(
     // The settings file: the defaults when there is none, then the answers.
     if plan.write_config {
         let path = crate::config::path(&setup.data_dir);
-        std::fs::create_dir_all(&setup.data_dir)
-            .map_err(|err| format!("cannot create {}: {err}", setup.data_dir.display()))?;
+        crate::store::create_private_dir(&setup.data_dir)?;
         fsutil::write_atomic(&path, Config::default_text().as_bytes())?;
         report.push(format!("created {}", path.display()));
     }
@@ -3420,8 +3422,7 @@ pub fn install(
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     let text = crate::config::with_values(before.as_deref(), &values)?;
     if before.as_deref() != Some(text.as_str()) {
-        std::fs::create_dir_all(&setup.data_dir)
-            .map_err(|err| format!("cannot create {}: {err}", setup.data_dir.display()))?;
+        crate::store::create_private_dir(&setup.data_dir)?;
         fsutil::write_atomic(&config_path, text.as_bytes())?;
     }
     if model_ready && current.config.model.as_deref() != Some(answers.model.as_str()) {
@@ -3484,6 +3485,7 @@ pub fn install(
         let done =
             crate::coexist::other_import::apply(&current.other_sources, connect, &setup.data_dir);
         report.push(done.line(&current.other_sources));
+        report.extend(done.kept_edited.iter().map(|line| format!("  {line}")));
         for problem in &done.problems {
             report.push(format!("import failed: {problem}"));
         }
@@ -4288,8 +4290,9 @@ pub fn import_summary(report: &import::ImportReport) -> String {
     line
 }
 
-/// The lines after an import's summary: its projects' open memory conflicts and the files
-/// that still hold a superseded memory, each named with its file (empty when there are none).
+/// The lines after an import's summary: its projects' open memory conflicts, the files that
+/// still hold a superseded memory, each named with its file, and the changed files whose
+/// memory was edited in graphersal-memory (empty when there are none).
 pub fn import_conflict_lines(report: &import::ImportReport) -> Vec<String> {
     let mut lines = Vec::new();
     if !report.conflicts.is_empty() {
@@ -4313,6 +4316,13 @@ pub fn import_conflict_lines(report: &import::ImportReport) -> Vec<String> {
             report.returning.len()
         ));
         lines.extend(report.returning.iter().map(|line| format!("  {line}")));
+    }
+    if !report.kept_edited.is_empty() {
+        lines.push(format!(
+            "changed files whose memory was edited in graphersal-memory (the edit was kept): {}",
+            report.kept_edited.len()
+        ));
+        lines.extend(report.kept_edited.iter().map(|line| format!("  {line}")));
     }
     lines
 }

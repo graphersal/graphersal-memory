@@ -6,7 +6,7 @@ fn merge_project(from, into) {
     // instruction files only change their `project`.
     let keys = ["name", "kind", "summary", "body", "embed_text", "origin", "visibility", "source",
                 "updated_at", "why", "how_to_apply", "title", "hook", "index_order", "pinned", "order",
-                "imported_at", "unchecked"];
+                "imported_at", "unchecked", "edited_from"];
     let renamed = #{};
     let moved = 0;
     let replaced = 0;

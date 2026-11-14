@@ -696,6 +696,7 @@ mod tests {
         let memory = &schema["vertices"]["memory"]["schema"]["properties"];
         assert_eq!(memory["imported_at"]["format"], "date-time");
         assert_eq!(memory["unchecked"]["type"], "boolean");
+        assert_eq!(memory["edited_from"]["type"], "string");
     }
 
     #[test]
@@ -1041,6 +1042,75 @@ mod tests {
     }
 
     #[test]
+    fn an_edited_import_is_detached_and_a_later_import_keeps_the_edit() {
+        let mut session = conflict_store(&[]);
+        let file = json!({"path": "/f/tabs.md", "modified_at": "2026-10-01T08:00:00Z"});
+        remember_in(
+            &mut session,
+            json!({"slug": "tabs", "summary": "Indent with tabs", "from_file": file}),
+        );
+        // Edited in the UI: no longer imported, its file kept as edited_from.
+        remember_in(
+            &mut session,
+            json!({"slug": "tabs", "summary": "Indent with four spaces", "source": "ui"}),
+        );
+        let read = call_in(&mut session, "memory", json!({"slug": "tabs"}));
+        assert_eq!(read["source"], "ui", "{read}");
+        assert_eq!(read["edited_from"], "/f/tabs.md", "{read}");
+        assert!(read.get("imported_at").is_none(), "{read}");
+        let listed = call_in(
+            &mut session,
+            "memory_list",
+            json!({"kind": "", "scope": "", "source_kind": "", "superseded": false,
+                   "offset": 0, "limit": 100}),
+        );
+        assert_eq!(listed["rows"][0]["edited_from"], "/f/tabs.md", "{listed}");
+        assert_eq!(listed["rows"][0]["source_kind"], "ui", "{listed}");
+        let graph = call_in(&mut session, "memory_graph", json!({}));
+        assert_eq!(graph["nodes"][0]["edited_from"], "/f/tabs.md", "{graph}");
+        // The file changes: the import keeps the edit and writes nothing.
+        let kept = remember_in(
+            &mut session,
+            json!({"slug": "tabs", "summary": "Indent with tabs, width 8", "from_file": file}),
+        );
+        assert_eq!(kept["kept"], "edited", "{kept}");
+        assert_eq!(kept["file"], "/f/tabs.md", "{kept}");
+        assert_eq!(kept["created"], false, "{kept}");
+        let read = call_in(&mut session, "memory", json!({"slug": "tabs"}));
+        assert_eq!(read["summary"], "Indent with four spaces", "{read}");
+        assert!(read.get("imported_at").is_none(), "{read}");
+        // Later edits (the agent's too) keep the provenance.
+        remember_in(
+            &mut session,
+            json!({"slug": "tabs", "summary": "Indent with two spaces"}),
+        );
+        let read = call_in(&mut session, "memory", json!({"slug": "tabs"}));
+        assert_eq!(read["source"], "remember", "{read}");
+        assert_eq!(read["edited_from"], "/f/tabs.md", "{read}");
+        // An agent's edit of an imported memory detaches it as well.
+        remember_in(
+            &mut session,
+            json!({"slug": "spaces", "summary": "x", "from_file": {"path": "/f/spaces.md"}}),
+        );
+        remember_in(&mut session, json!({"slug": "spaces", "summary": "y"}));
+        let kept = remember_in(
+            &mut session,
+            json!({"slug": "spaces", "summary": "z", "from_file": {"path": "/f/spaces.md"}}),
+        );
+        assert_eq!(kept["kept"], "edited", "{kept}");
+        let read = call_in(&mut session, "memory", json!({"slug": "spaces"}));
+        assert_eq!(read["summary"], "y", "{read}");
+        assert_eq!(read["edited_from"], "/f/spaces.md", "{read}");
+        // A memory that was never imported is written by an import as before.
+        remember_in(&mut session, json!({"slug": "own", "summary": "mine"}));
+        let written = remember_in(
+            &mut session,
+            json!({"slug": "own", "summary": "from a file", "from_file": {"path": "/f/own.md"}}),
+        );
+        assert!(written.get("kept").is_none(), "{written}");
+    }
+
+    #[test]
     fn merge_project_keeps_the_conflict_edges_with_their_time() {
         let mut session = Session::new();
         apply(&mut session).unwrap();
@@ -1192,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn the_ui_cannot_edit_or_forget_an_imported_memory_but_may_pin_it() {
+    fn the_ui_may_edit_but_not_forget_an_imported_memory_and_may_pin_it() {
         let mut session = conflict_store(&[]);
         remember_in(
             &mut session,
@@ -1200,11 +1270,6 @@ mod tests {
         );
         let mut args = json!({"slug": "imported", "kind": "project", "summary": "edited",
                               "body": "edited", "source": "ui", "project": "/p"});
-        let err = call(&mut session, "remember", &args).unwrap_err();
-        assert!(
-            err.contains("/f/imported.md") && err.contains("read-only"),
-            "{err}"
-        );
         let err = call(
             &mut session,
             "forget",
@@ -1212,8 +1277,11 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("edit or delete that file"), "{err}");
+        // The UI's edit detaches it from its file (edited_from).
+        call(&mut session, "remember", &args).unwrap();
         let read = call_in(&mut session, "memory", json!({"slug": "imported"}));
-        assert_eq!(read["summary"], "From a file", "unchanged: {read}");
+        assert_eq!(read["summary"], "edited", "{read}");
+        assert_eq!(read["edited_from"], "/f/imported.md", "{read}");
         call_in(
             &mut session,
             "pin",

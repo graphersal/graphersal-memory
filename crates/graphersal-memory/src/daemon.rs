@@ -308,14 +308,13 @@ struct Daemon {
 /// Runs the daemon in this process until it exits (idle, stop, upgrade): the process ends
 /// there. Returns only on a start failure (another daemon runs, the socket cannot be bound).
 pub fn run(options: DaemonOptions) -> Result<(), String> {
-    std::fs::create_dir_all(&options.data_dir).map_err(|err| {
-        format!(
-            "cannot create the data directory {}: {err}",
-            options.data_dir.display()
-        )
-    })?;
+    // Private to the user (Unix: 0700, an existing directory tightened).
+    let not_private = crate::store::create_private_dir(&options.data_dir)?;
     ipc::create_run_dir(&options.run_dir)?;
     install_panic_hook();
+    if let Some(note) = not_private {
+        log(&note);
+    }
     let socket = ipc::socket_path(&options.run_dir)?;
     let mut pid_file = LockFile::open(&options.run_dir, ipc::PID_FILE)?;
     let deadline = Instant::now() + PID_LOCK_PATIENCE;

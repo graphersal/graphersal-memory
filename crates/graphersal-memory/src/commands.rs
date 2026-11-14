@@ -1193,8 +1193,7 @@ pub fn write_summaries(setup: &Setup, enabled: bool, budget: Option<f64>) -> Res
     let current = crate::fsutil::read_optional(&path)?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     let text = config::with_summaries(current.as_deref(), enabled, budget)?;
-    std::fs::create_dir_all(&setup.data_dir)
-        .map_err(|err| format!("cannot create {}: {err}", setup.data_dir.display()))?;
+    crate::store::create_private_dir(&setup.data_dir)?;
     crate::fsutil::write_atomic(&path, text.as_bytes())
 }
 
@@ -1549,14 +1548,21 @@ fn run_rule_changes(
 fn dirs(cli: &Cli) -> Result<(PathBuf, PathBuf), String> {
     let env = |name: &str| std::env::var(name).ok();
     let platform = store::Platform::current();
-    let data_dir = store::resolve_data_dir(cli.data_dir.as_deref(), &env, platform)?;
-    let run_dir = ipc::resolve_run_dir(
+    // Absolute from here on (a relative `--data-dir data --run-dir run`, or such an
+    // environment variable): the daemon is spawned with the run directory as its current
+    // directory, so every command must hand on paths that do not depend on it.
+    let data_dir = absolute(&store::resolve_data_dir(
+        cli.data_dir.as_deref(),
+        &env,
+        platform,
+    )?);
+    let run_dir = absolute(&ipc::resolve_run_dir(
         cli.run_dir.as_deref(),
         cli.data_dir.as_deref(),
         &data_dir,
         &env,
         platform,
-    )?;
+    )?);
     Ok((data_dir, run_dir))
 }
 

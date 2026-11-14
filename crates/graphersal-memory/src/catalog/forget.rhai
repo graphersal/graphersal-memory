@@ -8,7 +8,7 @@ fn forget(slug, source, project) {
     let file = g.v(id).has("imported_at").values("source").to_list();
     // source "ui" (the browser UI): an imported memory stays (its file is the one to edit).
     if source == "ui" && file.len() > 0 {
-        return #{error: "the memory " + slug + " was imported from " + file[0] + ": edit or delete that file instead (an imported memory is read-only in the UI)"};
+        return #{error: "the memory " + slug + " was imported from " + file[0] + ": edit or delete that file instead (an imported memory is not forgotten in the UI)"};
     }
     g.v(id).has_label("memory").drop().iterate();
     let out = #{slug: slug, scope: scope, removed: true};

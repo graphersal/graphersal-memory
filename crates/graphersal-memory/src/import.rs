@@ -25,6 +25,10 @@
 //!   graph is not brought back while its file's text is unchanged (a moved `MEMORY.md` line
 //!   alone does not: the state records the text's own fingerprint, `content`, and `forgotten`);
 //!   a superseded one stays marked (an import never removes the `supersedes` edge).
+//! - Edits win: a memory written by an agent or in the browser UI after its import is detached
+//!   from its file (`remember` sets `edited_from`, the file); a later change of that file is
+//!   recorded in the state but does not replace it (`remember` answers `kept: "edited"`), and the
+//!   report names it ([`kept_edited_line`]).
 //! - Conflicts (M12): `remember` gets the file as `from_file` (the memory's `source`, its
 //!   `imported_at`, and the file's modification time as its `updated_at`, the decision time);
 //!   a memory with similar existing memories is marked `unchecked` until an agent settles it.
@@ -1010,6 +1014,9 @@ pub struct ImportReport {
     /// Files that brought back a memory forgotten or changed in the graph since their last
     /// import, one line each with the fix (M15).
     pub returning: Vec<String>,
+    /// Changed files whose memory was edited in graphersal-memory after its import: the edited
+    /// text was kept, one line each.
+    pub kept_edited: Vec<String>,
 }
 
 /// Runs `plans`: every new or changed file goes through `remember` (in index order, then a
@@ -1098,6 +1105,15 @@ pub fn apply(
                 "remember",
                 file.remember_args(pinned.clone(), order.clone()),
             ) {
+                Ok(answer) if answer["kept"] == "edited" => {
+                    // Edited in graphersal-memory since its import: the edited text stays, and
+                    // the file's new fingerprint is recorded so it is not sent again.
+                    state.record(file, project);
+                    report.kept_edited.push(kept_edited_line(
+                        &file.path.display().to_string(),
+                        answer["slug"].as_str().unwrap_or(&file.slug),
+                    ));
+                }
                 Ok(answer) => {
                     if answer["created"] == Value::Bool(true) {
                         report.created += 1;
@@ -1184,6 +1200,15 @@ pub fn returning_line(file: &str, slug: &str, what: &str) -> String {
         } else {
             "changed by an agent"
         }
+    )
+}
+
+/// The line about a changed `file` whose memory `slug` was edited in graphersal-memory after
+/// its import: the import kept the edited text.
+pub fn kept_edited_line(file: &str, slug: &str) -> String {
+    format!(
+        "{file} changed, but its memory {slug} was edited in graphersal-memory; the edited text \
+         was kept"
     )
 }
 

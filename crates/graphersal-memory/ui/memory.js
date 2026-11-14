@@ -1,6 +1,7 @@
 // The Memory tab: the memories of the selection (filters: kind, scope, source, replaced ones),
 // search by meaning (what the agent gets from memories(text)), a memory in full, and create /
-// edit / pin / forget. Imported memories are read-only here: their file is the one to edit.
+// edit / pin / forget. An imported memory may be edited here: the edit detaches it from its
+// file (a later change of that file no longer replaces it); it is not forgotten here.
 
 import { ref, reactive, watch, onMounted, computed } from 'vue';
 import * as model from './model.js';
@@ -121,11 +122,9 @@ export default {
     watch(() => [state.selection, state.version], () => (searched.value ? search() : list()));
     watch(() => [filters.kind, filters.scope, filters.source, filters.superseded], () => list());
     const more = computed(() => !searched.value && state.selection !== model.ALL && rows.value.length < total.value);
-    const readOnlyNote = computed(() => (opened.value && opened.value.imported
-      ? `Imported from ${opened.value.file}: edit that file instead (pin, order and conflict decisions work here).`
-      : ''));
+    const importNote = computed(() => model.importNote(opened.value));
     return {
-      filters, text, rows, total, opened, editing, creating, error, busy, searched, more, readOnlyNote,
+      filters, text, rows, total, opened, editing, creating, error, busy, searched, more, importNote,
       list, search, open, onAction, formDone, formCancel, state, model,
       clear: () => { text.value = ''; list(); },
     };
@@ -157,7 +156,7 @@ export default {
         <MemoryForm v-if="creating" :api="api" :project="state.selection" @done="formDone" @cancel="formCancel" />
         <MemoryForm v-else-if="editing" :key="editing.memory.slug" :api="api" :memory="editing.memory" :project="editing.project" @done="formDone" @cancel="formCancel" />
         <template v-else-if="opened">
-          <p v-if="readOnlyNote" class="mem-note-box">{{ readOnlyNote }}</p>
+          <p v-if="importNote" class="mem-note-box">{{ importNote }}</p>
           <component :is="api.card('memory', opened, {onAction})" />
         </template>
         <p v-else class="muted">Click a memory to open it.</p>

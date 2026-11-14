@@ -51,7 +51,7 @@ const slugOfId = (id) => String(id || '').replace(/^memory:/, '').replace(/@.*$/
  * `[{call, rows: {nodes, edges}}]`; "All projects" = one per project plus the global memories).
  * A memory in several answers (a global one) is one node; it counts as replaced or in conflict
  * when any answer says so. Node `data` is the memory card's row (`model.memoryRow`: where, source,
- * read-only, ...); the caption is the slug.
+ * imported, ...); the caption is the slug.
  * @returns {{nodes: Array, edges: Array}}
  */
 export function memoryGraph(answers, projects = [], selection = model.ALL) {

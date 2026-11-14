@@ -177,6 +177,34 @@ pub fn resolve_data_dir(
     }
 }
 
+/// Creates the data directory `dir` when it is missing and, on Unix, lets only its owner open
+/// it (mode 0700): the memories and transcripts in it are private, also when `$HOME` is
+/// readable by others. An existing directory is tightened too (also one the user chose with
+/// `--data-dir`: it holds their memory). `Ok(Some(note))` when it exists but its mode could not
+/// be changed (another owner): the caller logs the note, nothing fails. Windows: the
+/// per-user `%LOCALAPPDATA%` ACLs already keep it private; nothing is changed.
+pub fn create_private_dir(dir: &Path) -> Result<Option<String>, String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|err| format!("cannot create the data directory {}: {err}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir)
+            .map_err(|err| format!("cannot read the data directory {}: {err}", dir.display()))?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0
+            && let Err(err) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        {
+            return Ok(Some(format!(
+                "cannot restrict the data directory {} to its owner: {err}",
+                dir.display()
+            )));
+        }
+    }
+    Ok(None)
+}
+
 /// The default store's directory in `data_dir`.
 pub fn default_store_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("stores").join("default")
@@ -217,6 +245,27 @@ pub fn open_or_create_with(dir: &Path, options: StoreOptions) -> Result<Arc<Stor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_data_directory_is_created_private_and_an_open_one_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::mcp_tests::TempDir::new("store-private");
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let fresh = root.path().join("a").join("data");
+        assert_eq!(create_private_dir(&fresh).unwrap(), None);
+        assert_eq!(mode(&fresh), 0o700);
+        let open = root.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(open.join("projects.json"), "{}").unwrap();
+        assert_eq!(create_private_dir(&open).unwrap(), None);
+        assert_eq!(mode(&open), 0o700);
+        assert!(open.join("projects.json").exists(), "its contents stay");
+        // Already private: left as it is.
+        assert_eq!(create_private_dir(&open).unwrap(), None);
+        assert_eq!(mode(&open), 0o700);
+    }
 
     fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
         move |name| {

@@ -150,8 +150,9 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     M12; `## Pinned` lines become `pinned`, the index position the memory's `order`, both sent only
     when the file's line changed since this import set them; files and directories of the state's
     `ignored` list (`import --ignore`) skipped by `plan`; a changed file that brings back a memory
-    forgotten in the graph or changed there by an agent is still written and gets `returned` in
-    its record, `returning_line` in the report);
+    forgotten in the graph (or changed there by an agent without `edited_from`, before it
+    existed) is still written and gets `returned` in its record, `returning_line` in the report;
+    one whose memory has `edited_from` is kept, `kept_edited`/`kept_edited_line`);
   - `src/instructions.rs`: memories against the instruction files the harnesses load (the
     conflict check, `docs/how-it-works.md#memories-against-instruction-files`): `files` (the
     installed harnesses' user-level and project files from `coexist::instruction_files`),
@@ -347,7 +348,10 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     tests that exercise the engine crates and check the pin;
   - `src/store.rs`: the data directory (`--data-dir`, `GRAPHERSAL_MEMORY_DIR`, the platform's
     per-user directory; `OUR_ENTRIES`, the only entries purge deletes; `foreign_data_dir`, which
-    install refuses) and the default store `<data dir>/stores/default`, created on first use;
+    install refuses; `create_private_dir`: the data directory 0700 on Unix, an existing one
+    tightened, called by the daemon's start and install) and the default store
+    `<data dir>/stores/default`, created on first use; `commands::dirs` makes the data and run
+    directories absolute for every command;
   - `src/catalog.rs` + `src/catalog/`: the product catalog built into the binary: `schema.json`,
     `queries.json` (name, description, parameters of each memory function) and one
     `<name>.rhai` body per function (`pin` sets `pinned`/`order`), `ui.json` the browser UI's
@@ -408,7 +412,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     directories over plain HTTP (std `TcpStream`): token 401, Host/Origin 403, no CORS headers,
     GETs leave the commit position unchanged, the relay refuses internal functions, a round trip
     create -> list -> edit -> pin -> set_order -> preview -> budget -> settle -> forget, imported
-    memories refused, the launch file (0600, gone at the first heartbeat), the heartbeat exit with
+    memories refuse a forget and take an edit (`edited_from`), the launch file (0600, gone at the first heartbeat), the heartbeat exit with
     the daemon kept alive meanwhile, `/api/...` answered after a daemon restart.
   - `tests/bench_tests.rs`: the real binary's `bench` with a fake `claude` on `PATH` that records
     its calls (dry run: zero calls; a run through the harness: the flags of every call, the live
@@ -438,8 +442,11 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
   (int) select and order the start context (`crate::start_context`); `remember`'s `pinned`
   default `null` keeps the memory's pin; `pin` is a `use` tool. `remember`/`forget` take `source`
   (`remember` | `ui`; bound to `remember` on MCP connections): the UI's memories are stored with
-  `source` "ui" and reported as "ui" (never as a file); `source` "ui" refuses to edit or forget an
-  imported memory.
+  `source` "ui" and reported as "ui" (never as a file); `source` "ui" refuses to forget an
+  imported memory. Any write without `from_file` (agent or UI) to an imported memory detaches it:
+  `imported_at`/`unchecked` dropped, `edited_from` = its file; an import write (`from_file`) to a
+  memory with `edited_from` writes nothing and answers `kept: "edited"` (both importers record
+  the file's fingerprint and report it, `import::kept_edited_line`).
 - Conflicts (M12, `docs/how-it-works.md#conflicts-between-memories`): `remember` answers
   `nearest` (the `recall` scoring on its slug + summary, k=5, without itself and superseded ones)
   and a `check` text only when something is near; `remember(supersedes: [slug])` and

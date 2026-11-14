@@ -127,7 +127,10 @@ anything changes.
 
 - **Per-user data directory** by default (macOS `~/Library/Application Support/graphersal-memory`,
   Linux `$XDG_DATA_HOME/graphersal-memory`, Windows `%LOCALAPPDATA%\graphersal-memory`), not inside
-  your repository.
+  your repository. On Unix only you can open it (`0700`): `install` and the daemon create it
+  that way and tighten an existing one at every daemon start (also a directory chosen with
+  `--data-dir`); on Windows it is inside your own `%LOCALAPPDATA%`. A relative `--data-dir` or
+  `--run-dir` is taken from the current directory and passed on as an absolute path.
 - **One shared store by default.** Every memory carries its project, and search defaults to the
   current project plus your global memory: preferences and cross-project rules. The global
   memories live in the same store, without a project.
@@ -362,6 +365,14 @@ candidates; the agent's own model decides (no model call of graphersal-memory's,
   brings a superseded or forgotten memory back: the import state records the file text's own
   fingerprint and that its memory was forgotten, so a moved `MEMORY.md` line alone imports
   nothing, and an import never removes a `supersedes` edge.
+- **Edits win over the file.** An imported memory can be edited, by your agent (`remember`) or
+  in the browser UI. The edit detaches it from its file: it loses `imported_at` (and
+  `unchecked`) and keeps the file it came from as `edited_from`, so the provenance stays
+  visible; from then on it is a normal memory. When that file changes later, the import keeps
+  the edited text and writes nothing (`remember` with the file answers `kept: "edited"`): it
+  records the file's new fingerprint, so it does not try again every session, and its report
+  says "<file> changed, but its memory <slug> was edited in graphersal-memory; the edited text
+  was kept". The same holds for the memories imported from another memory tool.
 - **At session start** the start context lists the open conflicts (both versions, which of them
   is always loaded, their files; at most five, then "N more") and the number of imported
   memories waiting for their check, both naming `conflicts()`; Claude Code's start line adds the
@@ -458,8 +469,10 @@ conflict checks, the history and the start context work exactly as for the agent
 - **Memory**: the list (filters: kind, project or global, written by the agent / here /
   imported file / other memory tool, replaced ones), search by meaning (the same search your
   agent gets), a memory in full, and create, edit, pin and forget (forget always asks). A memory
-  imported from a file is read-only here: edit its file instead (pin, order and conflict
-  decisions work). Before an edit is saved, the memory is read again: when an agent changed it
+  imported from a file can be edited here too: the edit is kept, a later change of that file no
+  longer replaces it ([edits win over the file](#conflicts-between-memories)), and the memory
+  shows "Edited here; first imported from <file>". It is not forgotten here: edit or delete its
+  file instead. Before an edit is saved, the memory is read again: when an agent changed it
   meanwhile, nothing is saved.
 - **Graph**: the memories and the decisions between them as a graph: replaces (newer to older,
   an arrow), open conflicts (red), narrows (a project memory to the global one it makes an
@@ -588,10 +601,12 @@ before), so `uninstall` can switch it on again. An import from another tool goes
 connection without a project (an empty `project.root` in the handshake: global memories only) and
 records each item's fingerprint in `import/other-memory.json`.
 
-Every imported memory knows its file (`source`, `imported_at`; [conflicts](#conflicts-between-memories)).
-When the import of a changed file finds that the memory was forgotten in the graph, or that an
-agent changed it there since the last import, it still writes the file's version (the file
-changed: that is a decision too) and records `returned` in the file's record of
+Every imported memory knows its file (`source`, `imported_at`; once edited here, `edited_from`;
+[conflicts](#conflicts-between-memories)). A changed file whose memory was edited in
+graphersal-memory since its import keeps the edit (the report says so). When the import of a
+changed file finds that the memory was forgotten in the graph (or changed there by an agent
+before graphersal-memory recorded edits as `edited_from`), it still writes the file's version
+(the file changed: that is a decision too) and records `returned` in the file's record of
 `import/claude-code.json`; the import's report, `status` and `doctor` name the file and the ways
 out. `import --ignore PATH` adds a file or directory to the record's `ignored` list: the import
 skips it from then on (`--unignore` takes it off again).

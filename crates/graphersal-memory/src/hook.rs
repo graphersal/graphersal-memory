@@ -153,7 +153,8 @@ pub fn work(
 
 /// Imports the new and changed memory files Claude Code keeps for the sessions started in
 /// `dir` (`<projects>/<slug of dir>/memory`), as memories of the project of `session_dir`: how
-/// many were imported, and notes on what failed. Nothing when the directory does not exist.
+/// many were imported, and notes on what failed (and on changed files whose memory was edited
+/// in graphersal-memory, which keep the edit). Nothing when the directory does not exist.
 pub fn import_project(
     dir: &Path,
     session_dir: &Path,
@@ -172,6 +173,8 @@ pub fn import_project(
     match sync(&memory_dir, session_dir, data_dir, connect, deadline) {
         Ok(report) => {
             let mut notes = report.problems;
+            // A changed file whose memory was edited here: said once, the edit was kept.
+            notes.extend(report.kept_edited);
             if report.timed_out {
                 notes.push(
                     "the import stopped at the time limit; the rest follows next time".into(),

@@ -18,6 +18,9 @@ fn memory(slug, project) {
     if order.len() > 0 { m.order = order[0]; }
     let imported = g.v(id).values("imported_at").as_string().to_list();
     if imported.len() > 0 { m.imported_at = imported[0]; }
+    // A memory edited here after its import: the file it was first imported from.
+    let edited = g.v(id).values("edited_from").to_list();
+    if edited.len() > 0 { m.edited_from = edited[0]; }
     if g.v(id).has("unchecked", true).count().next() > 0 { m.unchecked = true; }
     m.links = g.v(id).out("relates_to").has_label("memory").values("name").to_list();
     m.linked_from = g.v(id).in_("relates_to").has_label("memory").values("name").to_list();

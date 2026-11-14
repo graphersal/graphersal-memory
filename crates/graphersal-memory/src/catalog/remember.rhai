@@ -5,10 +5,22 @@ fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, o
     let other = if scoped { "memory:" + slug } else if project != "" { "memory:" + slug + "@" + project } else { "" };
     let visible = if project == "" { __.not(__.has("project")) }
                   else { __.or(__.not(__.has("project")), __.has("project", project)) };
-    // source "ui" (the browser UI): an imported memory stays read-only there (its file is
-    // the one to edit).
-    if source == "ui" && g.v(id).has("imported_at").count().next() > 0 {
-        return #{error: "the memory " + slug + " was imported from " + g.v(id).values("source").next() + ": edit that file instead (an imported memory is read-only in the UI)"};
+    // from_file (the file-memory imports only): the file it came from and when that file last
+    // changed (the decision time).
+    let imported = type_of(from_file) == "map" && from_file.contains("path") && type_of(from_file.path) == "string" && from_file.path != "";
+    // A memory edited here after its import (edited_from) is detached from its file: a later
+    // import of that file keeps the edited text and writes nothing.
+    let edited = g.v(id).has_label("memory").values("edited_from").to_list();
+    if imported && edited.len() > 0 {
+        return #{slug: slug, scope: if scoped { "project" } else { "global" }, created: false, kept: "edited", file: edited[0],
+                 note: "the memory " + slug + " was edited in graphersal-memory after its import from " + edited[0] + ": the edited text was kept"};
+    }
+    // Any other write (an agent's, the browser UI's) to an imported memory detaches it from its
+    // file: edited_from keeps the file it came from.
+    let detached_from = "";
+    if !imported {
+        let file = g.v(id).has("imported_at").values("source").to_list();
+        if file.len() > 0 { detached_from = file[0]; }
     }
     let now = g.gql("RETURN CURRENT_TIMESTAMP AS t").next()["t"];
     let text = body;
@@ -17,11 +29,10 @@ fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, o
     if how_to_apply != "" { text += (if why == "" { "\n\n" } else { "\n" }) + "**How to apply:** " + how_to_apply; }
     let p = #{name: slug, kind: kind, summary: summary, body: text, embed_text: slug + ": " + summary,
               origin: "curated", visibility: "private", source: if source == "ui" { "ui" } else { "user" }, updated_at: now};
-    // from_file (the file-memory import only): the file it came from and when that file last
-    // changed (the decision time); imported_at is when it was imported.
-    let imported = false;
-    if type_of(from_file) == "map" && from_file.contains("path") && type_of(from_file.path) == "string" && from_file.path != "" {
-        imported = true;
+    // An import: source is the file, imported_at when it was imported, updated_at when the file
+    // last changed.
+    if detached_from != "" { p.edited_from = detached_from; }
+    if imported {
         p.source = from_file.path;
         p.imported_at = now;
         if from_file.contains("modified_at") && type_of(from_file.modified_at) == "string" && from_file.modified_at != "" {
@@ -47,7 +58,7 @@ fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, o
         p.index_order = if mx.len() == 0 { 0 } else { mx[0] + 1 };
     } else {
         // A replaced memory keeps no optional field of its old text, nor an import's marks when
-        // the agent writes it.
+        // the agent or the UI writes it (edited_from, set above, stays on later writes).
         g.v(id).properties("why", "how_to_apply", "title", "hook").drop().iterate();
         if !imported { g.v(id).properties("imported_at", "unchecked").drop().iterate(); }
     }
