@@ -879,7 +879,7 @@ fn a_file_that_brings_back_a_forgotten_memory_is_reported_and_can_be_ignored() {
     crate::commands::run_import(&setup, false, &mut connect, &mut out).unwrap();
     let out = String::from_utf8(out).unwrap();
     assert!(
-        out.contains("files that brought back a memory changed or forgotten in the graph: 2"),
+        out.contains("files that brought back a memory changed or forgotten in the graph: 1"),
         "{out}"
     );
     assert!(
@@ -890,11 +890,13 @@ fn a_file_that_brings_back_a_forgotten_memory_is_reported_and_can_be_ignored() {
         "{out}"
     );
     assert!(
-        out.contains("brought back the memory graph-first, which was changed by an agent"),
+        out.contains(
+            "its memory graph-first was edited in graphersal-memory; the edited text was kept"
+        ),
         "{out}"
     );
     let found = coexist::returning(&setup);
-    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found.len(), 1, "{found:?}");
     let doctor = doctor_texts(&setup).join("\n");
     assert!(
         doctor.contains("brought back the memory release-plan (forgotten in the graph"),
@@ -927,6 +929,110 @@ fn a_file_that_brings_back_a_forgotten_memory_is_reported_and_can_be_ignored() {
     crate::commands::ignore_import(&setup, &file, false, &mut sink).unwrap();
     let state = ImportState::load(data.path()).unwrap();
     assert!(!state.is_ignored(&file));
+    memory.close();
+}
+
+#[test]
+fn a_changed_file_keeps_the_edit_of_its_memory_and_is_not_sent_again() {
+    let home = TempDir::new("co-edit-home");
+    let data = TempDir::new("co-edit-data");
+    let work = TempDir::new("co-edit-work");
+    let project_dir = mcp::canonical(work.path());
+    let dir = memory_fixture(home.path(), &project_dir);
+    let project = project_dir.display().to_string();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    // Edited in graphersal-memory, then its file changes.
+    memory.call(
+        &project,
+        "remember",
+        json!({"slug": "release-plan", "kind": "project", "summary": "Releases go out on Mondays",
+               "body": "Edited here."}),
+    );
+    let file = dir.join("release-plan.md");
+    std::fs::write(
+        &file,
+        "---\nname: release-plan\ndescription: Releases go out on Tuesdays\ntype: project\n---\n\nTuesday.\n",
+    )
+    .unwrap();
+    let mut connect = memory.connector();
+    let mut out = Vec::new();
+    crate::commands::run_import(&setup, false, &mut connect, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains(
+            "changed files whose memory was edited in graphersal-memory (the edit was kept): 1"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "{} changed, but its memory release-plan was edited in graphersal-memory; the edited \
+             text was kept",
+            file.display()
+        )),
+        "{out}"
+    );
+    assert!(!out.contains("brought back"), "{out}");
+    let read = memory.call(&project, "memory", json!({"slug": "release-plan"}));
+    assert_eq!(read["summary"], "Releases go out on Mondays", "{read}");
+    assert_eq!(read["edited_from"], file.display().to_string(), "{read}");
+    assert!(coexist::returning(&setup).is_empty());
+    // Its new fingerprint is recorded: the next import does not send it again.
+    let mut out = Vec::new();
+    crate::commands::run_import(&setup, false, &mut connect, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(!out.contains("edited in graphersal-memory"), "{out}");
+    memory.close();
+}
+
+#[test]
+fn an_item_of_another_memory_tool_keeps_its_edit_when_the_tool_changes_it() {
+    let home = TempDir::new("co-oedit-home");
+    let data = TempDir::new("co-oedit-data");
+    named_machine(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    memory.call(
+        "",
+        "remember",
+        json!({"slug": "kg-robin", "kind": "user", "summary": "Robin prefers short answers",
+               "body": "Edited here.", "scope": "global"}),
+    );
+    let file = home.path().join("kg").join("memory.jsonl");
+    std::fs::write(
+        &file,
+        concat!(
+            r#"{"type":"entity","name":"Robin","entityType":"person","observations":["Prefers long answers"]}"#,
+            "\n",
+            r#"{"type":"entity","name":"graphersal","entityType":"project","observations":["A graph engine in Rust"]}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("1 changed but edited in graphersal-memory, the edit kept"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "~/kg/memory.jsonl changed, but its memory kg-robin was edited in graphersal-memory"
+        ),
+        "{out}"
+    );
+    let read = memory.call("", "memory", json!({"slug": "kg-robin"}));
+    assert_eq!(read["summary"], "Robin prefers short answers", "{read}");
+    assert_eq!(read["edited_from"], file.display().to_string(), "{read}");
+    // Recorded: a third install imports nothing from the tool.
+    let (code, out) = run_install(&setup, &memory, yes());
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("other memory: imported"), "{out}");
     memory.close();
 }
 

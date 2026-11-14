@@ -509,25 +509,13 @@ fn the_graph_tab_reads_its_functions_through_the_relay_and_writes_nothing() {
 }
 
 #[test]
-fn an_imported_memory_refuses_edit_and_forget_from_the_ui() {
+fn an_imported_memory_refuses_forget_but_takes_an_edit_from_the_ui() {
     let env = Env::start("2h", &[]);
     let p = "/work/p";
     env.query(
         "remember",
         json!({"slug": "from-file", "kind": "project", "summary": "Imported", "body": "x",
                "from_file": {"path": "/home/u/memory/from-file.md"}, "project": p}),
-    );
-    let edit = env.query(
-        "remember",
-        json!({"slug": "from-file", "kind": "project", "summary": "Edited", "body": "y",
-               "source": "ui", "project": p}),
-    );
-    assert!(
-        edit[0]["error"]
-            .as_str()
-            .unwrap()
-            .contains("/home/u/memory/from-file.md"),
-        "{edit}"
     );
     let forget = env.query(
         "forget",
@@ -541,6 +529,18 @@ fn an_imported_memory_refuses_edit_and_forget_from_the_ui() {
         json!({"slug": "from-file", "pinned": true, "project": p}),
     );
     assert_eq!(pinned[0]["pinned"], true);
+    let edit = env.query(
+        "remember",
+        json!({"slug": "from-file", "kind": "project", "summary": "Edited", "body": "y",
+               "source": "ui", "project": p}),
+    );
+    assert!(edit[0].get("error").is_none(), "{edit}");
+    let edited = env.query("memory", json!({"slug": "from-file", "project": p}));
+    assert_eq!(edited[0]["summary"], "Edited", "{edited}");
+    assert_eq!(
+        edited[0]["edited_from"], "/home/u/memory/from-file.md",
+        "{edited}"
+    );
 }
 
 #[test]

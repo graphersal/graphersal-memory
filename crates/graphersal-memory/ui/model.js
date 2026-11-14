@@ -26,8 +26,8 @@ export const KINDS = Object.freeze([
 export const SOURCES = Object.freeze([
   { id: 'agent', text: 'written by the agent' },
   { id: 'ui', text: 'written here' },
-  { id: 'file', text: 'imported file (read-only)' },
-  { id: 'other', text: 'other memory tool (read-only)' },
+  { id: 'file', text: 'imported file' },
+  { id: 'other', text: 'other memory tool' },
 ]);
 
 /** The tiers of the start context, in delivery order (`start_context::entries_json` `tier`). */
@@ -78,13 +78,28 @@ export function callsFor(selection, projects = []) {
   return [{ project: selection, only: null }];
 }
 
-/** The source of a memory in plain words. */
+/** The source of a memory in plain words (an edited import names its first file too). */
 export function sourceText(row) {
   const kind = sourceKind(row);
-  if (kind === 'ui') return 'written here';
-  if (kind === 'agent') return 'agent';
-  if (kind === 'other') return `${baseName(row.source)} (other memory tool, read-only)`;
-  return `${baseName(row.source)} (read-only)`;
+  const first = row.edited_from ? ` (first imported from ${baseName(row.edited_from)})` : '';
+  if (kind === 'ui') return (row.edited_from ? 'edited here' : 'written here') + first;
+  if (kind === 'agent') return (row.edited_from ? 'edited by the agent' : 'agent') + first;
+  if (kind === 'other') return `${baseName(row.source)} (other memory tool)`;
+  return `${baseName(row.source)} (imported)`;
+}
+
+/**
+ * The note above an opened memory about its file: an imported memory may be edited here and
+ * the edit is kept (a later change of its file no longer replaces it); an edited one names the
+ * file it was first imported from. Empty for any other memory.
+ */
+export function importNote(row) {
+  if (!row) return '';
+  if (row.edited_from) return `Edited here; first imported from ${row.edited_from}.`;
+  if (isImported(row)) {
+    return `Imported from ${row.file || row.source}. Edits here are kept: a later change of that file no longer replaces this memory.`;
+  }
+  return '';
 }
 
 /** agent | ui | file | other, from `source_kind` or from `source`/`imported_at`. */
@@ -97,7 +112,10 @@ export function sourceKind(row) {
   return 'agent';
 }
 
-/** Whether a memory is read-only in the UI (imported from a file or another memory tool). */
+/**
+ * Whether a memory is imported (from a file or another memory tool) and still attached to its
+ * file: it may be edited here (that detaches it, `edited_from`), but not forgotten here.
+ */
 export function isImported(row) {
   return !!row.imported_at || sourceKind(row) === 'file' || sourceKind(row) === 'other';
 }
@@ -526,7 +544,7 @@ export function ruleActions(pair) {
     conflict: { slug: pair.memory.slug, decision: 'conflict', other: '', rule: pair.rule.rule, project: pair.project },
     canForget: !imported,
     forgetTitle: imported
-      ? `Imported from ${pair.memory.source}: edit or delete that file instead (an imported memory is read-only here).`
+      ? `Imported from ${pair.memory.source}: edit or delete that file instead (an imported memory is not forgotten here).`
       : 'Forget this memory: the instruction file\'s line stays the rule.',
     fileText: `File is outdated: edit ${where}`,
     fileNote: `Edit ${where} yourself: graphersal-memory never changes instruction files. The conflict stays listed and closes by itself when that line changes or goes (at the next session start, or with \`graphersal-memory import\`).`,

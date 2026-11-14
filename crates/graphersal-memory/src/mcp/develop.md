@@ -6,7 +6,8 @@ sessions, session, recall; each a tool of its own, folder "memory").
   conflicts_with, narrows, about, contains, edited, wrote), list_saved_queries, statistics.
 - Decisions between memories are data: supersedes (newer -> older, `at`), conflicts_with (an
   open conflict), narrows (project -> global); an imported memory has `source` (its file),
-  `imported_at` and, until checked, `unchecked`. Settle them with remember(supersedes) and
+  `imported_at` and, until checked, `unchecked` (once edited here: `edited_from`, its file,
+  instead). Settle them with remember(supersedes) and
   settle, not by editing edges.
 - gql (read queries; the supported subset is the resource graphersal://gql-reference) and query
   (Gremlin in Rhai; also writes and maintenance) for everything else.

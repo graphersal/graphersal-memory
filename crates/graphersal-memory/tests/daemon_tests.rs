@@ -106,6 +106,11 @@ impl Env {
     fn spawn_shim_env(&self, project: &str, extra: &[&str], vars: &[(&str, &str)]) -> Shim {
         let mut command = self.command();
         command.envs(vars.iter().copied());
+        Self::spawn_shim_from(command, project, extra)
+    }
+
+    /// A shim of `project` started by `command` (its environment and global flags set).
+    fn spawn_shim_from(mut command: Command, project: &str, extra: &[&str]) -> Shim {
         let mut child = command
             .arg("mcp")
             .arg("--project")
@@ -651,6 +656,66 @@ fn the_socket_and_run_directory_are_private() {
     assert_eq!(mode(&env.run_dir()), 0o700);
     assert_eq!(mode(&env.socket()), 0o600);
     close_ok(shim);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_data_directory_is_private_and_an_open_one_is_tightened_at_the_daemon_start() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new("10m");
+    // A data directory others may read, as umask 022 made it before.
+    std::fs::create_dir_all(env.data_dir()).unwrap();
+    std::fs::set_permissions(env.data_dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut shim = env.shim("/w/private");
+    shim.remember("private-note", "Only the owner reads this", "project");
+    let mode = std::fs::metadata(env.data_dir())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "{mode:o}");
+    close_ok(shim);
+}
+
+#[test]
+fn relative_data_and_run_directories_are_made_absolute() {
+    let env = Env::new("10m");
+    // `--data-dir d --run-dir r` from the test's root: the directories of `env`, given relative.
+    let mut command = env.command();
+    command
+        .env_remove("GRAPHERSAL_MEMORY_DIR")
+        .env_remove("GRAPHERSAL_MEMORY_RUN_DIR")
+        .args(["--data-dir", "d", "--run-dir", "r"]);
+    let mut shim = Env::spawn_shim_from(command, "/w/relative", &[]);
+    let init = shim.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {},
+               "clientInfo": {"name": "test", "version": "1"}}),
+    );
+    assert!(init["result"].is_object(), "{init}: {}", env.log());
+    shim.notify("notifications/initialized");
+    shim.remember(
+        "relative-note",
+        "Stored under the given directory",
+        "project",
+    );
+    assert!(env.data_dir().join("stores").join("default").is_dir());
+    assert!(
+        !env.run_dir().join("d").exists(),
+        "not resolved against the run directory"
+    );
+    assert!(env.status().is_some(), "the daemon listens in r");
+    close_ok(shim);
+    // A later command with the same relative flags finds the same daemon.
+    let output = env
+        .command()
+        .env_remove("GRAPHERSAL_MEMORY_DIR")
+        .env_remove("GRAPHERSAL_MEMORY_RUN_DIR")
+        .args(["--data-dir", "d", "--run-dir", "r", "status"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("daemon: running"), "{text}");
 }
 
 #[test]

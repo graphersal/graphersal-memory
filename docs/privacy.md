@@ -9,7 +9,9 @@ graphersal-memory is designed so that nothing leaves your machine unless you ask
 
 - **Your per-user data directory** (macOS `~/Library/Application Support/graphersal-memory`, Linux
   `$XDG_DATA_HOME/graphersal-memory`, Windows `%LOCALAPPDATA%\graphersal-memory`). It is not in
-  your repository, so it is not committed by accident.
+  your repository, so it is not committed by accident. On macOS and Linux only your OS user can
+  open it (mode `0700`, set when it is created and again at every daemon start), so other local
+  users cannot read your memories or transcripts even when your home directory is readable.
 - **No server and no ports.** The daemon listens on a local socket that only your OS user can
   open. The optional browser UI listens on loopback (`127.0.0.1`), and only while you run
   `graphersal-memory ui`; its API needs a per-run token only the opened tab has.

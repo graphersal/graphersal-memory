@@ -106,6 +106,10 @@
           "unchecked": {
             "type": "boolean",
             "description": "imported and not yet checked against its nearest memories for conflicts (conflicts(), settle)"
+          },
+          "edited_from": {
+            "type": "string",
+            "description": "the file it was first imported from, when it was edited here afterwards: a later change of that file no longer replaces it"
           }
         },
         "required": [

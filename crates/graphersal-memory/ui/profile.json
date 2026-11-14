@@ -23,7 +23,7 @@
         { "field": "superseded_by", "prefix": "replaced by ", "tone": "warn" },
         { "field": "has_conflict", "text": "conflict", "tone": "danger" },
         { "field": "unchecked", "text": "to check", "tone": "warn" },
-        { "field": "imported", "text": "read-only" }
+        { "field": "imported", "text": "imported" }
       ],
       "body": "body",
       "excerpt": 140,
@@ -38,10 +38,11 @@
         { "field": "conflict_text", "title": "Open conflict with" },
         { "field": "note", "title": "Note" },
         { "field": "file", "title": "File" },
-        { "field": "imported_at", "title": "Imported", "format": "datetime" }
+        { "field": "imported_at", "title": "Imported", "format": "datetime" },
+        { "field": "edited_from", "title": "First imported from" }
       ],
       "actions": [
-        { "id": "edit", "text": "Edit", "unless": "imported" },
+        { "id": "edit", "text": "Edit" },
         { "id": "pin", "text": "Pin", "unless": "pinned", "title": "Load it at the start of every session" },
         { "id": "unpin", "text": "Unpin", "when": "pinned" },
         { "id": "forget", "text": "Forget", "kind": "danger", "unless": "imported" }
@@ -138,7 +139,7 @@
       { "text": "project fact or decision", "node": { "color": "--ok" } },
       { "text": "where things are (reference)", "node": { "color": "--warn" } },
       { "text": "loaded at every session start", "node": { "border": { "width": 4.5, "color": "--text" } } },
-      { "text": "imported from a file (read-only)", "node": { "border": { "width": 2.5, "style": "dashed", "color": "--text" } } },
+      { "text": "imported from a file", "node": { "border": { "width": 2.5, "style": "dashed", "color": "--text" } } },
       { "text": "replaced", "node": { "opacity": 0.3 } },
       { "text": "session", "node": { "shape": "round-rectangle" } },
       { "text": "fact", "node": { "shape": "diamond" } }

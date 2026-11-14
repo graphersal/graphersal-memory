@@ -24,11 +24,12 @@ fn memory_list(project, kind, scope, source_kind, superseded, offset, limit) {
         .by("kind").by(__.coalesce(__.values("title"), __.values("name")))
         .by(__.coalesce(__.values("hook"), __.values("summary"))).by("summary")
         .by(__.choose(__.has("imported_at"), __.coalesce(__.values("source"), __.constant("remember")), __.choose(__.has("source", "ui"), __.constant("ui"), __.constant("remember"))))
-        .by(__.project("imported_at", "pinned", "order", "unchecked")
+        .by(__.project("imported_at", "pinned", "order", "unchecked", "edited_from")
             .by(__.coalesce(__.values("imported_at").as_string(), __.constant("")))
             .by(__.coalesce(__.values("pinned"), __.constant(false)))
             .by(__.values("order").fold())
-            .by(__.coalesce(__.values("unchecked"), __.constant(false))))
+            .by(__.coalesce(__.values("unchecked"), __.constant(false)))
+            .by(__.coalesce(__.values("edited_from"), __.constant(""))))
         .by(__.coalesce(__.values("updated_at").as_string(), __.constant("")))
         .by(__.in_("supersedes").has_label("memory").filter(visible).values("name").fold())
         .by(__.both("conflicts_with").has_label("memory").filter(visible).values("name").fold()).to_list();
@@ -38,6 +39,7 @@ fn memory_list(project, kind, scope, source_kind, superseded, offset, limit) {
         r.pinned = r.marks.pinned;
         r.order = r.marks.order;
         r.unchecked = r.marks.unchecked;
+        r.edited_from = r.marks.edited_from;
         r.remove("marks");
         let sk = if r.imported_at != "" {
             if r.scope == "global" && (r.slug.starts_with("kg-") || r.slug.starts_with("basic-")) { "other" } else { "file" }
@@ -47,6 +49,7 @@ fn memory_list(project, kind, scope, source_kind, superseded, offset, limit) {
         r.source_kind = sk;
         r.order = if r.order.len() > 0 { r.order[0] } else { () };
         if r.imported_at == "" { r.remove("imported_at"); }
+        if r.edited_from == "" { r.remove("edited_from"); }
         if r.sup.len() > 0 { r.superseded_by = r.sup[0]; }
         r.remove("sup");
         if r.conflicts.len() == 0 { r.remove("conflicts"); }

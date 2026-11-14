@@ -17,7 +17,9 @@
 //! The prefixes keep an imported item from replacing a memory of the user's with the same slug.
 //! Every memory passes `from_file` (the data file as its `source`), so conflicts and returning
 //! facts name the file. `<data dir>/import/other-memory.json` records each item's fingerprint:
-//! a later import sends only new and changed items. The files are only read. Other tools'
+//! a later import sends only new and changed items; an item whose memory was edited in
+//! graphersal-memory after its import keeps the edit (`remember` answers `kept: "edited"`, the
+//! report says so). The files are only read. Other tools'
 //! formats are listed as "not importable yet".
 
 use std::collections::BTreeMap;
@@ -452,6 +454,9 @@ pub struct Report {
     pub unchanged: usize,
     /// Failures.
     pub problems: Vec<String>,
+    /// Changed items whose memory was edited in graphersal-memory after its import: the edited
+    /// text was kept, one line each.
+    pub kept_edited: Vec<String>,
 }
 
 impl Report {
@@ -461,7 +466,7 @@ impl Report {
             .iter()
             .map(|s| format!("{} ({})", s.server, s.path.display()))
             .collect();
-        format!(
+        let mut line = format!(
             "other memory: imported {} memor{} ({} new, {} updated; {} unchanged) as global \
              memories from {}",
             self.created + self.updated,
@@ -474,7 +479,14 @@ impl Report {
             self.updated,
             self.unchanged,
             names.join(", ")
-        )
+        );
+        if !self.kept_edited.is_empty() {
+            line.push_str(&format!(
+                "; {} changed but edited in graphersal-memory, the edit kept",
+                self.kept_edited.len()
+            ));
+        }
+        line
     }
 }
 
@@ -533,6 +545,19 @@ pub fn apply(sources: &[Source], connect: &mut Connect<'_>, data_dir: &Path) -> 
                               "dir": dir},
             });
             match caller.call("remember", args) {
+                // Edited in graphersal-memory since its import: the edit stays; the item's new
+                // fingerprint is recorded below so it is not sent again.
+                Ok(answer) if answer["kept"] == "edited" => {
+                    report.kept_edited.push(crate::import::kept_edited_line(
+                        &file.display().to_string(),
+                        &item.slug,
+                    ));
+                    state.items.insert(
+                        State::key(source, item),
+                        json!({"fingerprint": item.fingerprint, "slug": item.slug,
+                               "imported_at": crate::daemon::now_utc()}),
+                    );
+                }
                 Ok(answer) => {
                     if answer["created"] == Value::Bool(true) {
                         report.created += 1;

@@ -71,7 +71,7 @@ test('a memory row says where it lives and where it came from in plain words', (
     chain: ['f', 'g'], conflicts_with: [{ slug: 'h' }],
   }, projects, '/w/app');
   assert.equal(imported.imported, true);
-  assert.equal(imported.source_text, 'f.md (read-only)');
+  assert.equal(imported.source_text, 'f.md (imported)');
   assert.equal(imported.file, '/h/.claude/projects/x/memory/f.md');
   assert.equal(imported.summary, 'old rule');
   assert.equal(imported.superseded_by, 'g');
@@ -276,4 +276,18 @@ test('memory card lists (links, linked from, about) are text, not JSON', () => {
   assert.equal(row.linked_from, 'c, d, e');
   assert.equal(row.about, 'file:src/x.rs');
   assert.equal(m.memoryRow({ slug: 'a', scope: 'global', kind: 'user' }).linked_from, '');
+});
+
+test('an imported memory may be edited: the note says the edit is kept, an edited one names its file', () => {
+  const imported = m.memoryRow({ slug: 'f', scope: 'project', source: '/h/memory/f.md', imported_at: '2026-11-01T00:00:00Z' }, [], '/w/app');
+  assert.equal(m.importNote(imported), 'Imported from /h/memory/f.md. Edits here are kept: a later change of that file no longer replaces this memory.');
+  const edited = m.memoryRow({ slug: 'f', scope: 'project', source: 'ui', edited_from: '/h/memory/f.md' }, [], '/w/app');
+  assert.equal(edited.imported, false, 'a detached memory is a normal memory');
+  assert.equal(edited.source_text, 'edited here (first imported from f.md)');
+  assert.equal(m.importNote(edited), 'Edited here; first imported from /h/memory/f.md.');
+  const byAgent = m.memoryRow({ slug: 'f', scope: 'project', source: 'remember', edited_from: '/h/memory/f.md' }, [], '/w/app');
+  assert.equal(byAgent.source_text, 'edited by the agent (first imported from f.md)');
+  assert.equal(m.importNote(m.memoryRow({ slug: 'a', scope: 'project', source: 'remember' }, [], '/w/app')), '');
+  assert.equal(m.importNote(null), '');
+  assert.ok(m.SOURCES.every((s) => !/read-only/.test(s.text)));
 });

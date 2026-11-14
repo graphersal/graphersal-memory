@@ -1303,17 +1303,7 @@ fn the_ui_writes_as_the_ui_and_an_agent_never_can() {
         json!({"slug": "by-ui", "project": project}),
     );
     assert_eq!(read["results"][0]["source"], "ui", "{read}");
-    // An imported memory: no edit, no forget from the UI; pinning works.
-    let (_, refused) = ui_query(
-        &runtime,
-        "remember",
-        json!({"slug": "imported", "kind": "project", "summary": "x", "body": "x",
-               "source": "ui", "project": project}),
-    );
-    assert!(
-        refused.to_string().contains("read-only in the UI"),
-        "{refused}"
-    );
+    // An imported memory: no forget from the UI; pinning works.
     let (_, refused) = ui_query(
         &runtime,
         "forget",
@@ -1335,6 +1325,24 @@ fn the_ui_writes_as_the_ui_and_an_agent_never_can() {
         json!({"slug": "imported", "project": project}),
     );
     assert_eq!(read["results"][0]["summary"], "from a file", "{read}");
+    // The UI may edit it: the edit detaches it from its file.
+    let (status, saved) = ui_query(
+        &runtime,
+        "remember",
+        json!({"slug": "imported", "kind": "project", "summary": "x", "body": "x",
+               "source": "ui", "project": project}),
+    );
+    assert_eq!(status, 200, "{saved}");
+    let (_, read) = ui_query(
+        &runtime,
+        "memory",
+        json!({"slug": "imported", "project": project}),
+    );
+    assert_eq!(read["results"][0]["summary"], "x", "{read}");
+    assert_eq!(
+        read["results"][0]["edited_from"], "/f/imported.md",
+        "{read}"
+    );
     runtime.close().unwrap();
 }
 
