@@ -107,6 +107,13 @@ export function unmarked(text) {
   return String(text || '').replace(/^SUPERSEDED by [a-z0-9-]+ on [0-9-]*: /, '');
 }
 
+/** A list of slugs or ids (or rows with one) as "a, b, c"; a text stays as it is. */
+function listText(value) {
+  if (!Array.isArray(value)) return value === undefined || value === null ? '' : value;
+  return value.map((x) => (x !== null && typeof x === 'object' ? x.slug || x.id || x.name || '' : String(x)))
+    .filter(Boolean).join(', ');
+}
+
 /**
  * The row of a memory card (from `memory_list`, `memories` or `memory`): the template's
  * fields (`where`, `source_text`, `imported`, `has_conflict`, ...) added, every value plain.
@@ -138,6 +145,10 @@ export function memoryRow(row, projects = [], context = '') {
       : !supersededBy && (row.pinned === true || row.kind === 'feedback' || row.kind === 'user'),
     conflict_text: conflicts.join(', '),
     chain_text: Array.isArray(row.chain) && row.chain.length > 1 ? row.chain.join(' → ') : '',
+    // Lists as text: a card field shows a list value as JSON.
+    links: listText(row.links),
+    linked_from: listText(row.linked_from),
+    about: listText(row.about),
     // The project the writes of this card pass: its own project, else the one looked at.
     context: row.scope === 'global' ? (context === ALL ? GLOBAL : context) : projectId || context,
   };

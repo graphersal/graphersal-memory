@@ -269,3 +269,11 @@ test('pairs waiting for the agent\'s check are counted, never called conflicts',
   assert.equal(m.waitingText(7), '7 pairs waiting for the agent\'s check');
   assert.doesNotMatch(m.waitingText(3), /conflict/);
 });
+
+test('memory card lists (links, linked from, about) are text, not JSON', () => {
+  const row = m.memoryRow({ slug: 'a', scope: 'project', project: '/w/app', kind: 'project', links: ['b'], linked_from: ['c', 'd', 'e'], about: [{ id: 'file:src/x.rs' }] }, [], '/w/app');
+  assert.equal(row.links, 'b');
+  assert.equal(row.linked_from, 'c, d, e');
+  assert.equal(row.about, 'file:src/x.rs');
+  assert.equal(m.memoryRow({ slug: 'a', scope: 'global', kind: 'user' }).linked_from, '');
+});
