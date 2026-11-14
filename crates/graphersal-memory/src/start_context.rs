@@ -249,6 +249,9 @@ pub struct StartContext {
     pub rule_conflicts: Vec<String>,
     /// How many candidates (a memory near a line of an instruction file) wait for their check.
     pub rules_unchecked: usize,
+    /// The check against instruction files is off: the store has no embedding model
+    /// (`crate::catalog::instruction_check`).
+    pub rules_off: bool,
 }
 
 impl StartContext {
@@ -303,7 +306,9 @@ impl StartContext {
                 if self.unchecked == 1 { "y" } else { "ies" }
             ));
         }
-        if !self.rule_conflicts.is_empty() || self.rules_unchecked > 0 {
+        if self.rules_off {
+            lines.push(RULES_OFF.to_string());
+        } else if !self.rule_conflicts.is_empty() || self.rules_unchecked > 0 {
             // Only the pairs the agent confirmed are conflicts; the others are its work.
             let n = self.rule_conflicts.len();
             lines.push(format!(
@@ -369,7 +374,8 @@ impl StartContext {
                            "total": self.total, "chars": self.chars(), "budget": self.budget,
                            "conflicts": self.conflicts, "unchecked": self.unchecked,
                            "rule_conflicts": self.rule_conflicts,
-                           "rules_unchecked": self.rules_unchecked})
+                           "rules_unchecked": self.rules_unchecked,
+                           "rules_off": self.rules_off})
     }
 
     /// The daemon's answer read back (`None` when it is not one).
@@ -403,8 +409,19 @@ impl StartContext {
                 })
                 .unwrap_or_default(),
             rules_unchecked: count("rules_unchecked").unwrap_or(0),
+            rules_off: value["rules_off"] == Value::Bool(true),
         })
     }
+}
+
+/// The `status`/`doctor` line when the check against instruction files is off.
+pub const RULES_OFF: &str = "memory vs instruction files: off (needs an embedding model: \
+                             `graphersal-memory install --model <repo>`)";
+
+/// Whether the check against instruction files is off, from the catalog function
+/// `open_conflicts` (no embedding model; an older daemon's answer: on).
+pub fn rules_off(value: &Value) -> bool {
+    value["rules_off"] == Value::Bool(true)
 }
 
 /// "N pairs waiting for the agent's check": candidates (a memory near a line of an instruction
@@ -686,6 +703,7 @@ pub fn render_all(
             unchecked,
             rule_conflicts: rule_lines,
             rules_unchecked,
+            rules_off: false,
         };
     }
     let conflict_text = conflicts_text(&conflicts, unchecked, &rules, rules_unchecked);
@@ -721,6 +739,7 @@ pub fn render_all(
         unchecked,
         rule_conflicts: rule_lines,
         rules_unchecked,
+        rules_off: false,
     }
 }
 
@@ -1102,6 +1121,34 @@ mod tests {
                 .all(|l| !l.contains("memory conflicts"))
         );
         assert_eq!(waiting_text(1), "1 pair waiting for the agent's check");
+    }
+
+    #[test]
+    fn without_an_embedding_model_status_says_the_check_is_off_and_the_text_nothing() {
+        let open = json!({"open": [], "unchecked": 0, "rules_unchecked": 0, "rules_open": [],
+                          "rules_off": true});
+        let mut context = render_all(
+            Vec::new(),
+            Vec::new(),
+            0,
+            rule_conflicts(&open),
+            DEFAULT_CHARS,
+        );
+        context.rules_off = rules_off(&open);
+        assert!(context.text.is_empty(), "{}", context.text);
+        assert_eq!(context.start_note(), "");
+        assert_eq!(context.conflict_lines(), [RULES_OFF]);
+        assert!(
+            RULES_OFF.starts_with("memory vs instruction files: off (needs an embedding model")
+        );
+        assert_eq!(
+            StartContext::from_json(&context.to_json()),
+            Some(context.clone())
+        );
+        assert!(
+            !rules_off(&json!({"open": []})),
+            "an older daemon's answer: on"
+        );
     }
 
     #[test]

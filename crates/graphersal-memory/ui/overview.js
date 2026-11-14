@@ -76,7 +76,8 @@ export default {
         <h3>Conflicts</h3>
         <p class="mem-big" :class="{bad: counts.open_conflicts > 0}">{{ counts.open_conflicts }}</p>
         <p>open {{ counts.open_conflicts === 1 ? 'conflict' : 'conflicts' }} · {{ counts.unchecked }} imported to check</p>
-        <p v-if="counts.rule_conflicts || counts.rules_unchecked" :class="{bad: counts.rule_conflicts > 0}">memory vs instruction files: {{ counts.rule_conflicts || 0 }} {{ counts.rule_conflicts === 1 ? 'conflict' : 'conflicts' }}<span v-if="counts.rules_unchecked" class="muted"> · {{ model.waitingText(counts.rules_unchecked) }}</span></p>
+        <p v-if="counts.rules_off" class="muted">memory vs instruction files: off (needs an embedding model)</p>
+        <p v-else-if="counts.rule_conflicts || counts.rules_unchecked" :class="{bad: counts.rule_conflicts > 0}">memory vs instruction files: {{ counts.rule_conflicts || 0 }} {{ counts.rule_conflicts === 1 ? 'conflict' : 'conflicts' }}<span v-if="counts.rules_unchecked" class="muted"> · {{ model.waitingText(counts.rules_unchecked) }}</span></p>
         <button class="btn small" type="button" @click="go('conflicts')">Decide</button>
       </section>
       <section class="mem-tile">

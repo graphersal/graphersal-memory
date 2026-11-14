@@ -45,6 +45,11 @@ fn sync_instructions(project, rules) {
             removed += 1;
         }
     }
-    let pending = g.v().has_label("instruction").filter(mine).has("scanned", false).count().next();
-    #{rules: seen.len(), created: created, updated: updated, removed: removed, pending: pending}
+    // Without an embedding model there is no check (scan_instructions): nothing is pending, so
+    // the files are not sent again at every session start; a model installed later makes the
+    // daemon scan the lines waiting.
+    let schema = g.get_schema();
+    let check = type_of(schema) == "map" && type_of(schema.meta) == "map" && schema.meta.instruction_check == true;
+    let pending = if check { g.v().has_label("instruction").filter(mine).has("scanned", false).count().next() } else { 0 };
+    #{rules: seen.len(), created: created, updated: updated, removed: removed, pending: pending, off: !check}
 }

@@ -452,13 +452,15 @@ impl StoreRuntime {
         let rows = self.call("start_context", json!({"project": project}))?;
         let open = self.call("open_conflicts", json!({"project": project}))?;
         let (conflicts, unchecked) = crate::start_context::conflicts(&open);
-        Ok(crate::start_context::render_all(
+        let mut context = crate::start_context::render_all(
             crate::start_context::entries(&rows),
             conflicts,
             unchecked,
             crate::start_context::rule_conflicts(&open),
             budget,
-        ))
+        );
+        context.rules_off = crate::start_context::rules_off(&open);
+        Ok(context)
     }
 
     /// The always-loaded memories of `project` (the catalog function `start_context`), unsorted.
@@ -583,6 +585,22 @@ impl StoreRuntime {
                 ),
                 other => format!("the memory store {}: {other}", self.name),
             })?
+    }
+
+    /// Turns the check of memories against instruction files on for the store's built-in
+    /// embedder (the tests' seam: `crate::catalog::instruction_check` needs a model).
+    #[cfg(test)]
+    pub fn enable_instruction_check(&self) {
+        self.using
+            .call(|session| {
+                let embedder = catalog::current_embedder(session)?;
+                session
+                    .set_schema(&catalog::schema_with_check(&embedder, true), None)
+                    .map(|_| ())
+                    .map_err(|err| err.to_string())
+            })
+            .expect("the session thread runs")
+            .expect("the schema is set");
     }
 
     /// Whether the store's session thread still runs jobs.

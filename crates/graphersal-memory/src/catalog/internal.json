@@ -207,5 +207,10 @@
     "name": "rescan_instructions",
     "description": "Internal (once per store, at the daemon's start): the candidates of the conflict check still waiting are dropped and every instruction line is scanned again; settled decisions stay.",
     "params": []
+  },
+  {
+    "name": "instruction_backlog",
+    "description": "Internal (the daemon, once a store has an embedding model): the projects whose instruction lines wait for their scan (\"\" for user-level lines).",
+    "params": []
   }
 ]

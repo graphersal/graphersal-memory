@@ -430,6 +430,13 @@ those files; it finds the pairs worth a look, and the agent or you decide.
   candidates found on real instruction files were merely on the same topic; the candidates
   then waiting were dropped once and every line scanned again (settled decisions stay).
   Candidates are the agent's work: you see only the pairs it confirmed as a conflict.
+- **Only with an embedding model**: with the built-in `hash-ngram/1` embedder there is no
+  check (a real contradiction scores far under the bar there, and its candidates were only
+  lines on the same topic): no candidates are searched, the start context says nothing,
+  `status`, `doctor`, the overview and the Conflicts tab say "off (needs an embedding model)",
+  and `install` says so with the built-in embedder. The lines are still synced; once a model
+  is installed, the daemon scans the lines waiting by itself (the schema's
+  `meta.instruction_check`, set from the embedder).
 - **Deciding**: `conflicts()` lists the candidates (`rules_unchecked`, both texts, the file and
   line) and the open ones (`rules_open`); `remember` names the lines near a new memory
   (`instruction_lines`). `settle(slug, "compatible", rule: <id>)` dismisses a pair until the

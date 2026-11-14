@@ -57,13 +57,15 @@ fn conflicts(k, project) {
         .project("slug", "file", "superseded_by").by("name").by("source")
         .by(__.in_("supersedes").has_label("memory").filter(visible).values("name").limit(1)).to_list();
     // Memories against lines of instruction files (compared_with: instruction -> memory), the
-    // superseded memories left out.
-    let lines = g.v().has_label("instruction").filter(visible).out_e("compared_with")
+    // superseded memories left out; none without an embedding model (the check is off).
+    let schema = g.get_schema();
+    let check = type_of(schema) == "map" && type_of(schema.meta) == "map" && schema.meta.instruction_check == true;
+    let lines = if !check { [] } else { g.v().has_label("instruction").filter(visible).out_e("compared_with")
         .filter(__.in_v().filter(visible).not(__.in_("supersedes").has_label("memory").filter(visible)))
         .project("rule", "memory", "decision", "since", "file", "line")
         .by(__.out_v().id()).by(__.in_v().id()).by(__.coalesce(__.values("decision"), __.constant("unchecked")))
         .by(__.coalesce(__.values("at").as_string(), __.constant("")))
-        .by(__.out_v().values("file")).by(__.out_v().values("line")).to_list();
+        .by(__.out_v().values("file")).by(__.out_v().values("line")).to_list() };
     let rules_open = [];
     let rules_unchecked = [];
     let rules_total = 0;
@@ -87,6 +89,7 @@ fn conflicts(k, project) {
         if pair.decision == "conflict" { rules_open.push(row); } else { rules_unchecked.push(row); }
     }
     let out = #{open: open, unchecked: unchecked, unchecked_total: all.len()};
+    if !check { out.rules_off = "The check of memories against instruction files is off: it needs an embedding model (graphersal-memory install --model <repo>)."; }
     if rules_open.len() > 0 {
         out.rules_open = rules_open;
         out.settle_rules = "Each memory contradicts a line of an instruction file the harness loads. Ask the user which holds. The memory is outdated: forget it, or remember the new rule with supersedes: [<slug>] (an imported memory: the user edits or deletes its file too). The file is outdated: tell the user to edit that file at that line (never edit it yourself); the conflict closes when the line changes or goes. Both hold after all: settle(<slug>, \"compatible\", rule: <rule>).";

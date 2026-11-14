@@ -30,8 +30,12 @@ fn overview(project) {
     out.open_conflicts = g.v().has_label("memory").filter(visible).out_e("conflicts_with")
         .filter(__.in_v().has_label("memory").filter(visible)).count().next();
     let current = __.in_v().filter(visible).not(__.in_("supersedes").has_label("memory").filter(visible));
-    out.rule_conflicts = g.v().has_label("instruction").filter(visible).out_e("compared_with").has("decision", "conflict").filter(current).count().next();
-    out.rules_unchecked = g.v().has_label("instruction").filter(visible).out_e("compared_with").has("decision", "unchecked").filter(current).count().next();
+    // The check against instruction files runs only with an embedding model (rules_off).
+    let schema = g.get_schema();
+    let check = type_of(schema) == "map" && type_of(schema.meta) == "map" && schema.meta.instruction_check == true;
+    out.rules_off = !check;
+    out.rule_conflicts = if check { g.v().has_label("instruction").filter(visible).out_e("compared_with").has("decision", "conflict").filter(current).count().next() } else { 0 };
+    out.rules_unchecked = if check { g.v().has_label("instruction").filter(visible).out_e("compared_with").has("decision", "unchecked").filter(current).count().next() } else { 0 };
     out.sessions = g.v().has_label("session").filter(visible).count().next();
     out.facts = g.v().has_label("fact").filter(visible).count().next();
     out

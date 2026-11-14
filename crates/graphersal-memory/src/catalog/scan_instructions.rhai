@@ -8,11 +8,19 @@ fn scan_instructions(project, limit) {
     // left out. The bar is high on purpose: a candidate only on the same topic is noise for the
     // agent. They become `compared_with` edges with decision "unchecked" for the agent to settle.
     // No new candidates while 20 wait for their check (the rest of the rules stay unscanned
-    // until then). remember.rhai applies the same bar to a new memory.
+    // until then). remember.rhai applies the same bar to a new memory. Only with an embedding
+    // model (the schema's meta.instruction_check, crate::catalog::instruction_check): without
+    // one nothing is scanned (off: true) and the lines wait for a model.
     let cap = 20;
     let stop = "the and for with from into this that these those are was were been has have had not but all any can cannot use used uses using when what which who why how where its our your you they them their then than there here also only never always must should don don't does did each every other anothe more most some such very just like about over under after before withou within will would could may might one two new via per etc instea prefer avoid requir make sure user agent it's".split(" ");
     let mine = if project == "" { __.not(__.has("project")) }
                else { __.or(__.not(__.has("project")), __.has("project", project)) };
+    let schema = g.get_schema();
+    let check = type_of(schema) == "map" && type_of(schema.meta) == "map" && schema.meta.instruction_check == true;
+    if !check {
+        let remaining = g.v().has_label("instruction").filter(mine).has("scanned", false).count().next();
+        return #{scanned: 0, found: 0, remaining: remaining, waiting: 0, capped: false, off: true};
+    }
     let now = g.gql("RETURN CURRENT_TIMESTAMP AS t").next()["t"];
     let waiting = g.v().has_label("instruction").filter(mine).out_e("compared_with").has("decision", "unchecked")
         .filter(__.in_v().filter(mine)).count().next();

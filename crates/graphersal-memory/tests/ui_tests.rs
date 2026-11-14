@@ -48,6 +48,9 @@ impl Env {
             .env("GRAPHERSAL_MEMORY_DIR", root.join("d"))
             .env("GRAPHERSAL_MEMORY_RUN_DIR", root.join("r"))
             .env("GRAPHERSAL_MEMORY_IDLE", idle)
+            // The check of memories against instruction files needs an embedding model; this
+            // seam turns it on with the built-in embedder the tests run on.
+            .env("GRAPHERSAL_MEMORY_TEST_INSTRUCTION_CHECK", "1")
             .env("HOME", &root)
             .env("USERPROFILE", &root)
             .env("LOCALAPPDATA", &root)

@@ -1355,6 +1355,8 @@ fn memories_against_instruction_files_reach_conflicts_settle_and_the_start_conte
         std::sync::Arc::new(mcp::endpoint()),
     )
     .unwrap();
+    // The check needs an embedding model; on with the built-in one for the test.
+    runtime.enable_instruction_check();
     let id = crate::projects::resolve(data.path(), "/work/a").unwrap().id;
     let (rules, notes) = crate::instructions::read_rules(
         &[

@@ -140,9 +140,15 @@ fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, o
     // The lines of the harness's instruction files nearest to the memory (the same bar as
     // scan_instructions: a semantic similarity of at least 0.6 and at least 2 shared content
     // words, at most 3): candidates of the conflict check, kept until settled. A project memory
-    // is checked against its project's lines, a global one against every line it sees.
+    // is checked against its project's lines, a global one against every line it sees. Only
+    // with an embedding model (the schema's meta.instruction_check).
+    let check = false;
     if text_changed {
         g.v(id).in_e("compared_with").drop().iterate();
+        let schema = g.get_schema();
+        check = type_of(schema) == "map" && type_of(schema.meta) == "map" && schema.meta.instruction_check == true;
+    }
+    if check {
         let stop = "the and for with from into this that these those are was were been has have had not but all any can cannot use used uses using when what which who why how where its our your you they them their then than there here also only never always must should don don't does did each every other anothe more most some such very just like about over under after before withou within will would could may might one two new via per etc instea prefer avoid requir make sure user agent it's".split(" ");
         // The memory's content words (their first 6 letters), read when a line is close enough.
         let words = ();

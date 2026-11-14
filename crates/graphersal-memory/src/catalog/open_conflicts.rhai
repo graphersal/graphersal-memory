@@ -16,6 +16,13 @@ fn open_conflicts(project) {
     let unchecked = g.v().has_label("memory").filter(visible).has("unchecked", true).count().next();
     // Memories against lines of the harness's instruction files: the open conflicts (the
     // memory's side, and the line) and how many candidates wait for their check.
+    // Only with an embedding model (the schema's meta.instruction_check): without one the check
+    // is off and nothing about it is listed.
+    let schema = g.get_schema();
+    let check = type_of(schema) == "map" && type_of(schema.meta) == "map" && schema.meta.instruction_check == true;
+    if !check {
+        return #{open: open, unchecked: unchecked, rules_open: [], rules_unchecked: 0, rules_off: true};
+    }
     let current = __.in_v().filter(visible).not(__.in_("supersedes").has_label("memory").filter(visible));
     let rules_open = g.v().has_label("instruction").filter(visible).out_e("compared_with").has("decision", "conflict")
         .filter(current).project("memory", "file", "line", "text")

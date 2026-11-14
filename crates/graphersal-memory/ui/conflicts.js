@@ -142,7 +142,8 @@ export default {
       </details>
       <h3 class="mem-rules-heading">Memory vs instruction files</h3>
       <p class="muted">Memories your agent found to contradict a rule of the instruction files its harness loads (CLAUDE.md, AGENTS.md, rules files). graphersal-memory only reads these files.</p>
-      <p v-if="!rulePairs.length" class="mem-ok">No memory contradicts your instruction files.</p>
+      <p v-if="data.rules_off" class="muted">{{ model.RULES_OFF_TEXT }}</p>
+      <p v-else-if="!rulePairs.length" class="mem-ok">No memory contradicts your instruction files.</p>
       <details v-if="data.rules_unchecked_total" class="mem-rules-waiting">
         <summary class="muted">{{ model.waitingText(data.rules_unchecked_total) }}</summary>
         <p class="muted">A memory near a rule of an instruction file, not yet checked by your agent (conflicts() in a session). Most are merely on a similar topic; only a contradiction it confirms shows up above.</p>

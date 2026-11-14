@@ -444,7 +444,9 @@ export function mergeConflicts(answers) {
   const rulesTotal = answers.length === 1 && answers[0].rows && typeof answers[0].rows.rules_unchecked_total === 'number'
     ? answers[0].rows.rules_unchecked_total
     : rules.filter((r) => r.status === 'unchecked').length;
-  return { open, unchecked, unchecked_total: total, rules, rules_unchecked_total: rulesTotal };
+  // The check against instruction files needs an embedding model: off when an answer says so.
+  const rulesOff = answers.some(({ rows }) => Boolean(rows && rows.rules_off));
+  return { open, unchecked, unchecked_total: total, rules, rules_unchecked_total: rulesTotal, rules_off: rulesOff };
 }
 
 /**
@@ -472,6 +474,9 @@ export function mergeRulePairs(answers) {
   }
   return pairs;
 }
+
+/** The line shown when the check of memories against instruction files is off (no embedding model). */
+export const RULES_OFF_TEXT = 'Off: this check needs an embedding model. Install one with `graphersal-memory install --model <repo>` (the wizard offers them); it starts by itself afterwards.';
 
 /** "N pairs waiting for the agent's check": unchecked memory / instruction line pairs are never called conflicts. */
 export function waitingText(n) {
