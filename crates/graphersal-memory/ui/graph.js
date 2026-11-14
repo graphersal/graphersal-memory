@@ -31,6 +31,16 @@ export default {
     let seq = 0;
     let fullSeq = 0;
 
+    // A memory's weight as its size: how many other memories it is linked to (computed once per
+    // graph value).
+    const sizes = new WeakMap();
+    function sizeOf(element, kind) {
+      if (kind !== 'node' || element.label !== 'memory') return null;
+      if (!sizes.has(graph.value)) sizes.set(graph.value, gm.memorySizes(graph.value));
+      const size = sizes.get(graph.value).get(element.id);
+      return size ? { size } : null;
+    }
+
     async function showFull(selection) {
       const mine = ++fullSeq;
       if (!selection || selection.kind !== 'node' || selection.label !== 'memory') {
@@ -135,11 +145,12 @@ export default {
       error.value ? h('p', { class: 'mem-error', role: 'alert' }, error.value) : null,
       h('p', { class: 'muted mem-graph-help' }, [
         busy.value ? 'Loading… ' : `${gm.graphSummary(graph.value)}. `,
-        'Click a memory to read it in full beside the graph; double click (or Expand) adds its sessions and facts. The graph only reads: the card\'s buttons write, as in the other tabs.',
+        'The more memories one is linked to, the bigger it is drawn. Click a memory to read it in full beside the graph; double click (or Expand) adds its sessions and facts. The graph only reads: the card\'s buttons write, as in the other tabs.',
       ]),
       props.api.graph(graph.value, {
         onExpand: expand,
         onSelect: showFull,
+        styleOf: sizeOf,
         card: { actions: gm.cardActions, onAction, expand: gm.expandText },
         height: '64vh',
         emptyText: busy.value ? 'Loading…' : (state.selection === model.GLOBAL ? 'No global memory yet.' : 'No memory yet.'),

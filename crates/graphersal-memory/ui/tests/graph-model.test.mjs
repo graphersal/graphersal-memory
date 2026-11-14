@@ -231,3 +231,20 @@ test('a selected memory carries its full row: body and fields the graph row lack
   assert.equal(graph.nodes[0].data.body, undefined, 'the old graph is not changed');
   assert.equal(gm.withFullMemory(graph, 'memory:gone', full), graph, 'no such node: the same graph');
 });
+
+test('memory size follows its links to other memories; expanded sessions and facts do not count', () => {
+  const node = (id, label = 'memory') => ({ id, label, data: {} });
+  const edge = (id, source, target, label = 'relates_to') => ({ id, source, target, label, data: {} });
+  const graph = {
+    nodes: [node('a'), node('b'), node('c'), node('d'), node('s', 'session')],
+    edges: [edge('1', 'a', 'b'), edge('2', 'a', 'c', 'supersedes'), edge('3', 'a', 'd'), edge('4', 'b', 'c'), edge('5', 's', 'd', 'wrote')],
+  };
+  const sizes = gm.memorySizes(graph);
+  assert.deepEqual([...sizes.keys()], ['a', 'b', 'c', 'd'], 'memories only');
+  assert.equal(sizes.get('a'), gm.MEMORY_SIZE.max, 'the most linked memory is the biggest');
+  assert.ok(sizes.get('b') > sizes.get('d') && sizes.get('d') > gm.MEMORY_SIZE.min, 'two links > one link > none');
+  assert.equal(sizes.get('b'), sizes.get('c'));
+  const lonely = gm.memorySizes({ nodes: [node('a'), node('b')], edges: [] });
+  assert.equal(lonely.size, 0, 'no links at all: every memory keeps the profile size');
+  assert.equal(gm.memorySizes({ nodes: [node('a'), node('b'), node('c')], edges: [edge('1', 'a', 'b')] }).get('c'), gm.MEMORY_SIZE.min);
+});

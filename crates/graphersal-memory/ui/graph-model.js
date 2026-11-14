@@ -297,6 +297,34 @@ export function withFullMemory(graph, id, full) {
   };
 }
 
+/** The size range of memory nodes by their links (px; the profile's default memory size is 26). */
+export const MEMORY_SIZE = Object.freeze({ min: 18, max: 56 });
+
+/**
+ * The size of each memory node by its weight: how many edges link it to other memories drawn
+ * (supersedes, conflicts_with, narrows, relates_to; sessions and facts added by expanding do not
+ * count, so a node keeps its size while others are expanded). A square-root scale from
+ * `MEMORY_SIZE.min` (no link) to `MEMORY_SIZE.max` (the most linked memory), so one hub does not
+ * flatten the rest. Empty when no memory has a link (every node keeps the profile's size).
+ * @returns {Map<string, number>} node id -> size
+ */
+export function memorySizes(graph) {
+  const memories = new Set(graph.nodes.filter((n) => n.label === 'memory').map((n) => n.id));
+  const degree = new Map([...memories].map((id) => [id, 0]));
+  for (const e of graph.edges) {
+    if (e.source === e.target || !memories.has(e.source) || !memories.has(e.target)) continue;
+    degree.set(e.source, degree.get(e.source) + 1);
+    degree.set(e.target, degree.get(e.target) + 1);
+  }
+  const most = Math.max(0, ...degree.values());
+  const out = new Map();
+  if (!most) return out;
+  for (const [id, d] of degree) {
+    out.set(id, Math.round(MEMORY_SIZE.min + (MEMORY_SIZE.max - MEMORY_SIZE.min) * Math.sqrt(d / most)));
+  }
+  return out;
+}
+
 /** The Expand button of a selected node's card: memories only (their sessions and facts). */
 export function expandText(selection) {
   return selection && selection.kind === 'node' && selection.label === 'memory' ? 'Expand: sessions and facts' : false;
