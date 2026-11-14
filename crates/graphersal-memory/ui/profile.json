@@ -4,6 +4,7 @@
   "startTab": "overview",
   "can": { "theme": true },
   "files": "/memory-ui/",
+  "header": { "module": "topbar.js" },
   "tabs": [
     { "id": "overview", "title": "Overview", "module": "overview.js" },
     { "id": "memory", "title": "Memory", "module": "memory.js" },

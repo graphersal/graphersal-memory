@@ -1,5 +1,5 @@
 // What the memory profile's tabs share (one module instance for every tab): the project
-// selection and the project list, the header (project switcher, conflicts, daemon), the calls
+// selection and the project list (the top bar's switcher, topbar.js), a tab's header, the calls
 // of the memory functions for a selection ("All projects" = once per project plus the global
 // memories once), and the memory form with the check of the nearest memories after a save.
 // Plain words everywhere; no query language.
@@ -102,28 +102,19 @@ export function errorText(err) {
   return err.help ? `${err.message} ${err.help}` : (err.message || String(err));
 }
 
-/** The header of every tab: the project switcher, the open conflicts and the daemon. */
+/**
+ * The header of a tab: its note (what the tab shows). The project switcher, the daemon and the
+ * setup problems hold for every tab and sit in the page's top bar (topbar.js).
+ */
 export const Header = {
-  props: { api: { type: Object, required: true }, note: { type: String, default: '' }, allowAll: { type: Boolean, default: true } },
+  props: { api: { type: Object, required: true }, note: { type: String, default: '' } },
   setup() {
     init();
-    const problems = computed(() => model.healthProblems(state.status));
-    return { state, model, problems, choose: select };
+    return {};
   },
   template: `
-  <div class="mem-header">
-    <label class="mem-switch">
-      <span class="muted">Project</span>
-      <select :value="state.selection" @change="choose($event.target.value)" aria-label="Project">
-        <option v-if="allowAll" :value="model.ALL">All projects</option>
-        <option :value="model.GLOBAL">Global (every project)</option>
-        <option v-for="p in state.projects" :key="p.id" :value="p.id" :title="p.paths && p.paths[0]">{{ p.name }}</option>
-      </select>
-    </label>
-    <span class="mem-daemon" :class="{bad: !state.status || !state.status.daemon}">{{ model.daemonText(state.status) }}</span>
-    <span v-if="problems.length" class="mem-problems" :title="problems.join('\\n')">{{ problems.length }} setup {{ problems.length === 1 ? 'problem' : 'problems' }} (Overview)</span>
-    <span v-if="note" class="muted mem-note">{{ note }}</span>
-    <span v-if="state.statusError" class="mem-error">{{ state.statusError }}</span>
+  <div v-if="note" class="mem-header">
+    <span class="muted mem-note">{{ note }}</span>
   </div>`,
 };
 
