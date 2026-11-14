@@ -55,16 +55,31 @@ fn slugs(runtime: &StoreRuntime) -> Value {
 
 #[test]
 fn a_store_checkpoints_by_itself_at_the_threshold() {
+    // A new store starts with the catalog in its WAL (the schema and every memory function),
+    // which grows with each catalog change. So the threshold is not a constant: the store is
+    // opened once with automatic checkpoints off to measure that WAL, then again with a
+    // threshold of that WAL plus a margin; the open stays under it, the test's own writes
+    // (about 1 KiB each, 120 of them) go clearly over it.
     let data = TempDir::new("ckpt");
+    let off = Settings {
+        checkpoint_after: 0,
+        keep_history: None,
+    };
+    let runtime = open(&data, &off);
+    let catalog_wal = runtime.maintenance_status()["wal_since_snapshot"]
+        .as_u64()
+        .unwrap();
+    runtime.close().unwrap();
+    let threshold = catalog_wal + (16 << 10);
     let settings = Settings {
-        checkpoint_after: 64 << 10,
+        checkpoint_after: threshold,
         keep_history: None,
     };
     let runtime = open(&data, &settings);
     assert_eq!(
         snapshot_commits(&runtime),
         vec![0],
-        "a new store has its first snapshot"
+        "no automatic checkpoint right after the open (catalog WAL {catalog_wal} bytes)"
     );
     write(&runtime, 0, 120);
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -76,12 +91,16 @@ fn a_store_checkpoints_by_itself_at_the_threshold() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let status = runtime.maintenance_status();
-    assert_eq!(status["checkpoint_after"], 64 << 10, "{status}");
+    assert_eq!(status["checkpoint_after"], threshold, "{status}");
     assert!(status["snapshots"].as_u64().unwrap() >= 2, "{status}");
     assert!(status["size"].as_u64().unwrap() > 0, "{status}");
     let lines = maintenance::status_lines("default", &status).join("\n");
     assert!(lines.contains("WAL since the last snapshot"), "{lines}");
-    assert!(lines.contains("checkpoint after 64.0 KiB"), "{lines}");
+    let formatted = format!(
+        "checkpoint after {}",
+        crate::download::human_bytes(threshold)
+    );
+    assert!(lines.contains(&formatted), "{formatted}: {lines}");
     assert!(lines.contains("history kept: forever"), "{lines}");
     runtime.close().unwrap();
 

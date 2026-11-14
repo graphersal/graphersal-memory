@@ -48,6 +48,9 @@ impl Env {
             .env("GRAPHERSAL_MEMORY_DIR", root.join("d"))
             .env("GRAPHERSAL_MEMORY_RUN_DIR", root.join("r"))
             .env("GRAPHERSAL_MEMORY_IDLE", idle)
+            // The check of memories against instruction files needs an embedding model; this
+            // seam turns it on with the built-in embedder the tests run on.
+            .env("GRAPHERSAL_MEMORY_TEST_INSTRUCTION_CHECK", "1")
             .env("HOME", &root)
             .env("USERPROFILE", &root)
             .env("LOCALAPPDATA", &root)
@@ -653,7 +656,7 @@ fn memories_against_instruction_files_show_and_settle_through_the_relay() {
     let claude = work.join("CLAUDE.md");
     std::fs::write(
         &claude,
-        "# Rules\n\n- Always use npm for installing packages, never another package manager.\n\
+        "# Rules\n\n- Always use npm to install dependencies, never pnpm.\n\
          - Write commit messages in the imperative mood.\n",
     )
     .unwrap();
@@ -787,7 +790,7 @@ fn the_sync_answers_before_the_scan_and_the_candidates_follow_in_the_background(
             "- Filler rule number {i} about the module layout of part {i}.\n"
         ));
     }
-    text.push_str("- Always use npm for installing packages, never another package manager.\n");
+    text.push_str("- Always use npm to install dependencies, never pnpm.\n");
     std::fs::write(&claude, text).unwrap();
     let started = Instant::now();
     let synced = sync();

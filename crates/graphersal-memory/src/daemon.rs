@@ -301,6 +301,8 @@ struct Daemon {
     shutting_down: AtomicBool,
     indexer: Mutex<Indexer>,
     scanner: Mutex<Scanner>,
+    /// The daemon itself, for the threads a `&self` method starts (the instruction scan).
+    me: std::sync::Weak<Daemon>,
 }
 
 /// Runs the daemon in this process until it exits (idle, stop, upgrade): the process ends
@@ -359,7 +361,8 @@ pub fn run(options: DaemonOptions) -> Result<(), String> {
     }
     let registry = Registry::load_or_create(&options.data_dir)?;
     let listener = ipc::bind(&socket)?;
-    let daemon = Arc::new(Daemon {
+    let daemon = Arc::new_cyclic(|me| Daemon {
+        me: me.clone(),
         data_dir: mcp::canonical(&options.data_dir).display().to_string(),
         options,
         socket,
@@ -725,11 +728,20 @@ impl Daemon {
         };
         let data_dir = self.options.data_dir.clone();
         let running = self.embedding.clone();
+        let me = self.me.clone();
         running.fetch_add(1, Ordering::SeqCst);
         let spawned = std::thread::Builder::new()
             .name("embedder".into())
             .spawn(move || {
-                match store.switch_embedder(&data_dir, &wanted) {
+                let switched = store.switch_embedder(&data_dir, &wanted);
+                // With a model (now, or already) the lines synced while the check was off wait
+                // for their scan: no manual step.
+                if switched.is_ok()
+                    && let Some(daemon) = me.upgrade()
+                {
+                    daemon.queue_backlog(&store);
+                }
+                match switched {
                     Ok(true) => log(&format!(
                         "the store {} uses the embedding model {wanted} now (re-embedded)",
                         store.name()
@@ -869,12 +881,14 @@ impl Daemon {
 
     /// Queues the candidate scan of `project`'s new rules (a project already queued is not
     /// queued twice) and starts the scanner thread when none runs.
-    fn queue_scan(self: &Arc<Self>, project: &str) {
+    fn queue_scan(&self, project: &str) {
+        let Some(daemon) = self.me.upgrade() else {
+            return;
+        };
         let mut scanner = self.lock_scanner();
         scanner.pending.insert(project.to_string());
         if !scanner.running {
             scanner.running = true;
-            let daemon = self.clone();
             let spawned = std::thread::Builder::new()
                 .name("instructions".into())
                 .spawn(move || daemon.scan_loop());
@@ -882,6 +896,21 @@ impl Daemon {
                 scanner.running = false;
                 log(&format!("cannot start the instruction file scan: {err}"));
             }
+        }
+    }
+
+    /// Queues the scan of every project of `store` whose instruction lines wait for it (the
+    /// catalog function `instruction_backlog`; `""` for user-level lines).
+    fn queue_backlog(&self, store: &StoreRuntime) {
+        match store.call("instruction_backlog", json!({})) {
+            Ok(projects) => {
+                for project in projects.as_array().into_iter().flatten() {
+                    if let Some(project) = project.as_str() {
+                        self.queue_scan(project);
+                    }
+                }
+            }
+            Err(err) => log(&format!("cannot list the instruction lines to scan: {err}")),
         }
     }
 
@@ -941,7 +970,8 @@ impl Daemon {
                 )
                 .inspect_err(|_| self.check_alive(&store))?;
             let remaining = scan["remaining"].as_u64().unwrap_or(0);
-            if remaining == 0 || scan["capped"] == true {
+            // `off`: no embedding model, no check (`crate::catalog::instruction_check`).
+            if remaining == 0 || scan["capped"] == true || scan["off"] == true {
                 return Ok(false);
             }
             if Instant::now() >= deadline || self.shutting_down.load(Ordering::SeqCst) {
@@ -1004,6 +1034,17 @@ impl Daemon {
                     "marked {n} memories imported before the import recorded their files"
                 )),
                 Err(err) => log(&format!("the import source migration failed: {err}")),
+            }
+        }
+        {
+            let call = |function: &str, args: serde_json::Value| store.call(function, args);
+            match crate::instructions::rescan_once(&self.options.data_dir, name, &call) {
+                Ok(0) => {}
+                Ok(n) => log(&format!(
+                    "dropped {n} unchecked memory/instruction-line pairs of the store {name}; \
+                     its instruction lines are scanned again under the new rules"
+                )),
+                Err(err) => log(&format!("the instruction line rescan failed: {err}")),
             }
         }
         stores.insert(name.to_string(), store.clone());

@@ -43,7 +43,7 @@ pub const UI_FUNCTIONS: [&str; 6] = [
 ];
 
 /// The internal functions, in the order of `catalog/internal.json`.
-pub const INTERNAL_FUNCTIONS: [&str; 12] = [
+pub const INTERNAL_FUNCTIONS: [&str; 14] = [
     "indexed_sessions",
     "index_session",
     "index_turns",
@@ -56,6 +56,8 @@ pub const INTERNAL_FUNCTIONS: [&str; 12] = [
     "link_memories",
     "sync_instructions",
     "scan_instructions",
+    "rescan_instructions",
+    "instruction_backlog",
 ];
 
 /// The folder of the product's saved queries.
@@ -130,6 +132,8 @@ fn body(name: &str) -> Option<&'static str> {
         "link_memories" => include_str!("catalog/link_memories.rhai"),
         "sync_instructions" => include_str!("catalog/sync_instructions.rhai"),
         "scan_instructions" => include_str!("catalog/scan_instructions.rhai"),
+        "rescan_instructions" => include_str!("catalog/rescan_instructions.rhai"),
+        "instruction_backlog" => include_str!("catalog/instruction_backlog.rhai"),
         _ => return None,
     })
 }
@@ -300,12 +304,40 @@ pub fn current_embedder(session: &Session) -> Result<String, String> {
 }
 
 /// The memory schema with every vector rule's embedder set to `embedder` (a model repository
-/// or identity the store holds, or `hash-ngram/1`).
+/// or identity the store holds, or `hash-ngram/1`), and `meta.instruction_check` saying
+/// whether the check of memories against instruction files runs ([`instruction_check`]).
 pub fn schema_with(embedder: &str) -> String {
-    SCHEMA.replace(
+    schema_with_check(embedder, instruction_check(embedder))
+}
+
+/// [`schema_with`] with the check of memories against instruction files on or off as `check`
+/// says (`meta.instruction_check`, which `scan_instructions`, `remember`, `conflicts`,
+/// `open_conflicts`, `overview` and `sync_instructions` read from the stored schema).
+pub fn schema_with_check(embedder: &str, check: bool) -> String {
+    let text = SCHEMA.replace(
         "\"embedder\": \"hash-ngram/1\"",
         &format!("\"embedder\": {}", json!(embedder)),
-    )
+    );
+    let Ok(mut schema) = serde_json::from_str::<Value>(&text) else {
+        return text;
+    };
+    schema["meta"]["instruction_check"] = json!(check);
+    schema.to_string()
+}
+
+/// The test seam of the binary (the end-to-end tests run on the built-in embedder):
+/// `GRAPHERSAL_MEMORY_TEST_INSTRUCTION_CHECK=1` turns the check on without a model.
+const TEST_INSTRUCTION_CHECK: &str = "GRAPHERSAL_MEMORY_TEST_INSTRUCTION_CHECK";
+
+/// Whether the check of memories against instruction files runs with `embedder`: only with an
+/// embedding model. The built-in `hash-ngram/1` scores a real contradiction (a memory "use
+/// pnpm" against a line "always use npm") around 0.15, far under the candidate bar of 0.6, and
+/// its candidates were only lines on the same topic, so without a model there is no check
+/// (user decision 2026-11-14); a model installed later turns it on (its schema says so, and the
+/// daemon scans the lines waiting, `crate::daemon`).
+pub fn instruction_check(embedder: &str) -> bool {
+    embedder != crate::models::BUILTIN
+        || std::env::var(TEST_INSTRUCTION_CHECK).is_ok_and(|value| value == "1")
 }
 
 /// The memory schema without its vector rules (`emb` undeclared): the first step of an embedder
@@ -622,6 +654,11 @@ mod tests {
     fn conflict_store(memories: &[(&str, &str, &str)]) -> Session {
         let mut session = Session::new();
         apply(&mut session).unwrap();
+        // The check against instruction files needs a model; the tests run on the built-in
+        // embedder with the check turned on (`instruction_check`'s seam).
+        session
+            .set_schema(&schema_with_check(crate::models::BUILTIN, true), None)
+            .unwrap();
         for (slug, scope, summary) in memories {
             remember_in(
                 &mut session,
@@ -1621,7 +1658,9 @@ mod tests {
         synced
     }
 
-    const NPM: &str = "Always use npm for installing packages, never another package manager.";
+    // Close enough in wording for the candidate bar (semantic similarity 0.6) of the built-in
+    // hash-ngram embedder the tests run with.
+    const NPM: &str = "Always use npm to install dependencies, never pnpm.";
 
     #[test]
     fn the_schema_declares_instruction_lines_and_their_comparisons() {
@@ -1790,6 +1829,162 @@ mod tests {
     }
 
     #[test]
+    fn without_an_embedding_model_there_is_no_check_against_instruction_files() {
+        // The built-in embedder and no seam: the check is off.
+        if std::env::var(TEST_INSTRUCTION_CHECK).is_err() {
+            assert!(!instruction_check(crate::models::BUILTIN));
+        }
+        assert!(instruction_check(
+            "model2vec/minishlab/potion-retrieval-32M@c7f8727ce247"
+        ));
+        let schema: Value = serde_json::from_str(&schema_with("acme/model")).unwrap();
+        assert_eq!(schema["meta"]["instruction_check"], true);
+        assert_eq!(schema["meta"]["origin"], "product");
+        let mut session = Session::new();
+        apply(&mut session).unwrap();
+        remember_in(
+            &mut session,
+            json!({"slug": "use-pnpm", "summary": "Install dependencies with pnpm, not npm"}),
+        );
+        let synced = call_in(
+            &mut session,
+            "sync_instructions",
+            json!({"rules": [rule("00000000000000f1", NPM, "/p/CLAUDE.md", 3, false)]}),
+        );
+        assert_eq!(synced["created"], 1, "{synced}");
+        assert_eq!(
+            synced["pending"], 0,
+            "nothing pending, so no resync: {synced}"
+        );
+        assert_eq!(synced["off"], true);
+        let scan = call_in(&mut session, "scan_instructions", json!({"limit": 10}));
+        assert_eq!(scan["off"], true, "{scan}");
+        assert_eq!(scan["scanned"], 0);
+        assert_eq!(scan["remaining"], 1, "the line waits for a model");
+        // A memory near the line names none.
+        let answer = remember_in(
+            &mut session,
+            json!({"slug": "npm-never", "summary": "Install dependencies with pnpm, never npm"}),
+        );
+        assert!(answer.get("instruction_lines").is_none(), "{answer}");
+        let listed = call_in(&mut session, "conflicts", json!({"k": 5}));
+        assert!(listed.get("rules_unchecked").is_none(), "{listed}");
+        assert!(
+            listed["rules_off"]
+                .as_str()
+                .unwrap()
+                .contains("embedding model"),
+            "{listed}"
+        );
+        let internal = call_in(&mut session, "open_conflicts", json!({}));
+        assert_eq!(internal["rules_off"], true, "{internal}");
+        assert_eq!(internal["rules_unchecked"], 0);
+        let overview = call_in(&mut session, "overview", json!({}));
+        assert_eq!(overview["rules_off"], true, "{overview}");
+        // A model later (here the seam): the waiting line is listed for the daemon's scan,
+        // which then finds the candidate.
+        session
+            .set_schema(&schema_with_check(crate::models::BUILTIN, true), None)
+            .unwrap();
+        let backlog = call(&mut session, "instruction_backlog", &json!({})).unwrap();
+        assert_eq!(backlog, json!(["/p"]), "{backlog}");
+        let scan = call_in(&mut session, "scan_instructions", json!({"limit": 10}));
+        assert_eq!(scan["scanned"], 1, "{scan}");
+        assert!(scan["found"].as_u64().unwrap() >= 1, "{scan}");
+        let internal = call_in(&mut session, "open_conflicts", json!({}));
+        assert_eq!(internal["rules_off"], Value::Null, "{internal}");
+        assert!(
+            internal["rules_unchecked"].as_u64().unwrap() >= 1,
+            "{internal}"
+        );
+        assert_eq!(
+            call(&mut session, "instruction_backlog", &json!({})).unwrap(),
+            json!([])
+        );
+    }
+
+    #[test]
+    fn a_rule_only_on_the_same_topic_is_no_candidate_and_the_rescan_keeps_decisions() {
+        let mut session = conflict_store(&[
+            (
+                "use-pnpm",
+                "project",
+                "Install dependencies with pnpm, not npm",
+            ),
+            ("small-commits", "project", "Keep commits small and focused"),
+        ]);
+        sync_rules(
+            &mut session,
+            vec![
+                // Close in meaning and wording: a candidate.
+                rule("00000000000000e1", NPM, "/p/CLAUDE.md", 3, false),
+                // The same topic (packages), one shared word at most: none.
+                rule(
+                    "00000000000000e2",
+                    "Always use npm for installing packages, never another package manager.",
+                    "/p/CLAUDE.md",
+                    5,
+                    false,
+                ),
+                rule(
+                    "00000000000000e3",
+                    "Write commit messages in the imperative mood.",
+                    "/p/CLAUDE.md",
+                    7,
+                    false,
+                ),
+            ],
+        );
+        let listed = call_in(&mut session, "conflicts", json!({"k": 10}));
+        let pairs: Vec<(String, String)> = listed["rules_unchecked"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                (
+                    p["rule"]["rule"].as_str().unwrap().to_string(),
+                    p["memory"]["slug"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            [("00000000000000e1".to_string(), "use-pnpm".to_string())],
+            "{listed}"
+        );
+        // A settled pair stays through the rescan, a waiting one goes and every line is
+        // scanned again.
+        call_in(
+            &mut session,
+            "settle",
+            json!({"slug": "use-pnpm", "decision": "conflict", "rule": "00000000000000e1"}),
+        );
+        remember_in(
+            &mut session,
+            json!({"slug": "npm-only", "summary": "Install dependencies with npm only, never pnpm"}),
+        );
+        let before = call_in(&mut session, "open_conflicts", json!({}));
+        assert!(before["rules_unchecked"].as_u64().unwrap() > 0, "{before}");
+        let rescanned = call(&mut session, "rescan_instructions", &json!({})).unwrap();
+        assert_eq!(
+            rescanned["dropped"], before["rules_unchecked"],
+            "{rescanned}"
+        );
+        assert_eq!(rescanned["lines"], 3);
+        let after = call_in(&mut session, "open_conflicts", json!({}));
+        assert_eq!(after["rules_unchecked"], 0, "{after}");
+        assert_eq!(
+            after["rules_open"][0]["memory"]["slug"], "use-pnpm",
+            "{after}"
+        );
+        let scan = call_in(&mut session, "scan_instructions", json!({"limit": 10}));
+        assert_eq!(scan["scanned"], 3, "{scan}");
+        let again = call_in(&mut session, "open_conflicts", json!({}));
+        assert!(again["rules_unchecked"].as_u64().unwrap() > 0, "{again}");
+        assert_eq!(again["rules_open"].as_array().unwrap().len(), 1, "{again}");
+    }
+
+    #[test]
     fn a_moved_line_keeps_its_decision_and_a_changed_or_removed_one_drops_it() {
         let mut session = conflict_store(&[
             (
@@ -1827,7 +2022,7 @@ mod tests {
             &mut session,
             vec![rule(
                 "00000000000000b2",
-                "Always use pnpm for installing packages.",
+                "Always use pnpm to install dependencies.",
                 "/p/CLAUDE.md",
                 9,
                 false,

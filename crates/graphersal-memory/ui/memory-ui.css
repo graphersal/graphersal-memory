@@ -75,3 +75,6 @@
 .mem-rules-heading { margin-top: 24px; }
 .mem-rule-open { border-color: var(--danger, #c0392b); }
 .mem-path { overflow-wrap: anywhere; }
+.mem-rules-waiting { margin: 8px 0; }
+.mem-rules-waiting summary { cursor: pointer; }
+.mem-rules-waiting-list { font-size: 13px; padding-left: 22px; overflow-wrap: anywhere; }

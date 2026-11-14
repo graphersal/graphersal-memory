@@ -263,3 +263,9 @@ test('memories against instruction files: merged once, open conflicts first, act
   assert.notEqual(m.rulePairKey(merged.rules[2], 'p'), m.rulePairKey(merged.rules[2], 'q'), 'a project line is per project');
   assert.equal(m.rulePairKey(merged.rules[3], 'p'), m.rulePairKey(merged.rules[3], 'q'), 'two global sides are one pair everywhere');
 });
+
+test('pairs waiting for the agent\'s check are counted, never called conflicts', () => {
+  assert.equal(m.waitingText(1), '1 pair waiting for the agent\'s check');
+  assert.equal(m.waitingText(7), '7 pairs waiting for the agent\'s check');
+  assert.doesNotMatch(m.waitingText(3), /conflict/);
+});

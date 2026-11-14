@@ -2378,6 +2378,11 @@ fn model_lines(setup: &Setup, current: &Current, model: &str) -> Vec<String> {
              not meaning)"
                 .to_string(),
         );
+        lines.push(format!(
+            "the check of memories against your instruction files needs an embedding model: off \
+             with the built-in embedder (turn it on: `graphersal-memory install --model {}`)",
+            models::ENGLISH_MODEL
+        ));
         if current
             .config
             .model

@@ -402,7 +402,7 @@
         "properties": {
           "text": {
             "type": "string",
-            "description": "the rule: one list item, paragraph or line of an instruction file, as written (any language)"
+            "description": "the rule: one list item, paragraph or line of an instruction file that is a directive (an English directive word such as never, always, must; or any line under a rules heading or in a rules file), as written"
           },
           "file": {
             "type": "string",
