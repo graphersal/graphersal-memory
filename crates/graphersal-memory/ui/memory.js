@@ -114,6 +114,10 @@ export default {
     }
 
     onMounted(() => { if (props.params.slug) open({ slug: props.params.slug, context: props.params.project || '' }); list(); });
+    // Another tab's "Open in Memory" while this tab stays mounted: open that memory too.
+    watch(() => [props.params.slug, props.params.project], ([slug, project]) => {
+      if (slug) open({ slug, context: project || '' });
+    });
     watch(() => [state.selection, state.version], () => (searched.value ? search() : list()));
     watch(() => [filters.kind, filters.scope, filters.source, filters.superseded], () => list());
     const more = computed(() => !searched.value && state.selection !== model.ALL && rows.value.length < total.value);

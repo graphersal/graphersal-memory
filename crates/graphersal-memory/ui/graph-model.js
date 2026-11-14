@@ -275,6 +275,28 @@ export function actionPlan(id, selection) {
   return null;
 }
 
+/**
+ * The graph with the memory node `id` carrying its full card row (`full`: `model.memoryRow` of the
+ * `memory` answer: the body, start line, links, about, decision history...), so the Graph tab's
+ * side card shows the whole memory, as the Memory tab does. The node's own fields win (they style
+ * the drawing and come from the same answer set); a field the node lacks or has empty is taken
+ * from `full`. Returns the same graph when no such node is drawn.
+ * @returns {{nodes: Array, edges: Array}}
+ */
+export function withFullMemory(graph, id, full) {
+  if (!full || !graph.nodes.some((n) => n.id === id)) return graph;
+  const empty = (v) => v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length);
+  return {
+    ...graph,
+    nodes: graph.nodes.map((n) => {
+      if (n.id !== id) return n;
+      const data = { ...n.data };
+      for (const [key, value] of Object.entries(full)) if (empty(data[key]) && !empty(value)) data[key] = value;
+      return { ...n, data };
+    }),
+  };
+}
+
 /** The Expand button of a selected node's card: memories only (their sessions and facts). */
 export function expandText(selection) {
   return selection && selection.kind === 'node' && selection.label === 'memory' ? 'Expand: sessions and facts' : false;

@@ -214,3 +214,20 @@ test('the profile styles wrote edges and has their card', () => {
   assert.equal(profile.graph.edges.wrote.arrow, true, 'session -> memory');
   assert.equal(profile.cards.wrote.title, 'title');
 });
+
+test('a selected memory carries its full row: body and fields the graph row lacks, the node keeps its own', () => {
+  const graph = {
+    nodes: [
+      { id: 'memory:a@/w/app', label: 'memory', data: { slug: 'a', summary: 'short', pinned: true, links: [] } },
+      { id: 'memory:b@/w/app', label: 'memory', data: { slug: 'b' } },
+    ],
+    edges: [{ id: 'e1', source: 'memory:a@/w/app', target: 'memory:b@/w/app', label: 'relates_to', data: {} }],
+  };
+  const full = { slug: 'a', summary: 'other', pinned: false, body: 'The whole text.', hook: 'start line', links: ['b'] };
+  const next = gm.withFullMemory(graph, 'memory:a@/w/app', full);
+  assert.deepEqual(next.nodes[0].data, { slug: 'a', summary: 'short', pinned: true, links: ['b'], body: 'The whole text.', hook: 'start line' });
+  assert.equal(next.nodes[1], graph.nodes[1], 'other nodes are untouched');
+  assert.equal(next.edges, graph.edges);
+  assert.equal(graph.nodes[0].data.body, undefined, 'the old graph is not changed');
+  assert.equal(gm.withFullMemory(graph, 'memory:gone', full), graph, 'no such node: the same graph');
+});
