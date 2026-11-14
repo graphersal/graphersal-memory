@@ -5334,7 +5334,7 @@ fn codewhale_install_then_uninstall_leaves_existing_files_byte_identical() {
     expected.extend(crate::codewhale::tool_names());
     assert_eq!(doc["tools"]["always_load"], json!(expected));
     assert_eq!(doc["providers"]["deepseek"]["model"], "deepseek-v4");
-    let agents = read(&home.path().join(".codewhale/AGENTS.md"));
+    let agents = read(&home.path().join(".codewhale").join("AGENTS.md"));
     assert!(
         agents.starts_with("# My rules\n\nTabs, not spaces.\n"),
         "{agents}"
@@ -5347,7 +5347,7 @@ fn codewhale_install_then_uninstall_leaves_existing_files_byte_identical() {
     assert!(!setup.paths.user_config.exists() && !setup.paths.config_dir.exists());
     assert!(!setup.codex.codex_home.exists() && !setup.cursor.cursor_dir.exists());
     assert!(!config.contains("[hooks"), "{config}");
-    assert!(data.path().join("install/codewhale.json").exists());
+    assert!(data.path().join("install").join("codewhale.json").exists());
     let inspection = crate::codewhale::install::inspect(&setup);
     assert_eq!(inspection.use_server, crate::install::PartState::Installed);
     assert_eq!(inspection.always_load, crate::install::PartState::Installed);
@@ -5368,7 +5368,7 @@ fn codewhale_install_then_uninstall_leaves_existing_files_byte_identical() {
     let (code, out) = run_uninstall(&setup, codewhale_uninstall());
     assert_eq!(code, 0, "{out}");
     assert_eq!(snapshot(home.path()), before, "{out}");
-    assert!(!data.path().join("install/codewhale.json").exists());
+    assert!(!data.path().join("install").join("codewhale.json").exists());
     memory.close();
 }
 
@@ -5474,7 +5474,7 @@ fn codewhale_legacy_files_are_written_where_codewhale_reads_them() {
     let (code, out) = run_install(&setup, &memory, codewhale_only());
     assert_eq!(code, 0, "{out}");
     assert!(
-        !home.path().join(".codewhale/mcp.json").exists(),
+        !home.path().join(".codewhale").join("mcp.json").exists(),
         "a new file there would hide the legacy one"
     );
     let mcp = crate::jsonedit::value_of(&read(&legacy.join("mcp.json"))).unwrap();
@@ -5574,7 +5574,9 @@ fn codewhale_is_detected_by_its_program_and_exported_as_markdown() {
     assert_eq!(
         crate::agents::Agent::global_memory_file(agent.as_ref()),
         home.path()
-            .join("graphersal-memory-export/codewhale/global.md")
+            .join("graphersal-memory-export")
+            .join("codewhale")
+            .join("global.md")
     );
     assert!(crate::commands::export_note(agent.as_ref()).contains("AGENTS.md"));
 }
