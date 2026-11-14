@@ -127,7 +127,10 @@ pub struct CodeWhalePaths {
 /// `~/x` expanded against `home`; other paths as they are.
 fn expand(value: &str, home: &Path) -> PathBuf {
     match value.strip_prefix("~/").or(value.strip_prefix("~\\")) {
-        Some(rest) => home.join(rest),
+        Some(rest) => rest
+            .split(['/', '\\'])
+            .filter(|part| !part.is_empty())
+            .fold(home.to_path_buf(), |path, part| path.join(part)),
         None if value == "~" => home.to_path_buf(),
         None => PathBuf::from(value),
     }
@@ -627,11 +630,14 @@ mod tests {
         let env = env_of(&[
             ("HOME", home.display().to_string()),
             ("CODEWHALE_CONFIG_PATH", config.display().to_string()),
-            ("CODEWHALE_MCP_CONFIG", "/x/mcp.json".to_string()),
+            (
+                "CODEWHALE_MCP_CONFIG",
+                home.join("x").join("mcp.json").display().to_string(),
+            ),
             ("CODEWHALE_MEMORY", "off".to_string()),
         ]);
         let paths = CodeWhalePaths::resolve(&env).unwrap();
-        assert_eq!(paths.mcp_file, PathBuf::from("/x/mcp.json"));
+        assert_eq!(paths.mcp_file, home.join("x").join("mcp.json"));
         assert!(!paths.memory_env_on);
         assert!(CodeWhalePaths::resolve(&|_| None).is_err());
     }
