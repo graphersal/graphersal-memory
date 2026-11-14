@@ -16,25 +16,23 @@ telemetry. Version 0.1.0 is the first public release: early, and honest about it
 
 ## The problem
 
-You probably use more than one coding agent, and each of them remembers on its own, if at all:
+Most coding agents already remember something: built-in memory files, rules files, or a memory
+plugin. The trouble is how they remember:
 
-- **Every agent has its own memory.** Tell Claude Code on Monday "we use pnpm, never npm", switch
-  to opencode on Thursday, and it doesn't know. Changing agents in the middle of a project means
-  repeating yourself.
-- **History is gone.** What happened in last week's session, which bug you found, what you agreed
-  on: file memory doesn't record past sessions at all.
-- **Decisions lose their why.** The agent sees *what* the code does, but not why you chose it over
-  the alternative you rejected last month.
-- **Everything is loaded, and the one rule that matters is missed.** A `MEMORY.md`-style index
-  goes into every session: the more you remember, the more context each turn costs, and the
-  easier it is for the agent to overlook the one entry the question needs.
-- **Contradictions pile up silently.** A newer decision sits beside the older one it replaced, and
-  nothing tells you which one holds.
-- **Hosted memory wants your sessions.** A memory service in the cloud means an account, a
-  subscription or an API key, and your sessions (code, customer names, a password pasted by
-  mistake) leaving your machine.
-- **And you can't tell whether it helps.** Memory tools come with promises, not with a way to
-  check them on your own work.
+- **Each agent remembers for itself.** Claude Code's memory, Cursor's rules and a plugin for one
+  harness are separate stores in separate formats. Tell Claude Code on Monday "we use pnpm, never
+  npm", switch to opencode on Thursday, and it doesn't know.
+- **Built-in memory is loaded, not searched.** A `MEMORY.md`-style index goes into every session:
+  the more you remember, the more context each turn costs, and the easier it is for the agent to
+  overlook the one entry the question needs.
+- **Notes, not history.** File memory keeps the notes the agent chose to write. The sessions
+  themselves, what was tried, what was decided and why, are not searchable later.
+- **Contradictions pile up silently.** A newer decision can sit beside the older one it replaced,
+  with nothing telling you which one holds.
+- **Many memory tools run in someone's cloud.** That means an account, a subscription or an API
+  key, and your sessions (code, customer names, a password pasted by mistake) leaving your machine.
+- **And it is hard to tell whether any of it helps.** Memory comes with promises, rarely with a way
+  to check them on your own work.
 
 ## What graphersal-memory does
 
