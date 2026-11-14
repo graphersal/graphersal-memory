@@ -61,6 +61,7 @@ pub(crate) fn bare_setup_in(home: &Path, data: &Path) -> Setup {
         opencode: crate::opencode::OpenCodePaths::of_home(home),
         codex: crate::codex::CodexPaths::of_home(home),
         cursor: crate::cursor::CursorPaths::of_home(home, data),
+        codewhale: crate::codewhale::CodeWhalePaths::of_home(home),
         search_path: Some(std::ffi::OsString::new()),
         data_dir: data.to_path_buf(),
         run_dir: short_run_dir(),
@@ -5245,5 +5246,390 @@ fn note23_the_wizard_shows_paths_under_the_home_directory_with_a_tilde() {
         "{out}"
     );
     assert!(!out.contains(&home.path().display().to_string()), "{out}");
+    memory.close();
+}
+
+// ------------------------------------------------------------------------------------------
+// M17: CodeWhale.
+// ------------------------------------------------------------------------------------------
+
+fn codewhale_only() -> InstallOptions {
+    InstallOptions {
+        yes: true,
+        harnesses: Some(vec![Kind::CodeWhale]),
+        ..InstallOptions::default()
+    }
+}
+
+fn codewhale_uninstall() -> UninstallOptions {
+    UninstallOptions {
+        yes: true,
+        no_export: true,
+        harnesses: Some(vec![Kind::CodeWhale]),
+        ..UninstallOptions::default()
+    }
+}
+
+/// The user's own CodeWhale configuration: comments, a provider table, their own
+/// `always_load` list in a `[tools]` section; an MCP server of another program; their own
+/// AGENTS.md.
+const CODEWHALE_CONFIG: &str = "# my CodeWhale settings\nprovider = \"deepseek\"\n\n[providers.deepseek]\nmodel = \"deepseek-v4\"\n\n[tools]\n# loaded up front\nalways_load = [\n  \"web_search\",\n]\n";
+
+const CODEWHALE_MCP: &str = "{\n  \"timeouts\": {\"connect_timeout\": 30},\n  \"servers\": {\n    \"git\": {\"command\": \"mcp-git\", \"args\": [], \"env\": {}}\n  }\n}\n";
+
+fn existing_codewhale_home(home: &Path) {
+    let dir = home.join(".codewhale");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.toml"), CODEWHALE_CONFIG).unwrap();
+    std::fs::write(dir.join("mcp.json"), CODEWHALE_MCP).unwrap();
+    std::fs::write(dir.join("AGENTS.md"), "# My rules\n\nTabs, not spaces.\n").unwrap();
+}
+
+#[test]
+fn codewhale_install_then_uninstall_leaves_existing_files_byte_identical() {
+    let home = TempDir::new("cw-rt-home");
+    let data = TempDir::new("cw-rt-data");
+    existing_codewhale_home(home.path());
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, codewhale_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with("graphersal-memory install (CodeWhale)"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("Claude Code"),
+        "no Claude Code wording: {out}"
+    );
+    let mcp = crate::jsonedit::value_of(&read(&setup.codewhale.mcp_file)).unwrap();
+    assert_eq!(mcp["servers"]["git"]["command"], "mcp-git");
+    assert_eq!(mcp["timeouts"]["connect_timeout"], 30);
+    assert_eq!(
+        mcp["servers"]["graphersal-memory"],
+        crate::codewhale::install::mcp_entry(&setup, "use", true)
+    );
+    assert_eq!(
+        mcp["servers"]["graphersal-memory"]["command"],
+        "/opt/gm/bin/graphersal-memory"
+    );
+    assert!(mcp["servers"]["graphersal-memory"]["disabled"].is_null());
+    assert_eq!(
+        mcp["servers"]["graphersal-memory-develop"]["disabled"],
+        true
+    );
+    assert!(mcp.get("mcpServers").is_none(), "one servers key only");
+    let config = read(&setup.codewhale.config_file);
+    assert!(
+        config.starts_with("# my CodeWhale settings\nprovider = \"deepseek\""),
+        "{config}"
+    );
+    assert!(
+        config.contains("# loaded up front\nalways_load = [\"web_search\", "),
+        "{config}"
+    );
+    let doc = crate::tomledit::parse(&config).unwrap();
+    let mut expected = vec!["web_search".to_string()];
+    expected.extend(crate::codewhale::tool_names());
+    assert_eq!(doc["tools"]["always_load"], json!(expected));
+    assert_eq!(doc["providers"]["deepseek"]["model"], "deepseek-v4");
+    let agents = read(&home.path().join(".codewhale").join("AGENTS.md"));
+    assert!(
+        agents.starts_with("# My rules\n\nTabs, not spaces.\n"),
+        "{agents}"
+    );
+    assert!(
+        agents.contains("mcp_graphersal-memory_memories"),
+        "{agents}"
+    );
+    // Nothing of the other harnesses, no hooks.
+    assert!(!setup.paths.user_config.exists() && !setup.paths.config_dir.exists());
+    assert!(!setup.codex.codex_home.exists() && !setup.cursor.cursor_dir.exists());
+    assert!(!config.contains("[hooks"), "{config}");
+    assert!(data.path().join("install").join("codewhale.json").exists());
+    let inspection = crate::codewhale::install::inspect(&setup);
+    assert_eq!(inspection.use_server, crate::install::PartState::Installed);
+    assert_eq!(inspection.always_load, crate::install::PartState::Installed);
+    assert_eq!(inspection.block, crate::install::PartState::Installed);
+    assert!(
+        crate::codewhale::install::status_lines(&setup)
+            .iter()
+            .any(|l| l.contains("no hooks")),
+    );
+
+    // Idempotent.
+    let again = snapshot(home.path());
+    let (code, out) = run_install(&setup, &memory, codewhale_only());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), again, "{out}");
+    assert!(out.contains("already up to date"), "{out}");
+
+    let (code, out) = run_uninstall(&setup, codewhale_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    assert!(!data.path().join("install").join("codewhale.json").exists());
+    memory.close();
+}
+
+#[test]
+fn codewhale_files_install_created_go_and_codewhales_own_edits_stay() {
+    let home = TempDir::new("cw-new-home");
+    let data = TempDir::new("cw-new-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, codewhale_only());
+    assert_eq!(code, 0, "{out}");
+    let config = read(&setup.codewhale.config_file);
+    assert!(config.contains(crate::tomledit::BEGIN), "{config}");
+    assert_eq!(
+        crate::tomledit::parse(&config).unwrap()["tools"]["always_load"],
+        json!(crate::codewhale::tool_names())
+    );
+    // CodeWhale writes a setting of its own (as its /config editor does) and the user adds an
+    // MCP server.
+    let mut text = config.clone();
+    text.push_str("\ndefault_text_model = \"gpt-oss-20b\"\n");
+    std::fs::write(&setup.codewhale.config_file, &text).unwrap();
+    let mcp = read(&setup.codewhale.mcp_file);
+    let (with_git, _) =
+        crate::jsonedit::set_member(&mcp, &["servers"], "git", &json!({"command": "mcp-git"}))
+            .unwrap()
+            .unwrap();
+    std::fs::write(&setup.codewhale.mcp_file, with_git).unwrap();
+    let (code, out) = run_uninstall(&setup, codewhale_uninstall());
+    assert_eq!(code, 0, "{out}");
+    let left = read(&setup.codewhale.config_file);
+    assert_eq!(
+        crate::tomledit::parse(&left).unwrap(),
+        json!({"default_text_model": "gpt-oss-20b"}),
+        "{left}"
+    );
+    let mcp = crate::jsonedit::value_of(&read(&setup.codewhale.mcp_file)).unwrap();
+    assert_eq!(mcp, json!({"servers": {"git": {"command": "mcp-git"}}}));
+    assert!(
+        !setup.codewhale.instruction_file.exists(),
+        "install created it"
+    );
+    memory.close();
+}
+
+#[test]
+fn codewhale_memory_is_switched_off_on_request_and_back_on_at_uninstall() {
+    let home = TempDir::new("cw-mem-home");
+    let data = TempDir::new("cw-mem-data");
+    let dir = home.path().join(".codewhale");
+    std::fs::create_dir_all(&dir).unwrap();
+    let original = "provider = \"ollama\"\n\n[memory]\n# mine\nenabled = true\n";
+    std::fs::write(dir.join("config.toml"), original).unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, codewhale_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Nothing is lost"), "{out}");
+    let text = read(&setup.codewhale.config_file);
+    assert!(text.contains("# mine\nenabled = false\n"), "{text}");
+    assert!(
+        crate::codewhale::install::status_lines(&setup)
+            .iter()
+            .any(|l| l.contains("switched off by install")),
+    );
+    let (code, out) = run_uninstall(&setup, codewhale_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("CodeWhale's memory: switched on again"),
+        "{out}"
+    );
+    assert_eq!(read(&setup.codewhale.config_file), original);
+    // Kept on when asked to.
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            keep_auto_memory: true,
+            ..codewhale_only()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("CodeWhale's memory: on (kept)"), "{out}");
+    assert!(read(&setup.codewhale.config_file).contains("# mine\nenabled = true\n"));
+    memory.close();
+}
+
+#[test]
+fn codewhale_legacy_files_are_written_where_codewhale_reads_them() {
+    let home = TempDir::new("cw-legacy-home");
+    let data = TempDir::new("cw-legacy-data");
+    let legacy = home.path().join(".deepseek");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(
+        legacy.join("mcp.json"),
+        "{\n  \"mcpServers\": {\n    \"git\": {\"command\": \"mcp-git\"}\n  }\n}\n",
+    )
+    .unwrap();
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), data.path());
+    assert_eq!(setup.codewhale.mcp_file, legacy.join("mcp.json"));
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, codewhale_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !home.path().join(".codewhale").join("mcp.json").exists(),
+        "a new file there would hide the legacy one"
+    );
+    let mcp = crate::jsonedit::value_of(&read(&legacy.join("mcp.json"))).unwrap();
+    assert!(mcp["mcpServers"]["graphersal-memory"].is_object(), "{mcp}");
+    assert!(mcp.get("servers").is_none(), "{mcp}");
+    let (code, out) = run_uninstall(&setup, codewhale_uninstall());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    memory.close();
+}
+
+#[test]
+fn codewhale_conflicts_are_kept() {
+    let home = TempDir::new("cw-conf-home");
+    let data = TempDir::new("cw-conf-data");
+    let dir = home.path().join(".codewhale");
+    std::fs::create_dir_all(&dir).unwrap();
+    let both = "{\"servers\": {}, \"mcpServers\": {}}\n";
+    std::fs::write(dir.join("mcp.json"), both).unwrap();
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, codewhale_only());
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("both `servers` and `mcpServers`"), "{out}");
+    assert_eq!(read(&dir.join("mcp.json")), both);
+    // Another program's entry under our name.
+    let theirs = "{\"servers\": {\"graphersal-memory\": {\"command\": \"other\"}}}\n";
+    std::fs::write(dir.join("mcp.json"), theirs).unwrap();
+    let (code, out) = run_install(&setup, &memory, codewhale_only());
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("exists and is not ours"), "{out}");
+    // Their entry stays as it is (the other server is still registered, as for Cursor).
+    let mcp = crate::jsonedit::value_of(&read(&dir.join("mcp.json"))).unwrap();
+    assert_eq!(
+        mcp["servers"]["graphersal-memory"],
+        json!({"command": "other"})
+    );
+    memory.close();
+}
+
+#[test]
+fn codewhale_develop_server_is_switched_by_disabled() {
+    let home = TempDir::new("cw-dev-home");
+    let data = TempDir::new("cw-dev-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(
+        &setup,
+        &memory,
+        InstallOptions {
+            enable_develop: true,
+            ..codewhale_only()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    let mcp = crate::jsonedit::value_of(&read(&setup.codewhale.mcp_file)).unwrap();
+    assert!(mcp["servers"]["graphersal-memory-develop"]["disabled"].is_null());
+    assert_eq!(
+        crate::codewhale::install::inspect(&setup).develop_server,
+        (crate::install::PartState::Installed, true)
+    );
+    let (code, out) = run_uninstall(
+        &setup,
+        UninstallOptions {
+            disable_develop_only: true,
+            ..codewhale_uninstall()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    let mcp = crate::jsonedit::value_of(&read(&setup.codewhale.mcp_file)).unwrap();
+    assert_eq!(
+        mcp["servers"]["graphersal-memory-develop"]["disabled"],
+        true
+    );
+    assert!(mcp["servers"]["graphersal-memory"].is_object());
+    memory.close();
+}
+
+#[test]
+fn codewhale_is_detected_by_its_program_and_exported_as_markdown() {
+    let home = TempDir::new("cw-det-home");
+    let data = TempDir::new("cw-det-data");
+    let setup = setup_in(home.path(), data.path());
+    assert!(!setup.detected().contains(&Kind::CodeWhale));
+    std::fs::create_dir_all(home.path().join(".codewhale")).unwrap();
+    assert!(!setup.detected().contains(&Kind::CodeWhale));
+    assert!(
+        setup
+            .leftovers()
+            .iter()
+            .any(|(kind, _)| *kind == Kind::CodeWhale)
+    );
+    let setup = with_programs(setup, &["codewhale"]);
+    assert!(setup.detected().contains(&Kind::CodeWhale));
+    let agent = setup.agent_of(Kind::CodeWhale);
+    assert!(!crate::agents::Agent::has_file_memory(agent.as_ref()));
+    assert_eq!(
+        crate::agents::Agent::global_memory_file(agent.as_ref()),
+        home.path()
+            .join("graphersal-memory-export")
+            .join("codewhale")
+            .join("global.md")
+    );
+    assert!(crate::commands::export_note(agent.as_ref()).contains("AGENTS.md"));
+}
+
+#[test]
+fn codewhale_native_memory_is_imported_once_and_read_only() {
+    let home = TempDir::new("cw-imp-home");
+    let data = TempDir::new("cw-imp-data");
+    let setup = with_programs(setup_in(home.path(), data.path()), &["codewhale"]);
+    crate::codewhale::memory::tests::write_store(
+        &setup.codewhale.memory_store,
+        &[
+            (
+                "m-1",
+                None,
+                "preference",
+                "active",
+                "Tabs",
+                "Use tabs, never spaces.",
+            ),
+            ("m-2", None, "fact", "candidate", "Pending", "Not reviewed."),
+            (
+                "m-3",
+                Some("0123"),
+                "decision",
+                "active",
+                "DB",
+                "SQLite for the cache.",
+            ),
+        ],
+    );
+    let store_before = std::fs::read(&setup.codewhale.memory_store).unwrap();
+    let memory = Memory::open(data.path());
+    let (code, out) = run_install(&setup, &memory, codewhale_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("CodeWhale's memory: imported 1 entry (1 new, 0 updated; 0 unchanged)"),
+        "{out}"
+    );
+    assert!(out.contains("1 of unknown repositories left out"), "{out}");
+    let all = InProcess(&memory).memories_all();
+    assert!(
+        all.iter().any(|row| row.slug == "codewhale-tabs-m1"),
+        "{all:?}"
+    );
+    assert_eq!(
+        std::fs::read(&setup.codewhale.memory_store).unwrap(),
+        store_before,
+        "the store is only read"
+    );
+    // Nothing new the second time.
+    let (code, out) = run_install(&setup, &memory, codewhale_only());
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("CodeWhale's memory: imported"), "{out}");
     memory.close();
 }

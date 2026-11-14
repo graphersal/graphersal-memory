@@ -739,7 +739,7 @@ fn instruction_lines_about_memory_elsewhere_are_found_and_never_edited() {
     assert_eq!(files, ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"]);
     assert_eq!(
         found.mentions[2].loaded_by,
-        [Kind::Codex, Kind::OpenCode, Kind::Cursor]
+        [Kind::Codex, Kind::OpenCode, Kind::Cursor, Kind::CodeWhale]
     );
     let doctor = doctor_texts(&setup);
     let line = doctor

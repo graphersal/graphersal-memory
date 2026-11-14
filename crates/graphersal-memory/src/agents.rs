@@ -1,8 +1,9 @@
 //! The harness abstraction: what `install`, `uninstall`, `import` and `export` need to know
 //! about one AI agent harness, behind one interface. Claude Code ([`ClaudeCode`]), opencode
-//! (`crate::opencode::OpenCode`), Codex (`crate::codex::Codex`) and Cursor
-//! (`crate::cursor::Cursor`) implement it; `crate::install` asks the [`Agent`] for the
-//! files it edits, the JSON keys of its MCP registrations and the names the wizard shows.
+//! (`crate::opencode::OpenCode`), Codex (`crate::codex::Codex`), Cursor
+//! (`crate::cursor::Cursor`) and CodeWhale (`crate::codewhale::CodeWhale`) implement it;
+//! `crate::install` asks the [`Agent`] for the files it edits, the JSON keys of its MCP
+//! registrations and the names the wizard shows.
 
 use std::path::{Path, PathBuf};
 
@@ -22,11 +23,19 @@ pub enum Kind {
     Codex,
     /// Cursor.
     Cursor,
+    /// CodeWhale.
+    CodeWhale,
 }
 
 impl Kind {
     /// Every supported harness, in the order the wizard lists them.
-    pub const ALL: [Kind; 4] = [Kind::ClaudeCode, Kind::OpenCode, Kind::Codex, Kind::Cursor];
+    pub const ALL: [Kind; 5] = [
+        Kind::ClaudeCode,
+        Kind::OpenCode,
+        Kind::Codex,
+        Kind::Cursor,
+        Kind::CodeWhale,
+    ];
 
     /// The id of the command line and the state files (`claude-code`, `opencode`).
     pub fn id(self) -> &'static str {
@@ -35,6 +44,7 @@ impl Kind {
             Kind::OpenCode => "opencode",
             Kind::Codex => "codex",
             Kind::Cursor => "cursor",
+            Kind::CodeWhale => "codewhale",
         }
     }
 
@@ -45,6 +55,7 @@ impl Kind {
             Kind::OpenCode => "opencode",
             Kind::Codex => "Codex",
             Kind::Cursor => "Cursor",
+            Kind::CodeWhale => "CodeWhale",
         }
     }
 

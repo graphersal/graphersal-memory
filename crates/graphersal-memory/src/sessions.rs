@@ -280,6 +280,7 @@ pub fn units(request: &Request) -> Result<Vec<Unit>, String> {
         Kind::OpenCode => crate::opencode::sessions::units(&request.projects_dir),
         Kind::Codex => Ok(crate::codex::sessions::units(&request.projects_dir)),
         Kind::Cursor => crate::cursor::sessions::units(&request.projects_dir),
+        Kind::CodeWhale => Ok(crate::codewhale::sessions::units(&request.projects_dir)),
     }
 }
 
@@ -509,6 +510,16 @@ fn parse_file(
             crate::cursor::sessions::read(file, cursor.as_deref().unwrap_or_default())?,
             format!(
                 "cursor:{}",
+                file.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            ),
+        ),
+        None if crate::codewhale::sessions::is_session(file) => (
+            Kind::CodeWhale,
+            crate::codewhale::sessions::read(file)?,
+            format!(
+                "codewhale:{}",
                 file.file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default()

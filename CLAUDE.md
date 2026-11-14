@@ -19,13 +19,13 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     the `stop` control request, marker left; `daemon restart`: the `restart` control request, no
     marker, then a new daemon; both wait until the old process is gone, `daemon_action`), `install`,
     `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects`, `start-context` and the
-    hidden `hook` work on Claude Code, opencode, Codex and Cursor (`Setup` from the environment, with the model download
+    hidden `hook` work on Claude Code, opencode, Codex, Cursor and CodeWhale (no hooks: `hook --harness codewhale` does nothing) (`Setup` from the environment, with the model download
     `Source`; `bench_options` for `bench`; `DaemonSource` reads the memories for the export);
     `ui` runs the browser UI (`crate::ui`); `export` without `--to-files` says it is planned and exits with code 2
     (`--harness codex` and `--harness cursor` work wherever `claude-code` and `opencode` do;
     a Claude Code hook whose input is Cursor's, `cursor_version`, does nothing); the
     wizard is interactive when stdin and stdout are terminals;
-  - `src/agents.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex | cursor; `Agent`: MCP
+  - `src/agents.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex | cursor | codewhale; `Agent`: MCP
     configuration file, its servers key and entry shape, settings and instruction files, the
     sessions location, the export directories, the auto-memory key, the headless command;
     `is_our_entry` for both entry shapes) and `ClaudeCode`; `Setup::detected` (a harness's program
@@ -74,10 +74,31 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     JSONL reader of the transcripts they name (the format is undocumented: role/type
     user|assistant, text parts, `<user_query>`, `tool_use` names; the rest skipped; sub-agent
     transcripts left out); Cursor's chat database is never read;
+  - `src/codewhale.rs` + `src/codewhale/`: CodeWhale (preview; verified against the source of
+    `v0.10.2`, the module docs cite the files; no live run yet, `docs/codewhale-live-check.md`
+    is the checklist): `CodeWhalePaths` (`$CODEWHALE_HOME` else `~/.codewhale`, the legacy
+    `~/.deepseek` file when only it exists; `config.toml`, `mcp.json` and their overrides, the
+    global instruction file = the first of `instruction_candidates` under the home directory,
+    `sessions/`, the native memory store `memory/store.sqlite3`, the export directory),
+    `CodeWhale` (the `Agent`; the servers key `servers` or `mcpServers` from the file; the entry's
+    `env` sets `shim::HARNESS_ENV`, so the start context is `Short`), `tool_names`
+    (`mcp_graphersal-memory_<function>`), the headless run (`exec_args`: `--json --prompt-file -`,
+    a one-shot run: no tools, hooks or saved session; `normalize_exec_output`; `local_model` by
+    `--provider`), `NO_BENCH`; `codewhale/install.rs` the plan/removal/inspect/status/doctor (both
+    servers in `mcp.json`, develop `"disabled": true`; `[tools] always_load`: a managed TOML block
+    or our names in the user's list, `ALWAYS_LOAD_RECORD`; `[memory] enabled` switched off on
+    request, `MEMORY_RECORD`; the rule block; no hooks; `doctor` warns when a project's
+    `AGENTS.md` files fill the 48 KiB budget); `codewhale/sessions.rs` the reader of
+    `<uuid>.json` (the journal's active branch, else `messages`; runtime events skipped;
+    `written_since` for the shim's end, `session_sync::end_since`); `codewhale/memory.rs` the
+    read-only import of the native memory's reviewed entries (`active`, not suppressed; a
+    workspace = SHA-256 of its origin URL, mapped to known projects; state
+    `<data dir>/import/codewhale-memory.json`);
   - `src/tomledit.rs`: minimal-change TOML edits (parse with the `toml` crate, write as text: a
     fingerprinted managed block inserted before the first table, `remove_table` for our tables
     whose markers were lost, `set_bool` in place, `set_table_bool`/`remove_table_key` for another
-    tool's `[mcp_servers.<name>] enabled`; every edit re-parsed and checked);
+    tool's `[mcp_servers.<name>] enabled`, `set_string_array`/`remove_array_key` for CodeWhale's
+    `[tools] always_load`; every edit re-parsed and checked);
   - `src/prompt.rs`: the wizard's console (`Console`: "Step N of M", numbered choices, the
     default on Enter, re-ask, `confirm_install` with `d` for every change; colour only on a
     terminal without `NO_COLOR`), `paint`, `action_needed` and the `SEPARATOR` the other

@@ -23,6 +23,10 @@ thought of is welcome there.
 
 ## Next
 
+- **CodeWhale** (preview on `main`, for 0.2.0): install, the rule block, past sessions, the
+  import of its own memory and summaries are built and tested against fixtures, and one live run
+  on macOS passed ([codewhale-live-check.md](codewhale-live-check.md) for the rest). `bench` through `codewhale exec`
+  is planned.
 - **Verify what is built but not yet run live**: Cursor with a live login
   ([cursor-live-check.md](cursor-live-check.md)), the harnesses on Windows, the browser UI on
   Linux and Windows, and the memory tools through Codex with a stronger local model.

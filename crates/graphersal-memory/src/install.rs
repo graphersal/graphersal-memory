@@ -192,6 +192,8 @@ pub struct Setup {
     pub codex: crate::codex::CodexPaths,
     /// Cursor's files (and the registry of its transcripts in the data directory).
     pub cursor: crate::cursor::CursorPaths,
+    /// CodeWhale's files.
+    pub codewhale: crate::codewhale::CodeWhalePaths,
     /// The program search path the harness detection looks in (`None`: this process's `PATH`;
     /// tests pass an empty one).
     pub search_path: Option<std::ffi::OsString>,
@@ -232,6 +234,11 @@ impl Setup {
         crate::cursor::Cursor::new(self.cursor.clone())
     }
 
+    /// CodeWhale with this setup's paths.
+    pub fn codewhale_agent(&self) -> crate::codewhale::CodeWhale {
+        crate::codewhale::CodeWhale::new(self.codewhale.clone())
+    }
+
     /// `text` as output shows it: the home directory as `~` ([`tilde`]).
     pub fn show(&self, text: &str) -> String {
         tilde(text, &self.opencode.home)
@@ -244,6 +251,7 @@ impl Setup {
             Kind::OpenCode => Box::new(self.opencode_agent()),
             Kind::Codex => Box::new(self.codex_agent()),
             Kind::Cursor => Box::new(self.cursor_agent()),
+            Kind::CodeWhale => Box::new(self.codewhale_agent()),
         }
     }
 
@@ -283,6 +291,7 @@ impl Setup {
                     bundles.into_iter().find(|bundle| bundle.is_dir())
                 })
                 .or_else(|| first_file(cursor_windows_locations(home, search.is_none()))),
+            Kind::CodeWhale => crate::codewhale::find_program(home, search),
         }
     }
 
@@ -297,6 +306,7 @@ impl Setup {
             Kind::OpenCode => vec![self.opencode.config_dir.clone()],
             Kind::Codex => vec![self.codex.codex_home.clone()],
             Kind::Cursor => vec![self.cursor.cursor_dir.clone()],
+            Kind::CodeWhale => vec![self.codewhale.codewhale_home.clone()],
         };
         candidates.into_iter().find(|path| path.exists())
     }
@@ -332,6 +342,7 @@ impl Setup {
             Kind::OpenCode => "opencode",
             Kind::Codex => "codex",
             Kind::Cursor => "cursor",
+            Kind::CodeWhale => "codewhale",
         }
     }
 
@@ -349,6 +360,9 @@ impl Setup {
                         }
                         Kind::Codex => !crate::codex::install::inspect(self).nothing_installed(),
                         Kind::Cursor => !crate::cursor::install::inspect(self).nothing_installed(),
+                        Kind::CodeWhale => {
+                            !crate::codewhale::install::inspect(self).nothing_installed()
+                        }
                     }
             })
             .collect()
@@ -1133,6 +1147,11 @@ struct InstallPlan {
     codex_memories: Option<bool>,
     /// Cursor's file changes.
     cursor_changes: Vec<Change>,
+    /// CodeWhale's file changes.
+    codewhale_changes: Vec<Change>,
+    /// The records of CodeWhale's `config.toml` state entry
+    /// (`crate::codewhale::install::Plan::records`).
+    codewhale_records: Vec<(&'static str, Option<Value>)>,
     conflicts: Vec<String>,
     imports: Vec<DirPlan>,
     write_config: bool,
@@ -1161,6 +1180,7 @@ pub(crate) fn way_out(err: &str, kinds: &[Kind], command: &str, verb: &str) -> S
             Kind::OpenCode => vec!["opencode"],
             Kind::Codex => vec![".codex", "codex"],
             Kind::Cursor => vec![".cursor"],
+            Kind::CodeWhale => vec![".codewhale", ".deepseek", ".agents"],
         };
         agent_dir(kind).iter().any(|dir| err.contains(dir))
     });
@@ -1552,6 +1572,10 @@ struct Current {
     detected: Vec<Kind>,
     /// Whether Codex's own memories are on (`[features] memories = true`).
     codex_memories_on: bool,
+    /// Whether CodeWhale's native memory is on.
+    codewhale_memory_on: bool,
+    /// CodeWhale's native memory to import (its reviewed entries), when it has a store.
+    codewhale_native: Option<crate::codewhale::memory::Native>,
     /// The start context the memory files give (the project with the most always-loaded
     /// memories), within the budget of the settings.
     start_preview: crate::start_context::StartContext,
@@ -1640,12 +1664,33 @@ impl Current {
             .flatten()
             .and_then(|text| crate::tomledit::parse(&text).ok())
             .is_some_and(|doc| crate::codex::install::memories_on(&doc));
+        let codewhale_state = State::load_of(setup, Kind::CodeWhale)?;
+        let codewhale_memory_on = crate::codewhale::memory_on(
+            &read_text(&setup.codewhale.config_file)
+                .ok()
+                .flatten()
+                .and_then(|text| crate::tomledit::parse(&text).ok())
+                .unwrap_or(Value::Null),
+            setup.codewhale.memory_env_on,
+        );
+        let codewhale_native = (setup.program(Kind::CodeWhale).is_some()
+            || State::exists_of(setup, Kind::CodeWhale))
+        .then(|| {
+            crate::codewhale::memory::Native::load(
+                &setup.codewhale.memory_store,
+                &setup.data_dir,
+                project,
+            )
+        })
+        .flatten();
         // On an installed system the current answer is what is true now: a user who switched
         // the harness's memory back on after install keeps it on (unless they answer otherwise).
         let auto_memory_answer = if state.meta.contains_key("auto_memory_off") {
             Some(off)
         } else if codex_state.meta.contains_key("auto_memory_off") {
             Some(!codex_memories_on)
+        } else if codewhale_state.meta.contains_key("auto_memory_off") {
+            Some(!codewhale_memory_on)
         } else {
             None
         };
@@ -1662,7 +1707,10 @@ impl Current {
         let other_pending = other_sources
             .iter()
             .map(|source| other_state.pending_count(source))
-            .sum();
+            .sum::<usize>()
+            + codewhale_native
+                .as_ref()
+                .map_or(0, |native| native.pending(&setup.data_dir));
         Ok(Self {
             other_pending,
             start_preview,
@@ -1689,14 +1737,22 @@ impl Current {
             },
             config,
             codex_memories_on,
+            codewhale_memory_on,
+            codewhale_native,
         })
     }
 
     /// Whether the auto-memory question applies: Claude Code may be chosen and its auto-memory
-    /// was not switched off by the user, or Codex may be chosen and its memories are on.
-    fn ask_auto_memory(&self, claude_possible: bool, codex_possible: bool) -> bool {
-        (claude_possible && !self.auto_memory_off_by_user)
-            || (codex_possible && self.codex_memories_on)
+    /// was not switched off by the user, or Codex (CodeWhale) is among `possible` and its own
+    /// memory is on.
+    fn ask_auto_memory(&self, claude_possible: bool, possible: &[Kind]) -> bool {
+        (claude_possible && !self.auto_memory_off_by_user) || self.own_memory_on(possible)
+    }
+
+    /// Whether Codex or CodeWhale is among `kinds` with its own memory on.
+    fn own_memory_on(&self, kinds: &[Kind]) -> bool {
+        (kinds.contains(&Kind::Codex) && self.codex_memories_on)
+            || (kinds.contains(&Kind::CodeWhale) && self.codewhale_memory_on)
     }
 
     /// Whether the wizard's "Other memory" step applies for the harnesses `kinds`: another
@@ -1853,10 +1909,14 @@ fn ask(
     let ask_harnesses = options.harnesses.is_none() && current.detected.len() > 1;
     // The Claude Code questions are asked when Claude Code may be chosen.
     let claude_possible = defaults.harnesses.contains(&Kind::ClaudeCode) || ask_harnesses;
-    let codex_possible = defaults.harnesses.contains(&Kind::Codex) || ask_harnesses;
+    let codex_possible: Vec<Kind> = if ask_harnesses {
+        current.detected.clone()
+    } else {
+        defaults.harnesses.clone()
+    };
     let ask_import = claude_possible && current.import_pending.1 > 0;
-    let ask_auto_memory = current.ask_auto_memory(claude_possible, codex_possible);
-    let total = wizard_steps(options, current, claude_possible, codex_possible);
+    let ask_auto_memory = current.ask_auto_memory(claude_possible, &codex_possible);
+    let total = wizard_steps(options, current, claude_possible, &codex_possible);
     let mut n = 0;
     let mut next = || {
         n += 1;
@@ -1892,7 +1952,7 @@ fn ask(
             options,
             current,
             claude_possible,
-            codex_possible,
+            &codex_possible,
             &harnesses,
         );
 
@@ -1998,6 +2058,8 @@ fn ask(
 
     let claude_memory = claude && !current.auto_memory_off_by_user;
     let codex_memory = harnesses.contains(&Kind::Codex) && current.codex_memories_on;
+    let codewhale_memory = harnesses.contains(&Kind::CodeWhale) && current.codewhale_memory_on;
+    let codewhale_config = setup.show(&setup.codewhale.config_file.display().to_string());
     let auto_memory_off = if ask_auto_memory && claude_memory {
         let mut lines = vec![
             format!("{name} also writes its own memory files and loads them into every session;"),
@@ -2015,6 +2077,15 @@ fn ask(
                 setup.show(&setup.codex.config_file.display().to_string())
             ));
         }
+        if codewhale_memory {
+            lines.push(format!(
+                "The same answer switches CodeWhale's own memory off ([memory] enabled in {}),",
+                codewhale_config
+            ));
+            lines.push(
+                "after importing its reviewed entries; uninstall switches it on again.".to_string(),
+            );
+        }
         let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
         console.step(next(), total, &format!("{name}'s auto-memory"), &lines);
         console.yes_no(
@@ -2027,22 +2098,40 @@ fn ask(
             Some(defaults.auto_memory_off),
         )?
     } else if ask_auto_memory && codex_memory {
-        console.step(
-            next(),
-            total,
-            "Codex's memories",
-            &[
-                "Codex's own memory feature is on: it generates memories from your chats and",
-                "loads them into sessions; with graphersal-memory both would keep the same facts",
-                "twice.",
-                crate::codex::install::NOTHING_IS_LOST,
-            ],
+        let mut lines = vec![
+            "Codex's own memory feature is on: it generates memories from your chats and",
+            "loads them into sessions; with graphersal-memory both would keep the same facts",
+            "twice.",
+            crate::codex::install::NOTHING_IS_LOST,
+        ];
+        let codewhale_line = format!(
+            "The same answer switches CodeWhale's own memory off ([memory] enabled in {codewhale_config})."
         );
+        if codewhale_memory {
+            lines.push(&codewhale_line);
+        }
+        console.step(next(), total, "Codex's memories", &lines);
         console.yes_no(
             &format!(
                 "switch it off ([features] memories = false in {})",
                 setup.show(&setup.codex.config_file.display().to_string())
             ),
+            "keep it on",
+            Some(defaults.auto_memory_off),
+        )?
+    } else if ask_auto_memory && codewhale_memory {
+        console.step(
+            next(),
+            total,
+            "CodeWhale's memory",
+            &[
+                "CodeWhale's own memory is on: it keeps notes in its own store and loads them",
+                "into sessions; with graphersal-memory both would keep the same facts twice.",
+                crate::codewhale::install::NOTHING_IS_LOST,
+            ],
+        );
+        console.yes_no(
+            &format!("switch it off ([memory] enabled = false in {codewhale_config})"),
             "keep it on",
             Some(defaults.auto_memory_off),
         )?
@@ -2248,15 +2337,22 @@ fn ask_other_memory(
     }
     let mut import = import_default;
     if current.other_pending > 0 {
-        let names: Vec<String> = current
+        let mut names: Vec<String> = current
             .other_sources
             .iter()
             .map(|s| s.server.clone())
             .collect();
+        if current
+            .codewhale_native
+            .as_ref()
+            .is_some_and(|native| native.pending(&setup.data_dir) > 0)
+        {
+            names.push("CodeWhale's memory".to_string());
+        }
         let _ = writeln!(console.out(), "  Import:");
         import = console.yes_no(
             &format!(
-                "import {} memor{} of {} now (global memories; the files are only read)",
+                "import {} memor{} of {} now (the files are only read)",
                 current.other_pending,
                 if current.other_pending == 1 {
                     "y"
@@ -2279,7 +2375,7 @@ fn wizard_steps(
     options: &InstallOptions,
     current: &Current,
     claude_possible: bool,
-    codex_possible: bool,
+    codex_possible: &[Kind],
 ) -> usize {
     let ask_harnesses = options.harnesses.is_none() && current.detected.len() > 1;
     let import = claude_possible && current.import_pending.1 > 0;
@@ -2307,7 +2403,7 @@ fn skipped_steps(
     options: &InstallOptions,
     current: &Current,
     claude_possible: bool,
-    codex_possible: bool,
+    codex_possible: &[Kind],
     chosen: &[Kind],
 ) -> usize {
     let others_counted = current.other_step(&possible_harnesses(options, current));
@@ -2315,8 +2411,7 @@ fn skipped_steps(
     let claude = chosen.contains(&Kind::ClaudeCode);
     let import_counted = claude_possible && current.import_pending.1 > 0;
     let auto_counted = current.ask_auto_memory(claude_possible, codex_possible);
-    let auto_asked = (claude && !current.auto_memory_off_by_user)
-        || (chosen.contains(&Kind::Codex) && current.codex_memories_on);
+    let auto_asked = (claude && !current.auto_memory_off_by_user) || current.own_memory_on(chosen);
     usize::from(import_counted && !claude)
         + usize::from(auto_counted && !auto_asked)
         + others_skipped
@@ -2324,7 +2419,8 @@ fn skipped_steps(
 
 /// The command the summaries run through for `harnesses`: the settings file's, except that
 /// without Claude Code the default `claude -p` becomes opencode's headless command (with a
-/// free model) when opencode is chosen, else Codex's (`codex exec`).
+/// free model) when opencode is chosen, else Codex's (`codex exec`), else CodeWhale's
+/// (`codewhale exec`).
 pub fn summaries_command(config: &Config, harnesses: &[Kind]) -> Vec<String> {
     let command = &config.summaries.harness_command;
     let claude_default = crate::config::split_command(crate::config::DEFAULT_HARNESS_COMMAND)
@@ -2335,6 +2431,8 @@ pub fn summaries_command(config: &Config, harnesses: &[Kind]) -> Vec<String> {
         Some(crate::opencode::DEFAULT_HEADLESS_COMMAND)
     } else if harnesses.contains(&Kind::Codex) {
         Some(crate::codex::DEFAULT_HEADLESS_COMMAND)
+    } else if harnesses.contains(&Kind::CodeWhale) {
+        Some(crate::codewhale::DEFAULT_HEADLESS_COMMAND)
     } else {
         None
     };
@@ -2529,6 +2627,21 @@ fn plan_install(
         cursor_changes = plan.changes;
         conflicts.extend(plan.conflicts);
     }
+    let mut codewhale_changes = Vec::new();
+    let mut codewhale_records = Vec::new();
+    if answers.harnesses.contains(&Kind::CodeWhale) {
+        let plan = crate::codewhale::install::plan(
+            setup,
+            answers.language,
+            &answers.read_only,
+            answers.develop,
+            answers.auto_memory_off,
+        )?;
+        sections.push((Kind::CodeWhale.display_name().to_string(), plan.steps));
+        codewhale_changes = plan.changes;
+        codewhale_records = plan.records;
+        conflicts.extend(plan.conflicts);
+    }
     let mut other_off = Vec::new();
     let mut other_on = Vec::new();
     let other_steps = plan_other_memory(
@@ -2540,6 +2653,7 @@ fn plan_install(
             (Kind::OpenCode, &mut opencode_changes),
             (Kind::Codex, &mut codex_changes),
             (Kind::Cursor, &mut cursor_changes),
+            (Kind::CodeWhale, &mut codewhale_changes),
         ],
         &mut other_off,
         &mut other_on,
@@ -2566,6 +2680,8 @@ fn plan_install(
         codex_changes,
         codex_memories,
         cursor_changes,
+        codewhale_changes,
+        codewhale_records,
         conflicts,
         imports,
         write_config,
@@ -2600,7 +2716,7 @@ fn plan_other_memory(
     setup: &Setup,
     answers: &Answers,
     current: &Current,
-    mut changes: [(Kind, &mut Vec<Change>); 4],
+    mut changes: [(Kind, &mut Vec<Change>); 5],
     other_off: &mut Vec<(Kind, PathBuf, String, Value)>,
     other_on: &mut Vec<(Kind, PathBuf, String)>,
 ) -> Result<Vec<Step>, String> {
@@ -2738,6 +2854,20 @@ fn plan_other_memory(
                 ": imported as global memories (the file is only read)".to_string()
             } else {
                 ": not now (--no-import)".to_string()
+            }
+        ));
+    }
+    if let Some(native) = &current.codewhale_native {
+        let pending = native.pending(&setup.data_dir);
+        import_lines.push(format!(
+            "CodeWhale's memory: {}{}",
+            native.describe(&setup.data_dir),
+            if pending == 0 || native.error.is_some() {
+                ""
+            } else if answers.import_other {
+                ": imported (its store is only read)"
+            } else {
+                ": not now (--no-import)"
             }
         ));
     }
@@ -3248,13 +3378,12 @@ pub fn install(
             .unwrap_or_else(|| current.detected.clone());
         let ask_harnesses = options.harnesses.is_none() && current.detected.len() > 1;
         let claude_possible = ask_harnesses || offered.contains(&Kind::ClaudeCode);
-        let codex_possible = ask_harnesses || offered.contains(&Kind::Codex);
-        let total = wizard_steps(options, &current, claude_possible, codex_possible)
+        let total = wizard_steps(options, &current, claude_possible, &offered)
             - skipped_steps(
                 options,
                 &current,
                 claude_possible,
-                codex_possible,
+                &offered,
                 &answers.harnesses,
             );
         console.step(total, total, "Ready to install", &[]);
@@ -3491,6 +3620,18 @@ pub fn install(
         }
         failures += done.problems.len();
     }
+    if answers.import_other
+        && let Some(native) = &current.codewhale_native
+        && native.pending(&setup.data_dir) > 0
+    {
+        let done = crate::codewhale::memory::apply(native, connect, &setup.data_dir);
+        report.push(done.line(native));
+        report.extend(done.kept_edited.iter().map(|line| format!("  {line}")));
+        for problem in &done.problems {
+            report.push(format!("import failed: {problem}"));
+        }
+        failures += done.problems.len();
+    }
     // The choices about other memory tools: what the rule block names read-only.
     let choices = crate::coexist::Choices {
         read_only: answers.read_only.clone(),
@@ -3574,6 +3715,7 @@ pub fn install(
                 && plan.opencode_changes.is_empty()
                 && plan.codex_changes.is_empty()
                 && plan.cursor_changes.is_empty()
+                && plan.codewhale_changes.is_empty()
                 && plan.conflicts.is_empty(),
             harnesses: &answers.harnesses,
             codex_approval: answers.harnesses.contains(&Kind::Codex)
@@ -3724,6 +3866,48 @@ fn apply_agents(
                     &mut |path, state| record_other(plan, Kind::Cursor, path, state),
                 )?;
             }
+            Kind::CodeWhale => {
+                kind_state
+                    .meta
+                    .insert("auto_memory_off".into(), json!(answers.auto_memory_off));
+                kind_state.save(setup)?;
+                let config = setup.codewhale.config_file.clone();
+                apply_changes(
+                    setup,
+                    &plan.codewhale_changes,
+                    &mut kind_state,
+                    &mut lines,
+                    backups,
+                    bases,
+                    journal,
+                    // The always_load and memory records go with the write of config.toml.
+                    &mut |path, state| {
+                        record_other(plan, Kind::CodeWhale, path, state);
+                        if path != config {
+                            return;
+                        }
+                        for (key, value) in &plan.codewhale_records {
+                            match value {
+                                Some(value) => {
+                                    state.file_mut(path).insert((*key).into(), value.clone());
+                                }
+                                None => {
+                                    state.file_mut(path).remove(*key);
+                                }
+                            }
+                        }
+                    },
+                )?;
+                if plan.codewhale_records.iter().any(|(key, value)| {
+                    *key == crate::codewhale::install::MEMORY_RECORD && value.is_some()
+                }) {
+                    lines.push(
+                        "CodeWhale's memory: off (uninstall exports every memory as Markdown \
+                         and switches it on again)"
+                            .to_string(),
+                    );
+                }
+            }
         }
         for (k, path, name, _) in &plan.other_off {
             if k == kind {
@@ -3793,6 +3977,7 @@ fn all_changes(plan: &InstallPlan) -> impl Iterator<Item = &Change> {
         .chain(&plan.opencode_changes)
         .chain(&plan.codex_changes)
         .chain(&plan.cursor_changes)
+        .chain(&plan.codewhale_changes)
 }
 
 /// The agents' part of an install: plans again right before writing (a harness may have
@@ -4605,6 +4790,7 @@ pub fn uninstall_with(
     let opencode_state = State::load_of(setup, Kind::OpenCode)?;
     let codex_state = State::load_of(setup, Kind::Codex)?;
     let cursor_state = State::load_of(setup, Kind::Cursor)?;
+    let codewhale_state = State::load_of(setup, Kind::CodeWhale)?;
     let mut conflicts = Vec::new();
     let mut changes: Vec<(Kind, Change, &'static str)> = Vec::new();
     if kinds.contains(&Kind::ClaudeCode) {
@@ -4650,6 +4836,18 @@ pub fn uninstall_with(
             changes.push((Kind::Cursor, change, what));
         }
     }
+    if kinds.contains(&Kind::CodeWhale) {
+        for (change, what) in crate::codewhale::install::removal(
+            setup,
+            &codewhale_state,
+            options.disable_develop_only,
+            &mut conflicts,
+        )
+        .map_err(|err| way_out(&err, &kinds, "uninstall", "uninstall from"))?
+        {
+            changes.push((Kind::CodeWhale, change, what));
+        }
+    }
     // Other memory tools' entries install switched off go back on (M15).
     let mut restored: Vec<(Kind, String)> = Vec::new();
     if !options.disable_develop_only {
@@ -4658,6 +4856,7 @@ pub fn uninstall_with(
             (Kind::OpenCode, &opencode_state),
             (Kind::Codex, &codex_state),
             (Kind::Cursor, &cursor_state),
+            (Kind::CodeWhale, &codewhale_state),
         ] {
             if !kinds.contains(&kind) {
                 continue;
@@ -4913,6 +5112,21 @@ pub fn uninstall_with(
             &mut report,
         );
     }
+    if !options.disable_develop_only
+        && kinds.contains(&Kind::CodeWhale)
+        && codewhale_state
+            .file(&setup.codewhale.config_file)
+            .is_some_and(|entry| entry.contains_key(crate::codewhale::install::MEMORY_RECORD))
+        && changes
+            .iter()
+            .any(|(_, change, _)| change.path == setup.codewhale.config_file)
+    {
+        push_for(
+            Kind::CodeWhale,
+            "CodeWhale's memory: switched on again, as before install".to_string(),
+            &mut report,
+        );
+    }
     for (kind, line) in &restored {
         push_for(*kind, line.clone(), &mut report);
     }
@@ -4921,6 +5135,7 @@ pub fn uninstall_with(
         (Kind::OpenCode, opencode_state),
         (Kind::Codex, codex_state),
         (Kind::Cursor, cursor_state),
+        (Kind::CodeWhale, codewhale_state),
     ];
     for (kind, change, _) in &changes {
         match &change.after {

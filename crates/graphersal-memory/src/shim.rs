@@ -97,10 +97,19 @@ impl DaemonLocation {
     }
 }
 
-/// The harness that started this process, as far as its environment tells.
+/// The environment variable an MCP entry of ours sets to name its harness when the harness
+/// itself sets none (CodeWhale's entry, `crate::codewhale::install::mcp_entry`).
+pub const HARNESS_ENV: &str = "GRAPHERSAL_MEMORY_HARNESS";
+
+/// The harness that started this process, as far as its environment tells: Claude Code's own
+/// `CLAUDECODE`, else the harness id our MCP entry put into [`HARNESS_ENV`].
 pub fn harness_name(env: &dyn Fn(&str) -> Option<String>) -> &'static str {
     if env("CLAUDECODE").is_some() {
         "claude-code"
+    } else if let Some(kind) =
+        env(HARNESS_ENV).and_then(|id| crate::agents::Kind::from_id(id.trim()))
+    {
+        kind.id()
     } else {
         "unknown"
     }

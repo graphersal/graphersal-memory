@@ -1314,6 +1314,9 @@ impl Daemon {
             handshake.harness,
             store.name()
         ));
+        let opened = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
         let config = Config::load(&self.options.data_dir).unwrap_or_default();
         let connection = mcp::Connection {
             language: config.language(),
@@ -1340,6 +1343,42 @@ impl Daemon {
         }
         drop(reader);
         drop(writer);
+        if handshake.harness == crate::agents::Kind::CodeWhale.id()
+            && handshake.profile == crate::cli::Profile::Use
+        {
+            self.end_codewhale_sessions(&handshake.project, opened);
+        }
+    }
+
+    /// The end of a CodeWhale `use` connection opened at `opened` (seconds) for the project at
+    /// `root`: CodeWhale keeps its MCP servers for its whole run and kills them when it exits,
+    /// before our shim can send the session end (seen live with v0.10.2), so the daemon queues
+    /// the indexing itself, with that project's CodeWhale sessions written since then marked
+    /// ended (`crate::codewhale::sessions::written_since`). CodeWhale's home comes from this
+    /// process's environment.
+    fn end_codewhale_sessions(self: &Arc<Self>, root: &str, opened: u64) {
+        if root.is_empty() {
+            return;
+        }
+        let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        let Ok(paths) = crate::codewhale::CodeWhalePaths::resolve(&env) else {
+            return;
+        };
+        let mut request =
+            sessions::Request::for_harness(crate::agents::Kind::CodeWhale, &paths.sessions);
+        request
+            .ended
+            .extend(crate::codewhale::sessions::written_since(
+                &paths.sessions,
+                Path::new(root),
+                opened,
+            ));
+        if request.ended.is_empty() {
+            return;
+        }
+        if let Err(err) = self.queue_indexing(request) {
+            log(&format!("cannot queue CodeWhale's ended sessions: {err}"));
+        }
     }
 
     /// Answers one relayed HTTP request of the browser UI (`crate::relay`): its body read, then

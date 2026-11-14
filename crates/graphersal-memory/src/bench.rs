@@ -490,6 +490,13 @@ pub fn check_harness(command: &[String]) -> Result<(), String> {
             command.join(" ")
         ));
     }
+    if crate::codewhale::is_codewhale(command) {
+        return Err(format!(
+            "{}. The harness command is `{}`",
+            crate::codewhale::NO_BENCH,
+            command.join(" ")
+        ));
+    }
     if crate::codex::is_codex(command) && !crate::codex::local_model(command) {
         return Err(format!(
             "bench through Codex needs a local model (for example `codex exec --oss \

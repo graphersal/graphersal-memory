@@ -3,8 +3,8 @@
 **Local graph memory for AI coding agents: your agent's rules, decisions and past sessions in a
 graph on your machine, searched through MCP instead of loaded on every turn.**
 
-Works with Claude Code, opencode, OpenAI Codex CLI and Cursor. One binary, no account, no
-telemetry. Version 0.1.0 is the first public release: early, and honest about its limits
+Works with Claude Code, opencode, OpenAI Codex CLI and Cursor (CodeWhale in preview). One binary,
+no account, no telemetry. Version 0.1.0 is the first public release: early, and honest about its limits
 ([status](#status)).
 
 <picture>
@@ -125,6 +125,7 @@ What it writes, per harness (only these entries; each file is backed up first):
 | opencode 1.x / 2.x | MCP servers and one `instructions` entry in `~/.config/opencode/opencode.json(c)`; a rules file and a session plugin of its own |
 | Codex CLI | MCP servers in `~/.codex/config.toml`; a marked block in `~/.codex/AGENTS.md`; two hooks in `~/.codex/hooks.json` |
 | Cursor | MCP server in `~/.cursor/mcp.json`; `~/.cursor/rules/graphersal-memory.mdc`; two hooks in `~/.cursor/hooks.json` |
+| CodeWhale (preview) | MCP servers in `~/.codewhale/mcp.json`; the memory tools in `[tools] always_load` of `~/.codewhale/config.toml`; a marked block in `~/.codewhale/AGENTS.md`; no hooks |
 
 The marked block (and the rules files) tells the agent how to use the memory tools and which
 memory language to use; it holds none of your memories, which reach the agent through the tools
@@ -141,8 +142,8 @@ graphersal-memory uninstall --purge    # and delete the memory data too (asks fi
 
 `uninstall` first writes every memory back as files: for Claude Code into its memory files
 (`MEMORY.md` and one file per memory; the global ones into
-`~/.claude/rules/graphersal-memory-global.md`), for opencode, Codex and Cursor, which have no file
-memory, as Markdown under `~/graphersal-memory-export/<harness>/`. A file you changed is kept and
+`~/.claude/rules/graphersal-memory-global.md`), for opencode, Codex, Cursor and CodeWhale, which
+have no file memory, as Markdown under `~/graphersal-memory-export/<harness>/`. A file you changed is kept and
 the graph's version goes beside it. Then it removes exactly what `install` added and puts the
 harness's own memory switch back. A file nobody touched since install gets its original bytes
 back; the test suite checks that install followed by uninstall leaves the configuration byte for
@@ -223,6 +224,7 @@ Details, including exactly what summaries and `bench` send: [docs/privacy.md](do
 | opencode 1.x and 2.x | yes | yes | yes, through `opencode run` |
 | OpenAI Codex CLI | yes | yes | through `codex exec`; `bench` only with a local model |
 | Cursor | yes | yes (the transcripts its hooks report) | no |
+| CodeWhale (preview) | yes | yes | summaries through `codewhale exec`; `bench` planned |
 
 Any combination can be installed at once; they share one store and one daemon. An MCP client
 without hooks can still use the server: it imports the project's memory files and queues the
@@ -239,6 +241,11 @@ Known limits of 0.1.0:
 
 - **Cursor** support is built from Cursor's documentation and tested against fixtures; it has not
   been run with a live Cursor yet. You can help: [docs/cursor-live-check.md](docs/cursor-live-check.md).
+- **CodeWhale** support (a preview on `main`, in the next release) is built from CodeWhale's
+  source (v0.10.2), tested against fixtures and run live once on macOS with a local model; a
+  memory written through CodeWhale, Linux and Windows are not checked yet, and CodeWhale asks once
+  per memory tool per run (it has no permanent approval for MCP tools):
+  [docs/codewhale-live-check.md](docs/codewhale-live-check.md).
 - **Windows**: no harness has been run live on Windows yet; the daemon, install and the hooks are
   covered by the test suite there.
 - **The browser UI** needs internet for its libraries; it has been run in a browser only on macOS

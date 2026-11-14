@@ -599,7 +599,9 @@ pub fn write(agent: &dyn Agent, data_dir: &Path, rows: &[Row]) -> Result<Report,
             .push(row);
     }
     let imported = crate::import::ImportState::load(data_dir).unwrap_or_default();
-    let other_tools = crate::coexist::other_import::State::load(data_dir).slugs();
+    let mut other_tools = crate::coexist::other_import::State::load(data_dir).slugs();
+    // CodeWhale's own memory keeps its entries too.
+    other_tools.extend(crate::codewhale::memory::imported_slugs(data_dir));
     for (project, rows) in &by_project {
         if project.is_empty() {
             // Memories imported from another memory tool stay out of the global file, which

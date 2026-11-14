@@ -27,9 +27,9 @@ const LONG_VERSION: &str = concat!(
         graphersal-memory keeps your agent's rules, decisions, past sessions and facts in a local \
         graph database and lets the agent search them through MCP, instead of loading a growing \
         memory file on every turn. Everything stays on your machine.\n\n\
-        Supported harnesses: Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI and Cursor \
-        (Cursor without summaries and bench). The harness starts `mcp` itself; it shares one \
-        background daemon with every other session.",
+        Supported harnesses: Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI, Cursor \
+        (without summaries and bench) and CodeWhale (without bench; preview). The harness \
+        starts `mcp` itself; it shares one background daemon with every other session.",
     after_help = "Start with `graphersal-memory install`. \
         Docs: https://github.com/graphersal/graphersal-memory",
     propagate_version = true,
@@ -66,9 +66,9 @@ pub enum Command {
             The embedding model download (Hugging Face, once, into the data directory) is the \
             one network access of install; if it fails, the built-in embedder stays.")]
     Install {
-        /// The harness(es) to set up: claude-code, opencode, codex, cursor or all (default: the
-        /// wizard asks, offering every harness whose program is found on this machine; without
-        /// questions, and with all: every harness found).
+        /// The harness(es) to set up: claude-code, opencode, codex, cursor, codewhale or all
+        /// (default: the wizard asks, offering every harness whose program is found on this
+        /// machine; without questions, and with all: every harness found).
         #[arg(long, value_enum)]
         harness: Option<Harness>,
         /// Show what would change without changing anything (no questions).
@@ -106,8 +106,8 @@ pub enum Command {
     },
     /// Remove exactly what `install` added; your own settings stay untouched.
     Uninstall {
-        /// The harness(es) to remove graph memory from: claude-code, opencode, codex, cursor or all
-        /// (default and all: every harness it is installed in).
+        /// The harness(es) to remove graph memory from: claude-code, opencode, codex, cursor,
+        /// codewhale or all (default and all: every harness it is installed in).
         #[arg(long, value_enum)]
         harness: Option<Harness>,
         /// Show what would change without changing anything.
@@ -239,7 +239,8 @@ pub enum Command {
         action: SummariesAction,
     },
     /// Export the memories back into the harness's file memory (--to-files; what uninstall
-    /// does first; opencode, Codex and Cursor, which have none: readable Markdown files under
+    /// does first; opencode, Codex, Cursor and CodeWhale, which have none: readable Markdown
+    /// files under
     /// ~/graphersal-memory-export/<harness>). The export of rules into instruction files is
     /// planned.
     Export {
@@ -557,6 +558,8 @@ pub enum Harness {
     Codex,
     /// Cursor (the editor's agent).
     Cursor,
+    /// CodeWhale (the terminal agent, formerly DeepSeek TUI; preview).
+    Codewhale,
     /// Every supported harness (install: those whose program is found on this machine;
     /// uninstall: those it is installed in).
     All,
@@ -572,6 +575,7 @@ impl Harness {
             Harness::Codex => Some(vec![Kind::Codex]),
             Harness::All => Some(Kind::ALL.to_vec()),
             Harness::Cursor => Some(vec![Kind::Cursor]),
+            Harness::Codewhale => Some(vec![Kind::CodeWhale]),
         }
     }
 }
@@ -1082,14 +1086,14 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_help_lists_the_four_harnesses_then_all() {
+    fn uninstall_help_lists_the_harnesses_then_all() {
         let help = Cli::command()
             .find_subcommand_mut("uninstall")
             .unwrap()
             .render_long_help()
             .to_string();
         assert!(
-            help.contains("claude-code, opencode, codex, cursor or all"),
+            help.contains("claude-code, opencode, codex, cursor, codewhale or all"),
             "{help}"
         );
         let at = |value: &str| help.find(&format!("- {value}:")).unwrap();
@@ -1097,7 +1101,8 @@ mod tests {
             at("claude-code") < at("opencode")
                 && at("opencode") < at("codex")
                 && at("codex") < at("cursor")
-                && at("cursor") < at("all"),
+                && at("cursor") < at("codewhale")
+                && at("codewhale") < at("all"),
             "{help}"
         );
     }
@@ -1110,9 +1115,16 @@ mod tests {
             ("opencode", vec![Kind::OpenCode]),
             ("codex", vec![Kind::Codex]),
             ("cursor", vec![Kind::Cursor]),
+            ("codewhale", vec![Kind::CodeWhale]),
             (
                 "all",
-                vec![Kind::ClaudeCode, Kind::OpenCode, Kind::Codex, Kind::Cursor],
+                vec![
+                    Kind::ClaudeCode,
+                    Kind::OpenCode,
+                    Kind::Codex,
+                    Kind::Cursor,
+                    Kind::CodeWhale,
+                ],
             ),
         ] {
             match parse(&["install", "--harness", arg]).unwrap().command {
@@ -1137,7 +1149,7 @@ mod tests {
             .render_long_help()
             .to_string();
         assert!(
-            help.contains("claude-code, opencode, codex, cursor or all"),
+            help.contains("claude-code, opencode, codex, cursor, codewhale or all"),
             "{help}"
         );
     }
