@@ -1,7 +1,5 @@
-//! Running a command. In this pre-release `install`, `uninstall`, `status`, `doctor`, `import`
-//! (also `--sessions`), `export --to-files`, `projects`, `summaries` and `bench` (Claude Code), `mcp` (the shim, or
-//! `--no-daemon`), `daemon` and the hidden `hook` work; every other command reports which stage
-//! delivers it.
+//! Running a command. Every command works except `export` without `--to-files` (the export of
+//! rules into instruction files), which reports that it is planned.
 
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -29,28 +27,24 @@ pub const EXIT_FAILED: u8 = 1;
 /// invocation cannot be served).
 pub const EXIT_NOT_IMPLEMENTED: u8 = 2;
 
-/// The roadmap stage that delivers a command, and what that stage is about.
-pub fn planned_stage(command: &Command) -> (&'static str, &'static str) {
+/// What a command that is not implemented yet would deliver (today only `export` without
+/// `--to-files` reaches it).
+pub fn planned_feature(command: &Command) -> &'static str {
     match command {
-        Command::Install { .. } | Command::Uninstall { .. } => {
-            ("M3", "one-click install for Claude Code")
-        }
+        Command::Install { .. } | Command::Uninstall { .. } => "the install for an agent harness",
         Command::Status | Command::Doctor | Command::Hook { .. } => {
-            ("M3", "one-click install for Claude Code")
+            "the install for an agent harness"
         }
-        Command::Projects { .. } => ("M6b", "project identity"),
-        Command::StartContext { .. } => ("M14", "the start context"),
-        Command::Import { .. } => ("M3", "import of the file memory"),
-        Command::Summaries { .. } => ("M4", "sessions and facts"),
-        Command::Export { .. } => (
-            "M7",
-            "the export of rules kept in the graph into the harness's instruction files",
-        ),
-        Command::Mcp { .. } | Command::Daemon { .. } => {
-            ("M2", "the shared daemon and the stdio shim")
+        Command::Projects { .. } => "project identity",
+        Command::StartContext { .. } => "the start context",
+        Command::Import { .. } => "the import of the file memory",
+        Command::Summaries { .. } => "session summaries",
+        Command::Export { .. } => {
+            "exporting the rules kept in the graph into the harness's instruction files"
         }
-        Command::Bench { .. } => ("M5", "the built-in A/B"),
-        Command::Ui { .. } => ("UI", "the browser UI"),
+        Command::Mcp { .. } | Command::Daemon { .. } => "the shared daemon and the stdio shim",
+        Command::Bench { .. } => "the built-in A/B",
+        Command::Ui { .. } => "the browser UI",
     }
 }
 
@@ -76,16 +70,16 @@ pub fn command_name(command: &Command) -> &'static str {
 
 /// The message printed to stderr for a command that is not implemented yet.
 pub fn not_implemented_message(command: &Command) -> String {
-    let (stage, what) = planned_stage(command);
     format!(
-        "graphersal-memory {}: not implemented yet (planned in stage {stage}: {what}).\n\
-         graphersal-memory is a pre-release; see docs/roadmap.md at \
-         https://github.com/graphersal/graphersal-memory",
-        command_name(command)
+        "graphersal-memory {}: not implemented yet; {} is planned.\n\
+         `export --to-files` writes every memory back into the harness's memory files. The \
+         roadmap: https://github.com/graphersal/graphersal-memory/blob/main/docs/roadmap.md",
+        command_name(command),
+        planned_feature(command)
     )
 }
 
-/// The message for a harness that is not supported yet.
+/// The message for a harness choice a command does not take.
 fn harness_not_implemented(command: &str, harness: Harness) -> String {
     let name = match harness {
         Harness::ClaudeCode => "claude-code",
@@ -95,16 +89,15 @@ fn harness_not_implemented(command: &str, harness: Harness) -> String {
         Harness::Cursor => "cursor",
     };
     format!(
-        "graphersal-memory {command} --harness {name}: not implemented yet (planned in stage \
-         M7: other harnesses); Claude Code, opencode, Codex and Cursor are supported one at a \
-         time."
+        "graphersal-memory {command} --harness {name}: not supported; it takes the harnesses one \
+         at a time: claude-code, opencode, codex or cursor."
     )
 }
 
 /// Runs the command line: `mcp` serves MCP on `stdin`/`stdout` (through the daemon, or in this
-/// process with `--no-daemon`), `daemon` runs or starts the daemon, `install`, `uninstall`,
-/// `status`, `doctor`, `import` and `hook` work on Claude Code, every other command reports its
-/// stage. Diagnostics go to `stderr`; returns the process exit code.
+/// process with `--no-daemon`), `daemon` runs or starts the daemon, `install`, `uninstall`
+/// and every other command run (`export` without `--to-files` reports that it is planned).
+/// Diagnostics go to `stderr`; returns the process exit code.
 pub fn run_cli(
     cli: &Cli,
     stdin: impl Read + Send + 'static,
@@ -2213,8 +2206,8 @@ pub fn store_findings(run_dir: &Path) -> Vec<install::Finding> {
         .unwrap_or_default()
 }
 
-/// Runs a command that is not implemented yet: writes its stage to `stderr` and returns the
-/// process exit code.
+/// Runs a command that is not implemented yet: says so on `stderr` and returns the process exit
+/// code.
 pub fn run(command: &Command, stderr: &mut dyn std::io::Write) -> u8 {
     // A closed or failing stderr must not turn into a panic; the exit code still tells the story.
     let _ = writeln!(stderr, "{}", not_implemented_message(command));
@@ -2229,7 +2222,7 @@ mod tests {
 
     #[test]
     fn every_command_reports_its_stage_and_exits_2() {
-        let (name, stage) = ("export", "M7");
+        let name = "export";
         let cli = Cli::try_parse_from(["graphersal-memory", name]).unwrap();
         let mut err = Vec::new();
         assert_eq!(run(&cli.command, &mut err), 2);
@@ -2238,7 +2231,8 @@ mod tests {
             text.starts_with(&format!("graphersal-memory {name}: not implemented yet")),
             "{text}"
         );
-        assert!(text.contains(&format!("stage {stage}")), "{text}");
+        assert!(text.contains("is planned"), "{text}");
+        assert!(!text.contains("stage"), "{text}");
     }
 
     #[test]

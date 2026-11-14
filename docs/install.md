@@ -1,7 +1,51 @@
 # Install and uninstall: what you see
 
-These are real outputs, captured on 2026-11-12 by running the current `graphersal-memory` (a
-release build of stage M16) under a pseudo-terminal on throwaway home directories (`/tmp/gmw/h`
+This page has two parts: how to get the binary, and what `graphersal-memory install` and
+`uninstall` then show and write, captured for every harness.
+
+## The binary
+
+Every [GitHub Release](https://github.com/graphersal/graphersal-memory/releases) carries one
+archive per platform, `graphersal-memory-v<version>-<platform>.tar.gz` (Windows: `.zip`), for
+`linux-x86_64`, `linux-aarch64` (both static), `macos-arm64`, `macos-x86_64` and
+`windows-x86_64`, each with `LICENSE`, `NOTICE` and `README.md`; the installers `install.sh` and
+`install.ps1`; and `SHA256SUMS` over all of them.
+
+The installers find the archive of your platform in `SHA256SUMS`, download it, refuse it when the
+checksum does not match, and put the binary into `~/.local/bin` (Windows:
+`%LOCALAPPDATA%\Programs\graphersal-memory`). They change nothing else, not even `PATH`.
+
+```sh
+curl -fsSL https://github.com/graphersal/graphersal-memory/releases/latest/download/install.sh | sh
+# a given version or directory
+curl -fsSL https://github.com/graphersal/graphersal-memory/releases/latest/download/install.sh | sh -s -- --version v0.1.0 --dir /usr/local/bin
+```
+
+```powershell
+irm https://github.com/graphersal/graphersal-memory/releases/latest/download/install.ps1 | iex
+# a given version or directory
+& ([scriptblock]::Create((irm https://github.com/graphersal/graphersal-memory/releases/latest/download/install.ps1))) -Version v0.1.0 -Dir C:\Tools
+```
+
+The same options can be set as environment variables (`GRAPHERSAL_MEMORY_VERSION`,
+`GRAPHERSAL_MEMORY_INSTALL_DIR`); `--help` lists them. A shell under Rosetta 2 on Apple silicon
+gets the native arm64 build.
+
+Rather check first? Download the archive and `SHA256SUMS` from the release, compare the checksum,
+verify the build provenance with the GitHub CLI
+(`gh attestation verify <archive> -R graphersal/graphersal-memory`), and put `graphersal-memory`
+on your `PATH` yourself.
+
+From source, with Rust 1.88 or newer and a C compiler (for the bundled SQLite and `ring`):
+
+```sh
+cargo install --locked graphersal-memory
+```
+
+## What install and uninstall show
+
+These are real outputs, captured on 2026-11-12 by running `graphersal-memory` (a release build
+of the main branch shortly before 0.1.0) under a pseudo-terminal on throwaway home directories (`/tmp/gmw/h`
 and the others named below, with the data and run directories chosen by `GRAPHERSAL_MEMORY_DIR` /
 `GRAPHERSAL_MEMORY_RUN_DIR`, which is why the MCP entries carry `--data-dir` and `--run-dir`). The
 agent programs were stand-ins on `PATH` (they are only looked for, never run, by install), so the

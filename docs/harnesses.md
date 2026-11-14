@@ -1,24 +1,25 @@
 # Supported harnesses
 
-> Pre-release: Claude Code is supported by `install`, `uninstall`, `status`, `doctor` and
-> `import` (stage M3), the indexing of its past sessions with opt-in summaries (stage M4) and the
-> A/B `bench` (stage M5); opencode 1.x by all of them since stage M7a, opencode 2.x since M7b,
-> OpenAI Codex CLI since M7c, Cursor since M7d (without summaries and `bench`; checked against
-> fixtures only, a live check is pending). Any of them can be installed at once and share one
-> store and one daemon.
+> graphersal-memory 0.1.0 supports Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI and Cursor
+> (Cursor without summaries and `bench`, and checked against its documentation and fixtures only:
+> a live check is pending). Any of them can be installed at once and share one store and one
+> daemon.
 
 Every harness below supports MCP, so the memory tools work the same way everywhere. What differs is
 how graphersal-memory is installed into the harness, where the harness keeps its rules and
 transcripts, and whether it has hooks.
 
-| Harness | Status | MCP registration | Rules exported to | Past sessions from | Hooks |
+| Harness | Supported | MCP registration | Rule block (how to use the memory) | Past sessions from | Hooks |
 |---|---|---|---|---|---|
-| Claude Code | install, import, hooks, rule block (M3); past sessions, opt-in summaries (M4); bench (M5) | a member of `mcpServers` in `~/.claude.json` (user scope), edited in place with a backup | a marked block in `~/.claude/CLAUDE.md` | local transcripts (`~/.claude/projects/`) | SessionStart / SessionEnd |
-| opencode 1.x and 2.x | install, rule file, session plugin, past sessions, opt-in summaries, bench (M7a: 1.x; M7b: 2.x) | 1.x: members of `mcp`, 2.x: members of `mcp.servers`, in `~/.config/opencode/opencode.json(c)` (JSONC kept), edited in place with a backup | a rules file of our own, listed in `instructions` | its SQLite database (`~/.local/share/opencode/opencode.db`, both lines' tables), read-only | one plugin file for both lines: a session's start, and shutdown |
-| OpenAI Codex CLI | install, rule block, hooks, past sessions, opt-in summaries, bench with a local model (M7c) | one managed block of `[mcp_servers.*]` tables in `~/.codex/config.toml` (`$CODEX_HOME`), edited as text with a backup | a marked block in `~/.codex/AGENTS.md` (or `AGENTS.override.md` when that is the one Codex loads) | its rollout files (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`), read-only | SessionStart / SessionEnd in `~/.codex/hooks.json` (run once you trust them in `/hooks`) |
-| Cursor | install, rule file, hooks, past sessions the hooks report (M7d; no summaries or bench through Cursor; not yet checked with a live Cursor) | a member of `mcpServers` in `~/.cursor/mcp.json`, edited in place with a backup | a rule file of our own, `~/.cursor/rules/graphersal-memory.mdc` (`alwaysApply: true`) | the transcripts its hooks name (`transcript_path`), read-only | sessionStart / sessionEnd in `~/.cursor/hooks.json` |
+| Claude Code | install, import, hooks, rule block, past sessions, opt-in summaries, bench | a member of `mcpServers` in `~/.claude.json` (user scope), edited in place with a backup | a marked block in `~/.claude/CLAUDE.md` | local transcripts (`~/.claude/projects/`) | SessionStart / SessionEnd |
+| opencode 1.x and 2.x | install, rule file, session plugin, past sessions, opt-in summaries, bench | 1.x: members of `mcp`, 2.x: members of `mcp.servers`, in `~/.config/opencode/opencode.json(c)` (JSONC kept), edited in place with a backup | a rules file of our own, listed in `instructions` | its SQLite database (`~/.local/share/opencode/opencode.db`, both lines' tables), read-only | one plugin file for both lines: a session's start, and shutdown |
+| OpenAI Codex CLI | install, rule block, hooks, past sessions, opt-in summaries, bench with a local model | one managed block of `[mcp_servers.*]` tables in `~/.codex/config.toml` (`$CODEX_HOME`), edited as text with a backup | a marked block in `~/.codex/AGENTS.md` (or `AGENTS.override.md` when that is the one Codex loads) | its rollout files (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`), read-only | SessionStart / SessionEnd in `~/.codex/hooks.json` (run once you trust them in `/hooks`) |
+| Cursor | install, rule file, hooks, past sessions the hooks report (no summaries or bench through Cursor; not yet checked with a live Cursor) | a member of `mcpServers` in `~/.cursor/mcp.json`, edited in place with a backup | a rule file of our own, `~/.cursor/rules/graphersal-memory.mdc` (`alwaysApply: true`) | the transcripts its hooks name (`transcript_path`), read-only | sessionStart / sessionEnd in `~/.cursor/hooks.json` |
 
-Where a harness has no hooks, synchronisation runs from the MCP server itself or on demand.
+The rule block tells the agent how to use the memory tools and which memory language to use; it
+holds none of your memories. The memories that always apply reach the agent through the start
+context (below). Where a harness has no hooks, synchronisation runs from the MCP server itself or
+on demand.
 
 ## Rules for every harness
 

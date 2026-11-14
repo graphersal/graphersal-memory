@@ -1,10 +1,11 @@
 //! `graphersal-memory`: local graph memory for AI coding agents.
 //!
-//! Pre-release: `install` (a wizard in a terminal), `uninstall`, `status`, `doctor`, `import`
-//! (also `--sessions`), `export --to-files`, `projects` and `summaries` set graphersal-memory up
-//! in Claude Code, opencode, Codex and Cursor, `mcp` serves the memory over stdio (through the shared daemon, or in this
-//! process with `--no-daemon`), `daemon` manages the daemon; every other command reports the
-//! roadmap stage that delivers it and exits with code 2.
+//! `install` (a wizard in a terminal), `uninstall`, `status`, `doctor`, `import` (also
+//! `--sessions`), `export --to-files`, `projects` and `summaries` set graphersal-memory up in
+//! Claude Code, opencode, Codex and Cursor; `mcp` serves the memory over stdio (through the shared
+//! daemon, or in this process with `--no-daemon`), `daemon` manages the daemon, `ui` opens the
+//! browser UI and `bench` measures it. `export` without `--to-files` (the export of rules into
+//! instruction files) is planned and exits with code 2.
 
 mod agents;
 mod bench;

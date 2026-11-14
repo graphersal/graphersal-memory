@@ -52,11 +52,11 @@ pub(crate) fn named_machine(home: &Path) {
     std::fs::write(
         home.join("kg").join("memory.jsonl"),
         concat!(
-            r#"{"type":"entity","name":"Aleks","entityType":"person","observations":["Prefers short answers","Works on graphersal"]}"#,
+            r#"{"type":"entity","name":"Robin","entityType":"person","observations":["Prefers short answers","Works on graphersal"]}"#,
             "\n",
             r#"{"type":"entity","name":"graphersal","entityType":"project","observations":["A graph engine in Rust"]}"#,
             "\n",
-            r#"{"type":"relation","from":"Aleks","to":"graphersal","relationType":"works on"}"#,
+            r#"{"type":"relation","from":"Robin","to":"graphersal","relationType":"works on"}"#,
             "\n"
         ),
     )
@@ -257,13 +257,13 @@ fn a_default_install_names_the_reference_server_read_only_and_leaves_its_entry()
         ),
         "{out}"
     );
-    let found = memory.call("", "memory", json!({"slug": "kg-aleks"}));
+    let found = memory.call("", "memory", json!({"slug": "kg-robin"}));
     assert_eq!(found["scope"], "global", "{found}");
     assert!(
         found["body"]
             .as_str()
             .unwrap()
-            .contains("- Aleks works on graphersal"),
+            .contains("- Robin works on graphersal"),
         "{found}"
     );
     assert_eq!(found["kind"], "reference");
@@ -1196,7 +1196,7 @@ fn the_export_leaves_out_memories_imported_from_another_tool() {
         summary: format!("{slug} summary"),
         ..Default::default()
     };
-    let rows = vec![row("kg-aleks"), row("kg-graphersal"), row("mine")];
+    let rows = vec![row("kg-robin"), row("kg-graphersal"), row("mine")];
     let report = crate::export::write(&setup.agent(), data.path(), &rows).unwrap();
     assert_eq!(report.from_other_tools, 2);
     assert!(
@@ -1209,7 +1209,7 @@ fn the_export_leaves_out_memories_imported_from_another_tool() {
     );
     let global = read(&setup.agent().global_memory_file());
     assert!(
-        global.contains("mine summary") && !global.contains("kg-aleks"),
+        global.contains("mine summary") && !global.contains("kg-robin"),
         "{global}"
     );
     // Only memories of other tools: no global file at all.
@@ -1254,12 +1254,12 @@ fn a_config_rewritten_while_install_waits_keeps_the_agents_write_and_the_switch_
 
 #[test]
 fn an_instruction_wrapped_over_lines_is_read_as_one_paragraph() {
-    // Found in the user's real CLAUDE.local.md: line 43 alone mentions MEMORY.md, but the list
-    // item it belongs to names graphersal-memory.
+    // A list item wrapped over lines: one line alone mentions MEMORY.md, but the list item it
+    // belongs to names graphersal-memory.
     let text = "## Memory\n\
         \n\
-        - Do not write memories into graphersal-kb any more. Its `memory:*` vertices and `session:*`\n  \
-        index (folder `memory`, `ai/graph/memory/sync.py`) are the\n  \
+        - Do not write memories into the team wiki any more. Its `notes:*` pages and `drafts:*`\n  \
+        index (folder `notes`, `scripts/notes/sync.py`) are the\n  \
         history up to 2026-11-11, readable as a fallback; `MEMORY.md` is still their export, imported\n  \
         into graphersal-memory at session start. Do not edit files in the memory directory.\n\
         - Never use tabs. Save every decision\n  \

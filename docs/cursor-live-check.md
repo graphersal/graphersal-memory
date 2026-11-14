@@ -1,9 +1,10 @@
-# Cursor: live check
+# Cursor: help us check it live
 
 graphersal-memory's Cursor support is built from Cursor's documentation and tested against
-hand-built files; it has not been run with a live Cursor yet. This checklist takes about 15
-minutes. It needs Cursor (any plan, Hobby is enough) and the `graphersal-memory` binary on your
-`PATH`. Nothing here sends data anywhere except Cursor's own model calls.
+hand-built files in the documented formats; it has not been run with a live Cursor yet. If you use
+Cursor, this checklist tells us whether it works there. It takes about 15 minutes and needs
+Cursor (any plan, Hobby is enough) and the `graphersal-memory` binary on your `PATH`. Nothing
+here sends data anywhere except Cursor's own model calls.
 
 To keep your real setup out of it, use a test account or a machine without other Cursor
 configuration. If you use your own machine, note first whether `~/.cursor/mcp.json`,
@@ -88,14 +89,16 @@ were, and step 9 checks that.
    `~/graphersal-memory-export/cursor/`. Restart Cursor: `graphersal-memory` is no longer in
    Customize.
 
-## What to send back
+## What to report
+
+Open an [issue](https://github.com/graphersal/graphersal-memory/issues) titled "Cursor live check"
+with:
 
 - Cursor's version (Help > About, or `cursor --version`) and your operating system.
-- The output of steps 1, 8 and 9.
+- The output of steps 1, 8 and 9 (check it for paths or names you would rather not share).
 - Yes/no for each question in steps 3 to 7, with the tool name from step 6.
-- One transcript file that the hooks reported (its path is listed in
-  `<data dir>/sessions/cursor-transcripts.json`; `graphersal-memory status` prints the data
-  directory). Look at it first and send it only if it holds nothing private, or send just its
-  first three lines with the text replaced by `...`: the reader was built without a real file,
-  so the line format is what matters.
+- The first three lines of one transcript file that the hooks reported, with the text replaced
+  by `...` (its path is listed in `<data dir>/sessions/cursor-transcripts.json`;
+  `graphersal-memory status` prints the data directory). The reader was built without a real
+  file, so the line format is what matters; never post a whole transcript.
 - Anything that looked wrong, with the lines from the MCP Logs or Hooks output channels.

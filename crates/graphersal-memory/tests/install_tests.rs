@@ -612,7 +612,7 @@ fn other_memory_is_imported_named_switched_off_and_given_back() {
     std::fs::write(
         home.join("kg").join("memory.jsonl"),
         concat!(
-            r#"{"type":"entity","name":"Aleks","entityType":"person","observations":["Prefers short answers"]}"#,
+            r#"{"type":"entity","name":"Robin","entityType":"person","observations":["Prefers short answers"]}"#,
             "\n"
         ),
     )

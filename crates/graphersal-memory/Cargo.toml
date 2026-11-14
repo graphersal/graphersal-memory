@@ -9,11 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 readme = "../../README.md"
+documentation = "https://github.com/graphersal/graphersal-memory/tree/main/docs"
 keywords = ["mcp", "memory", "agents", "graph", "claude"]
 categories = ["command-line-utilities", "development-tools"]
-# Not on crates.io: releases are GitHub Release binaries (.github/workflows/release.yml) and
-# `cargo install --git`.
-publish = false
 
 [[bin]]
 name = "graphersal-memory"

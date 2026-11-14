@@ -1,8 +1,7 @@
 //! Command-line interface: the command set of the product and its help text.
 //!
-//! Every command exists from the first stage on, so the help text shows the whole product; a
-//! command that is not built yet says so and names the stage that delivers it
-//! (`crate::commands`).
+//! A command that is not built yet (`export` without `--to-files`) says so and that it is
+//! planned (`crate::commands`).
 
 use std::path::PathBuf;
 
@@ -11,7 +10,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 /// The long `--version` text: the product version and the engine version it is built on.
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    " (pre-release; engine: graphersal ",
+    " (engine: graphersal ",
     crate::engine::engine_version!(),
     ")"
 );
@@ -28,11 +27,9 @@ const LONG_VERSION: &str = concat!(
         graphersal-memory keeps your agent's rules, decisions, past sessions and facts in a local \
         graph database and lets the agent search them through MCP, instead of loading a growing \
         memory file on every turn. Everything stays on your machine.\n\n\
-        PRE-RELEASE: `install`, `uninstall`, `status`, `doctor`, `import`, `summaries` and \
-        `bench` (for Claude Code, opencode 1.x and 2.x, and Codex; Cursor without summaries and \
-        bench), `mcp` (the stdio server a harness starts; it shares one background daemon \
-        with every other session), `daemon` and `ui` (the browser UI) work. Every other command says which stage delivers it; \
-        the plan is in docs/roadmap.md.",
+        Supported harnesses: Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI and Cursor \
+        (Cursor without summaries and bench). The harness starts `mcp` itself; it shares one \
+        background daemon with every other session.",
     after_help = "Start with `graphersal-memory install`. \
         Docs: https://github.com/graphersal/graphersal-memory",
     propagate_version = true,
@@ -761,7 +758,7 @@ mod tests {
         ] {
             assert!(help.contains(name), "help lacks {name}");
         }
-        assert!(help.contains("PRE-RELEASE"));
+        assert!(help.contains("Supported harnesses: Claude Code, opencode"));
     }
 
     #[test]

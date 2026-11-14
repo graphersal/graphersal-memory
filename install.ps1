@@ -80,7 +80,7 @@ function Install-GraphersalMemory([string]$Version, [string]$Dir, [string]$BaseU
         try {
             Fetch "$releaseUrl/SHA256SUMS" $sums
         } catch {
-            Fail "cannot download SHA256SUMS of $what from $releaseUrl (no such release, no network, or the repository is not public yet; you can build from source: $fromSource)"
+            Fail "cannot download SHA256SUMS of $what from $releaseUrl (no such release, or no network; you can build from source: $fromSource)"
         }
         $pattern = "^([0-9a-f]{64})  (graphersal-memory-(v[^ ]+)-$platform\.zip)$"
         $match = Get-Content $sums | ForEach-Object { [regex]::Match($_, $pattern) } |
@@ -139,7 +139,7 @@ function Install-GraphersalMemory([string]$Version, [string]$Dir, [string]$BaseU
         $next = "& '$target' install"
     }
     Write-Host ''
-    Write-Host 'Next step: connect it to your agent (Claude Code) with'
+    Write-Host 'Next step: connect it to your agents (Claude Code, opencode, Codex, Cursor) with'
     Write-Host "  $next"
 }
 

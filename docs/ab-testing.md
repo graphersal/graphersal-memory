@@ -1,7 +1,8 @@
 # Measuring it: the built-in A/B
 
-> Available since stage M5 for Claude Code: `graphersal-memory bench`. The arm with your whole
-> current setup and the structure variants of develop mode are planned. This page describes the
+> `graphersal-memory bench`, through Claude Code, opencode, or Codex with a local model
+> (`bench rule-changes`: Claude Code). The arm with your whole current setup and the structure
+> variants of develop mode are planned. This page describes the
 > method, a first run of the built-in bench, and the hand-made measurement it is based on.
 
 Every memory tool claims to help. `bench` lets you check whether one does on **your** memory, with
@@ -175,7 +176,7 @@ the rule, for example "What exact command do I run to install this project's dep
 
 - **Arms.** Each arm has a store of its own in the run directory, one project per scenario, with
   eight unrelated memories beside the two rules. **plain** holds both memories with nothing
-  linking them, as graphersal-memory was before M12. **marked** writes the newer one with
+  linking them, as graphersal-memory was before it linked them. **marked** writes the newer one with
   `supersedes: [old]`, so every search marks the old one "SUPERSEDED by <new> on <date>:".
   **file** is marked, and the old rule also sits in a memory file loaded into the context: the
   case of a file nobody edited.
@@ -188,7 +189,7 @@ the rule, for example "What exact command do I run to install this project's dep
   answers, about $0.05 each), a run above `--budget` is refused, every call is capped, and
   `--dry-run` calls no model. The report is `report.md` and `report.json` in
   `<data dir>/bench/<timestamp>-rule-changes/`.
-- **Before it was built** (M12 experiment, 2026-11-12, Claude Haiku, 6 scenarios x 3 runs, by
+- **Before it was built** (an experiment on 2026-11-12, Claude Haiku, 6 scenarios x 3 runs, by
   hand): 17/18 answers followed the new rule with plain memories, 18/18 marked, 13/18 when the
   old rule was also in a loaded file. Small samples, synthetic scenarios.
 

@@ -1,7 +1,6 @@
 # Why graphersal-memory
 
-> Pre-release: this page explains the reasoning behind a product that is being built. See the
-> [status table](../README.md#status).
+> The reasoning behind graphersal-memory, and what we still have to verify.
 
 ## What goes wrong with agent memory today
 
@@ -45,7 +44,7 @@ command to install and one command to remove.
 
 Our own measurement is promising but small: one developer, 21 questions, one model. Your memory,
 your questions and your harness are different. Instead of asking you to trust our numbers,
-graphersal-memory will run the same kind of comparison on your own data, without touching your
+graphersal-memory runs the same kind of comparison on your own data (`bench`), without touching your
 live setup: [ab-testing.md](ab-testing.md).
 
 ## Hypothesis we still have to verify
