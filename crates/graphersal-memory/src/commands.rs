@@ -1760,18 +1760,18 @@ fn daemon_action(cli: &Cli, action: DaemonAction, mut stdout: impl Write) -> Res
         DaemonAction::Stop => "stop",
         DaemonAction::Restart => "restart",
     };
+    // A daemon older than `restart` refuses it (an unknown control request): it is stopped
+    // instead. Its `stop` marker makes the open sessions' MCP servers exit for good (they read
+    // it before the marker is taken away), so they need a reconnect, which is said.
+    let mut older = false;
     let stopped = match old_pid {
         None => false,
         Some(_) => match shim::control(run_dir, request)? {
             None => false,
             Some(answer) if answer["ok"] == serde_json::Value::Bool(true) => true,
             Some(_) if action == DaemonAction::Restart => {
-                // A daemon older than `restart`: a `stop`, then its marker taken away, so open
-                // sessions start the new daemon.
-                let stopped = shim::control(run_dir, "stop")?.is_some();
-                wait_gone(run_dir, old_pid)?;
-                let _ = std::fs::remove_file(run_dir.join(ipc::STOPPED_FILE));
-                stopped
+                older = true;
+                shim::control(run_dir, "stop")?.is_some()
             }
             Some(answer) => {
                 return Err(format!(
@@ -1786,6 +1786,10 @@ fn daemon_action(cli: &Cli, action: DaemonAction, mut stdout: impl Write) -> Res
     } else {
         None
     };
+    if older {
+        // Gone (or never stopped): the marker goes, so new sessions start the new daemon.
+        let _ = std::fs::remove_file(run_dir.join(ipc::STOPPED_FILE));
+    }
     let pid_text = |pid: Option<u64>| pid.map_or_else(String::new, |pid| format!(" (pid {pid})"));
     match action {
         DaemonAction::Stop => {
@@ -1801,7 +1805,14 @@ fn daemon_action(cli: &Cli, action: DaemonAction, mut stdout: impl Write) -> Res
             };
         }
         DaemonAction::Restart => {
-            if stopped {
+            if older {
+                let _ = writeln!(
+                    stdout,
+                    "daemon: older than `restart`, so it was stopped instead{}; open sessions \
+                     lost their memory server: reconnect it (/mcp in Claude Code)",
+                    pid_text(old_pid)
+                );
+            } else if stopped {
                 let _ = writeln!(stdout, "daemon: stopped{}", pid_text(old_pid));
             } else {
                 let _ = writeln!(stdout, "daemon: was not running");
