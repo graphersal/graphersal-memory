@@ -153,5 +153,5 @@ case ":${PATH:-}:" in
     ;;
 esac
 say ""
-say "Next step: connect it to your agents (Claude Code, opencode, Codex, Cursor) with"
+say "Next step: connect it to your agents (Claude Code, opencode, Codex, Cursor, CodeWhale) with"
 say "  $next"

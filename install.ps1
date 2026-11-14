@@ -139,7 +139,7 @@ function Install-GraphersalMemory([string]$Version, [string]$Dir, [string]$BaseU
         $next = "& '$target' install"
     }
     Write-Host ''
-    Write-Host 'Next step: connect it to your agents (Claude Code, opencode, Codex, Cursor) with'
+    Write-Host 'Next step: connect it to your agents (Claude Code, opencode, Codex, Cursor, CodeWhale) with'
     Write-Host "  $next"
 }
 
