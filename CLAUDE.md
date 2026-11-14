@@ -21,7 +21,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects`, `start-context` and the
     hidden `hook` work on Claude Code, opencode, Codex and Cursor (`Setup` from the environment, with the model download
     `Source`; `bench_options` for `bench`; `DaemonSource` reads the memories for the export);
-    `ui` runs the browser UI (`crate::ui`); `export` without `--to-files` reports its planned stage and exits with code 2
+    `ui` runs the browser UI (`crate::ui`); `export` without `--to-files` says it is planned and exits with code 2
     (`--harness codex` and `--harness cursor` work wherever `claude-code` and `opencode` do;
     a Claude Code hook whose input is Cursor's, `cursor_version`, does nothing); the
     wizard is interactive when stdin and stdout are terminals;
