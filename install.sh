@@ -112,7 +112,7 @@ else
   release_url="$base/latest/download"
   what="the latest release"
 fi
-fetch "$release_url/SHA256SUMS" "$tmp/SHA256SUMS" || fail "cannot download SHA256SUMS of $what from $release_url (no such release, no network, or the repository is not public yet; you can build from source: cargo install --locked --git https://github.com/graphersal/graphersal-memory graphersal-memory)"
+fetch "$release_url/SHA256SUMS" "$tmp/SHA256SUMS" || fail "cannot download SHA256SUMS of $what from $release_url (no such release, or no network; you can build from source: cargo install --locked --git https://github.com/graphersal/graphersal-memory graphersal-memory)"
 line="$(grep -E "^[0-9a-f]{64}  graphersal-memory-v[^ ]*-$platform\.tar\.gz\$" "$tmp/SHA256SUMS" | head -n 1 || true)"
 [ -n "$line" ] || fail "$what has no archive for $platform"
 expected="${line%% *}"
@@ -153,5 +153,5 @@ case ":${PATH:-}:" in
     ;;
 esac
 say ""
-say "Next step: connect it to your agent (Claude Code) with"
+say "Next step: connect it to your agents (Claude Code, opencode, Codex, Cursor) with"
 say "  $next"

@@ -1,10 +1,15 @@
 # Contributing
 
-Thank you for your interest. graphersal-memory is a pre-release under active development, so
-please open an issue before starting on a larger change. The plan may already cover it, or it may
-conflict with a stage in progress ([docs/roadmap.md](docs/roadmap.md)).
+Thank you for your interest. graphersal-memory is young and changes quickly, so please open an
+[issue](https://github.com/graphersal/graphersal-memory/issues) before starting on a larger
+change: the [roadmap](docs/roadmap.md) may already cover it, or it may conflict with work in
+progress. Bug reports with `graphersal-memory --version`, your platform, your harness and the
+output of `graphersal-memory doctor` are the most useful.
 
 ## Before you open a pull request
+
+Building needs Rust 1.88 or newer and a C compiler. The browser UI's tests run with Node.js:
+`node --test crates/graphersal-memory/ui/tests/*.test.mjs`.
 
 ```sh
 cargo fmt --all --check

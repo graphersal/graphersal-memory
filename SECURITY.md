@@ -20,4 +20,5 @@ uninstall, import and export, and data handling. Vulnerabilities in the graph en
 
 ## Supported versions
 
-There is no release yet. Once there is, fixes go into the latest release.
+Fixes go into the latest release only. During 0.x, please upgrade to the newest version before
+reporting.

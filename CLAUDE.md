@@ -4,8 +4,8 @@ Guidance for AI agents working in this repository. When this file disagrees with
 wins: say so, so the stale section gets fixed.
 
 **graphersal-memory** is a local graph memory for AI coding agents, a one-click product built on
-the [Graphersal](https://github.com/graphersal/graphersal) engine. It is in pre-release: the user-facing
-design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`.
+the [Graphersal](https://github.com/graphersal/graphersal) engine. The user-facing documentation is
+in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`.
 
 ## Layout
 
@@ -466,8 +466,8 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   store gets the new catalog at its next start. Test a body change with the round trips in
   `src/mcp_tests.rs`; descriptions stay short (they are paid on every agent turn).
 - `docs/`: the user-facing documentation (why, how it works, A/B method, privacy, harnesses,
-  roadmap).
-- `ai/`: local working files, git-ignored, never published, never linked from published files.
+  install, roadmap, the Cursor live check); `docs/images/`: the README's screenshots (a demo
+  project with invented memories, light and dark).
 
 ## Commands
 
@@ -478,7 +478,8 @@ cargo test --workspace
 cargo run -p graphersal-memory -- --help
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and Windows.
+CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and Windows; it is
+started by hand (`workflow_dispatch`).
 
 ## Releases
 
@@ -497,13 +498,14 @@ CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and W
   `~/.local/bin` / `%LOCALAPPDATA%\Programs\graphersal-memory` (`--dir`/`-Dir`), print the next
   step. `--version`/`-Version`, `--base-url`/`-BaseUrl` (tests, mirrors) and the matching
   `GRAPHERSAL_MEMORY_*` environment variables. They change nothing but the binary.
-- The crate stays `publish = false`; `cargo install --git` is the source path. While the repository
-  is private, release files need a signed-in member, so the one-liners work once it is public.
+- The crate is published to crates.io (`cargo install --locked graphersal-memory`); `cargo
+  install --git` works too. The one-liners download from the latest published (non-draft)
+  GitHub Release.
 
 ## Engine dependency
 
 - The engine crates (`graphersal`, `graphersal-mcp`, `graphersal-serve`, `graphersal-session`)
-  are exact crates.io pins (`=0.6.0`) in the root `Cargo.toml`, all the same version (the MCP and
+  are exact crates.io pins (`=<version>`) in the root `Cargo.toml`, all the same version (the MCP and
   serving crates make no stability promise during 0.x). When you move the pin, update
   `engine_version!` in `src/engine.rs` (a test checks it against `Cargo.toml` and `Cargo.lock`).
 - **Every engine gap goes to the graphersal repository**, as an issue or a branch there. Never
@@ -526,8 +528,9 @@ CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and W
    proves it (`install_tests.rs`, both of them). Tests never write under the real `~/.claude`:
    an in-process test builds its `Setup` from a temporary home (`install_tests::setup_in`) and
    never calls `run_cli` for install/status (that reads the real environment).
-4. **Nothing is claimed as working before it works.** The README status table and the
-   command messages say "planned" until a stage lands with tests.
+4. **Nothing is claimed as working before it works.** The README, `docs/roadmap.md` and the
+   command messages say "planned" until the feature lands with tests, and the README's known
+   limits name what is built but not yet run live.
 5. **Numbers in docs come from a measurement**, with its source, its sample size and its caveats.
 6. **English** in every file: code, comments, docs and commit messages.
 7. **Small public surface.** There is no library API yet. Command-line flags and output formats
