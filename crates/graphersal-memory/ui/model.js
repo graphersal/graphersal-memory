@@ -539,6 +539,11 @@ export function healthProblems(status) {
   return lines.filter((line) => /PROBLEM|ACTION NEEDED/.test(line)).map((line) => line.trim());
 }
 
+/** The count of setup problems in a few words ("1 setup problem", "3 setup problems"). */
+export function problemsText(count) {
+  return `${count} setup ${count === 1 ? 'problem' : 'problems'}`;
+}
+
 /** The daemon's state in a few words. */
 export function daemonText(status) {
   const daemon = status && status.daemon;

@@ -497,8 +497,10 @@ conflict checks, the history and the start context work exactly as for the agent
 - **Sessions** (read-only): the newest sessions by day, search of their decisions and other
   facts by meaning, a session in full with its conversation on demand.
 
-A project switcher shows one project (its memories and the global ones), the global memories
-alone, or all projects.
+The project switcher in the page's top bar, beside the theme switch, holds for every tab: one
+project (its memories and the global ones), the global memories alone, or all projects. The top
+bar also shows the daemon's state and, when the setup has problems, a warning that opens the
+Overview.
 
 The header shows graphersal-memory's own version; the engine's version is in its tooltip and on
 the Overview.

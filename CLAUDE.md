@@ -304,7 +304,9 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
     `window.fetch` wrapper; `api-ui.js` sends the same headers to `/api/ui/*`) and sends the
     heartbeat (`ui/tests/boot.test.mjs`); `ui_assets::profile` adds the binary's version as the
     profile's `version` (the header shows it); `model.js` the pure logic, tested by
-    `node --test crates/graphersal-memory/ui/tests/*.test.mjs`; `shared.js` the project switcher,
+    `node --test crates/graphersal-memory/ui/tests/*.test.mjs`; `topbar.js` the profile's
+    `header` module (the engine's top-bar slot: the Project select, daemon state, setup-problems
+    warning; `ui/tests/topbar.test.mjs`); `shared.js` the shared selection, a tab's note header,
     calls per selection ("All projects" = once per project + global once), the memory form with
     the "changed meanwhile" check and the nearest check; one module per tab);
   - `src/protocol.rs`: the shim <-> daemon handshake and control lines, refusal codes, version

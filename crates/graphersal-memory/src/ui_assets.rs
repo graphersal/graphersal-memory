@@ -13,12 +13,13 @@ pub const FILES_PREFIX: &str = "/memory-ui/";
 const PROFILE: &str = include_str!("../ui/profile.json");
 
 /// The files under [`FILES_PREFIX`]: name and bytes.
-const FILES: [(&str, &[u8]); 13] = [
+const FILES: [(&str, &[u8]); 14] = [
     ("boot.js", include_bytes!("../ui/boot.js")),
     ("memory-ui.css", include_bytes!("../ui/memory-ui.css")),
     ("model.js", include_bytes!("../ui/model.js")),
     ("api-ui.js", include_bytes!("../ui/api-ui.js")),
     ("shared.js", include_bytes!("../ui/shared.js")),
+    ("topbar.js", include_bytes!("../ui/topbar.js")),
     ("overview.js", include_bytes!("../ui/overview.js")),
     ("memory.js", include_bytes!("../ui/memory.js")),
     ("graph-model.js", include_bytes!("../ui/graph-model.js")),
@@ -97,5 +98,13 @@ mod tests {
         );
         assert!(file("../x.js").is_none());
         assert!(file("tests/model.test.mjs").is_none());
+    }
+
+    #[test]
+    fn the_top_bar_module_is_built_in() {
+        let profile = profile().unwrap();
+        let module = profile["header"]["module"].as_str().unwrap();
+        assert_eq!(module, "topbar.js");
+        assert_eq!(file(module).unwrap().1, "text/javascript; charset=utf-8");
     }
 }

@@ -6,8 +6,15 @@
 }
 .mem-tab { max-width: 1280px; }
 .mem-header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 0 0 12px; padding: 0 0 10px; border-bottom: 1px solid var(--border); }
-.mem-switch { display: inline-flex; align-items: center; gap: 6px; }
-.mem-switch select { min-width: 12em; }
+/* The top-bar module (topbar.js): right of the bar's free space, left of the theme switch; it
+   shrinks with the window (the select first), its texts hide under 760 px (hide-narrow). */
+.mem-topbar { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.mem-switch { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.mem-switch select { width: 14em; min-width: 7em; max-width: 100%; flex: 0 1 auto; }
+.mem-topbar .mem-daemon { white-space: nowrap; }
+.mem-topbar-problems { border: 0; background: none; padding: 0; font: inherit; font-size: 12.5px; color: var(--warn); cursor: pointer; white-space: nowrap; }
+.mem-topbar-problems:hover { text-decoration: underline; }
+.mem-topbar-error { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 24em; cursor: help; }
 .mem-daemon { color: var(--ok); font-size: 12.5px; }
 .mem-daemon.bad, .bad { color: var(--danger); }
 .mem-problems { color: var(--warn); font-size: 12.5px; }
