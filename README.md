@@ -16,22 +16,32 @@ telemetry. Version 0.1.0 is the first public release: early, and honest about it
 
 ## The problem
 
-Coding agents forget. Every new session starts from scratch, so you repeat yourself:
+You probably use more than one coding agent, and each of them remembers on its own, if at all:
 
-- **Rules get lost.** "Never push without asking", "new tests are fine, changing an existing test
-  needs approval". You write them down, but a rule buried among many others is easy to miss.
+- **Every agent has its own memory.** Tell Claude Code on Monday "we use pnpm, never npm", switch
+  to opencode on Thursday, and it doesn't know. Changing agents in the middle of a project means
+  repeating yourself.
+- **History is gone.** What happened in last week's session, which bug you found, what you agreed
+  on: file memory doesn't record past sessions at all.
 - **Decisions lose their why.** The agent sees *what* the code does, but not why you chose it over
   the alternative you rejected last month.
-- **History is gone.** What happened in last week's session, which bug you found, what you agreed
-  on: file memory doesn't record this at all.
-- **File memory grows, and every turn pays for it.** A `MEMORY.md`-style index is loaded into
-  every session, so the more you remember, the more context each turn costs, and the harder it is
-  for the agent to find the one entry that matters.
+- **Everything is loaded, and the one rule that matters is missed.** A `MEMORY.md`-style index
+  goes into every session: the more you remember, the more context each turn costs, and the
+  easier it is for the agent to overlook the one entry the question needs.
+- **Contradictions pile up silently.** A newer decision sits beside the older one it replaced, and
+  nothing tells you which one holds.
+- **Hosted memory wants your sessions.** A memory service in the cloud means an account, a
+  subscription or an API key, and your sessions (code, customer names, a password pasted by
+  mistake) leaving your machine.
+- **And you can't tell whether it helps.** Memory tools come with promises, not with a way to
+  check them on your own work.
 
 ## What graphersal-memory does
 
-- **One local graph for your memory.** Rules, decisions, preferences, facts and past sessions,
-  linked to each other and to the project they belong to, in your per-user data directory.
+- **One local graph memory for every agent.** Rules, decisions, preferences, facts and past
+  sessions, linked to each other and to the project they belong to, in your per-user data
+  directory. Every agent you install it for reads and writes the same memory, so a switch loses
+  nothing. No cloud, no account, no API key of ours.
 - **Search through MCP.** The agent gets a few small tools (`memories`, `memory`, `remember`,
   `forget`, `pin`, `conflicts`, `settle`, `sessions`, `session`, `recall`) and fetches the few
   entries that answer the question instead of reading everything.
