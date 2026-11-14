@@ -4,8 +4,15 @@
 graph on your machine, searched through MCP instead of loaded on every turn.**
 
 Works with Claude Code, opencode, OpenAI Codex CLI and Cursor. One binary, no account, no
-telemetry. Version 0.1.0 is the first public release: early, and honest about its limits
+telemetry. Version 0.1.0 will be the first public release: early, and honest about its limits
 ([status](#status)).
+
+> **Pre-release.** 0.1.0 is not published yet, so the install commands below work only from the
+> first release on. Until then, build it from source with Rust 1.88 or newer
+> (`cargo install --locked --git https://github.com/graphersal/graphersal-memory graphersal-memory`)
+> or take a prebuilt binary from the artifacts of a
+> [Release workflow run](https://github.com/graphersal/graphersal-memory/actions/workflows/release.yml)
+> (downloading them needs a GitHub login).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/ui-always-dark.jpg">
