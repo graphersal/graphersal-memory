@@ -11,7 +11,7 @@ use crate::coexist::{self, ServerState};
 use crate::import::{self, ImportState};
 use crate::install::{self, InstallOptions, Setup};
 use crate::install_tests::{
-    Memory, bare_setup_in, existing_home, memory_fixture, read, run_install, run_uninstall,
+    Memory, bare_setup_in, existing_home, memory_fixture, native, read, run_install, run_uninstall,
     run_wizard, setup_in, snapshot, uninstall_yes, with_programs, yes,
 };
 use crate::mcp;
@@ -209,7 +209,7 @@ fn servers_are_found_in_every_harness_and_unknown_ones_are_kept_by_default() {
          as it is",
         "plugin or hook claude-mem@thedotmack",
     ] {
-        assert!(out.contains(line), "{line}\n{out}");
+        assert!(out.contains(&native(line)), "{line}\n{out}");
     }
     assert!(!out.contains("switch it off (the file"), "{out}");
     memory.close();
@@ -310,10 +310,10 @@ fn disable_other_switches_the_entry_off_and_uninstall_puts_it_back_byte_for_byte
     assert_eq!(record["entry"], reference_entry(home.path()));
     let status = crate::commands::status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
     assert!(
-        status.contains(
+        status.contains(&native(
             "memory (Claude Code, ~/.claude.json): the reference memory server \
              (@modelcontextprotocol/server-memory); switched off by graphersal-memory install"
-        ),
+        )),
         "{status}"
     );
     assert!(!status.contains("ACTION NEEDED"), "{status}");
@@ -598,7 +598,7 @@ fn the_wizard_offers_the_choice_and_its_answers_take_effect() {
         "Other memory: memory switched off (uninstall switches it on again); 1 instruction file \
          line about memory elsewhere, never edited",
     ] {
-        assert!(out.contains(line), "{line}\n{out}");
+        assert!(out.contains(&native(line)), "{line}\n{out}");
     }
     assert!(config_json(&setup)["mcpServers"]["memory"].is_null());
     assert!(!out.contains("other memory: imported"), "{out}");
@@ -903,7 +903,7 @@ fn a_file_that_brings_back_a_forgotten_memory_is_reported_and_can_be_ignored() {
         "{doctor}"
     );
     assert!(
-        doctor.contains("`graphersal-memory import --ignore ~/"),
+        doctor.contains(&native("`graphersal-memory import --ignore ~/")),
         "{doctor}"
     );
     // Ignored: its next change is not imported; status names it; unignore imports again.
@@ -924,7 +924,10 @@ fn a_file_that_brings_back_a_forgotten_memory_is_reported_and_can_be_ignored() {
     assert_eq!(plans[0].ignored, 1);
     assert!(plans[0].changed.iter().all(|f| f.path != file));
     let status = crate::commands::status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
-    assert!(status.contains("not imported (ignored): ~/"), "{status}");
+    assert!(
+        status.contains(&native("not imported (ignored): ~/")),
+        "{status}"
+    );
     let mut sink = Vec::new();
     crate::commands::ignore_import(&setup, &file, false, &mut sink).unwrap();
     let state = ImportState::load(data.path()).unwrap();
@@ -1021,9 +1024,9 @@ fn an_item_of_another_memory_tool_keeps_its_edit_when_the_tool_changes_it() {
         "{out}"
     );
     assert!(
-        out.contains(
+        out.contains(&native(
             "~/kg/memory.jsonl changed, but its memory kg-robin was edited in graphersal-memory"
-        ),
+        )),
         "{out}"
     );
     let read = memory.call("", "memory", json!({"slug": "kg-robin"}));
@@ -1264,15 +1267,17 @@ fn status_and_doctor_show_the_other_memory_section_without_actions() {
         "{section}"
     );
     assert!(
-        section.contains(
+        section.contains(&native(
             "memory (Claude Code, ~/.claude.json): the reference memory server \
              (@modelcontextprotocol/server-memory); named read-only in the rule block \
              (graphersal-memory is the main memory)"
-        ),
+        )),
         "{section}"
     );
     assert!(
-        section.contains("~/.claude/CLAUDE.md:4 says: \"- Keep all memory in"),
+        section.contains(&native(
+            "~/.claude/CLAUDE.md:4 says: \"- Keep all memory in"
+        )),
         "{section}"
     );
     assert!(!status.contains("ACTION NEEDED"), "{status}");
@@ -1417,7 +1422,7 @@ fn claude_md_is_also_loaded_by_opencode_and_by_a_codex_fallback() {
             .map(|(p, kinds)| (p.display().to_string(), kinds))
             .collect()
     };
-    let user_md = h.join(".claude/CLAUDE.md").display().to_string();
+    let user_md = h.join(".claude").join("CLAUDE.md").display().to_string();
     let project_md = work.path().join("CLAUDE.md").display().to_string();
     // No opencode on the machine: Claude Code only.
     let files = loaded(&setup);
