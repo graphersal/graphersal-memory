@@ -311,7 +311,7 @@ vulnerabilities privately: [SECURITY.md](SECURITY.md).
 
 graphersal-memory is built on [Graphersal](https://github.com/graphersal/graphersal), an embeddable
 graph database and traversal engine in Rust with GQL and Gremlin, vector search, durable storage
-and an MCP endpoint ([site](https://graphersal.github.io)). It uses only Graphersal's public API.
+and an MCP endpoint ([site](https://graphersal.github.io)).
 
 ## Licence
 
