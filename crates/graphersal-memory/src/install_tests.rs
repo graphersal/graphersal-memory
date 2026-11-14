@@ -21,6 +21,32 @@ use crate::{hook, registry, store};
 
 /// A setup for the home `home` and the data directory `data`, with a binary path that does not
 /// need to exist.
+/// `text` with every home path in it (`~/...`, up to a space, `)`, `,`, `;`, `:`, a quote or a
+/// backtick) written with the platform's separator, as the product shows it: `~\.claude.json`
+/// on Windows, `~/.claude.json` elsewhere.
+pub(crate) fn native(text: &str) -> String {
+    if std::path::MAIN_SEPARATOR == '/' {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut in_path = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '~' && chars.peek() == Some(&'/') {
+            in_path = true;
+        } else if in_path {
+            if c.is_whitespace() || matches!(c, ')' | ',' | ';' | ':' | '"' | '`') {
+                in_path = false;
+            } else if c == '/' {
+                out.push(std::path::MAIN_SEPARATOR);
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub(crate) fn setup_in(home: &Path, data: &Path) -> Setup {
     // A machine with Claude Code's program (install refuses when no agent program is found).
     with_programs(bare_setup_in(home, data), &["claude"])
@@ -2728,7 +2754,7 @@ fn cursor_uninstall_exports_every_memory_as_markdown() {
         "{out}"
     );
     assert!(out.contains("Cursor has no file memory"), "{out}");
-    assert!(out.contains("~/.cursor/rules"), "{out}");
+    assert!(out.contains(&native("~/.cursor/rules")), "{out}");
     let dir = export.join(crate::import::claude_slug(&project));
     assert!(read(&dir.join("use-pnpm.md")).contains("use-pnpm body"));
     assert!(read(&dir.join("MEMORY.md")).contains("(use-pnpm.md)"));
@@ -3160,10 +3186,10 @@ fn a_harness_with_only_leftover_configuration_is_not_offered() {
         "{out}"
     );
     assert!(
-        out.contains(
+        out.contains(&native(
             "note: Codex: configuration found (~/.codex), but the program `codex` is not \
              installed: not offered (`--harness codex` installs anyway)"
-        ),
+        )),
         "{out}"
     );
     assert!(!out.contains("\nCodex\n"), "{out}");
@@ -3224,7 +3250,7 @@ fn harness_override_warns_and_uninstall_works_without_the_program() {
     assert_eq!(setup.installed(), vec![Kind::Codex]);
     let status = crate::commands::status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
     assert!(
-        status.contains("\nCodex:\n  configuration: ~/.codex/config.toml"),
+        status.contains(&native("\nCodex:\n  configuration: ~/.codex/config.toml")),
         "{status}"
     );
     // Uninstall without --harness: the installed harness, whether its program exists or not.
@@ -3322,7 +3348,7 @@ fn the_plan_is_grouped_by_agent_with_plain_wording() {
     );
     assert!(then.contains("Index past sessions"), "{out}");
     // The home directory is `~`.
-    assert!(out.contains("~/.claude.json"), "{out}");
+    assert!(out.contains(&native("~/.claude.json")), "{out}");
     assert!(!out.contains(&home.path().display().to_string()), "{out}");
     memory.close();
 }
@@ -3393,7 +3419,7 @@ fn the_install_report_ends_with_numbered_next_steps() {
     // The backup directory once: its path is not repeated per file.
     assert_eq!(report.matches("backups").count(), 1, "{report}");
     assert!(
-        report.contains("changed ~/.claude.json (backed up)"),
+        report.contains(&native("changed ~/.claude.json (backed up)")),
         "{report}"
     );
     assert!(report.contains("\n\nClaude Code:\n"), "{report}");
@@ -3440,7 +3466,7 @@ fn status_has_sections_memory_first_and_repeats_the_action_needed_last() {
     let codex_at = status.find("\n\nCodex:\n").unwrap();
     assert!(memory_at < claude_at && claude_at < codex_at, "{status}");
     assert!(
-        status.contains("  user configuration: ~/.claude.json\n"),
+        status.contains(&native("  user configuration: ~/.claude.json\n")),
         "{status}"
     );
     assert!(
@@ -3506,7 +3532,7 @@ fn uninstall_names_only_what_it_changes_and_explains_a_missing_terminal() {
         "{out}"
     );
     assert!(
-        out.contains("\n\nClaude Code:\n  - ~/.claude.json"),
+        out.contains(&native("\n\nClaude Code:\n  - ~/.claude.json")),
         "{out}"
     );
     memory.close();
@@ -3558,11 +3584,15 @@ fn install_refuses_when_no_agent_program_is_found() {
             "{out}"
         );
         assert!(
-            out.contains("configuration found without its program: Claude Code (~/.claude)"),
+            out.contains(&native(
+                "configuration found without its program: Claude Code (~/.claude)"
+            )),
             "{out}"
         );
         assert!(
-            out.contains("configuration found without its program: Codex (~/.codex)"),
+            out.contains(&native(
+                "configuration found without its program: Codex (~/.codex)"
+            )),
             "{out}"
         );
         assert!(
@@ -4157,7 +4187,8 @@ fn an_import_reports_conflicts_and_files_and_never_brings_back_a_settled_memory(
                "summary": "We install dependencies with pnpm instead of npm or yarn",
                "body": "Use pnpm install.", "supersedes": ["use-npm", "use-yarn"]}),
     );
-    let edit = newer["edit_files"].to_string();
+    // JSON text escapes a Windows path's backslashes.
+    let edit = newer["edit_files"].to_string().replace("\\\\", "\\");
     assert!(
         edit.contains(&npm_file) && edit.contains(&yarn_file),
         "{newer}"
@@ -4276,7 +4307,10 @@ fn h1_install_refuses_a_data_dir_that_holds_other_files() {
         "{err}"
     );
     assert!(
-        err.contains("Documents/graphersal-memory"),
+        err.contains(&format!(
+            "Documents{}graphersal-memory",
+            std::path::MAIN_SEPARATOR
+        )),
         "names a way out: {err}"
     );
     assert_eq!(snapshot(home.path()), before, "nothing changed");
@@ -5206,7 +5240,10 @@ fn note23_the_wizard_shows_paths_under_the_home_directory_with_a_tilde() {
     let setup = setup_in(home.path(), data.path());
     let memory = Memory::open(data.path());
     let (_, out) = run_wizard(&setup, &memory, "\n\nn\n");
-    assert!(out.contains("false in ~/.claude/settings.json"), "{out}");
+    assert!(
+        out.contains(&native("false in ~/.claude/settings.json")),
+        "{out}"
+    );
     assert!(!out.contains(&home.path().display().to_string()), "{out}");
     memory.close();
 }
