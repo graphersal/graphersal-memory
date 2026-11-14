@@ -7,7 +7,7 @@
 /// exact version), as a literal for `concat!`.
 macro_rules! engine_version {
     () => {
-        "0.6.1"
+        "0.6.2"
     };
 }
 pub(crate) use engine_version;
