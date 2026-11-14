@@ -443,9 +443,260 @@ pub fn remove_table_key(text: &str, table: &[&str], key: &str) -> Result<Option<
     Ok(None)
 }
 
+/// The end (one past its `]`) of the array value starting at `start` (its `[`), skipping
+/// strings and comments; `None` when it does not close.
+fn array_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'[' => depth += 1,
+            b']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            b'#' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            quote @ (b'"' | b'\'') => {
+                let triple = text[i..].starts_with(if quote == b'"' { "\"\"\"" } else { "'''" });
+                let close = if triple {
+                    if quote == b'"' { "\"\"\"" } else { "'''" }
+                } else if quote == b'"' {
+                    "\""
+                } else {
+                    "'"
+                };
+                i += close.len();
+                loop {
+                    if i >= bytes.len() {
+                        return None;
+                    }
+                    if quote == b'"' && bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if text[i..].starts_with(close) {
+                        i += close.len() - 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `text` with the array of strings `table.key` set to `values`: its value replaced in place
+/// (in `[table]`, or as `table.key = [...]` at the top level), else a `key = [...]` line inserted
+/// right after the `[table]` header line. `None` when the table is not written as a header line
+/// or a dotted top-level key there (inline tables, no table at all), or the value is not an
+/// array. The result is checked: only that value differs.
+pub fn set_string_array(
+    text: &str,
+    table: &str,
+    key: &str,
+    values: &[String],
+) -> Result<Option<String>, String> {
+    let before = parse(text)?;
+    let existing = &before[table][key];
+    if !existing.is_null() && !existing.is_array() {
+        return Ok(None);
+    }
+    let mut expected = before.clone();
+    if !expected[table].is_object() {
+        return Ok(None);
+    }
+    expected[table][key] = Value::from(values.to_vec());
+    let check = |new: String| (parse(&new).ok() == Some(expected.clone())).then_some(new);
+    let array = strings(values);
+    let dotted = format!("{table}.{key}");
+    let mut current_table: Option<String> = Some(String::new());
+    let mut header_end = None;
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            current_table = (!trimmed.starts_with("[[")).then(|| {
+                trimmed
+                    .split('#')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .split('.')
+                    .map(|part| part.trim().trim_matches('"').trim_matches('\''))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            });
+            if current_table.as_deref() == Some(table) {
+                header_end = Some(at + line.len());
+            }
+        } else if !existing.is_null() {
+            let found = match current_table.as_deref() {
+                Some(name) if name == table => assignment(line, key),
+                Some("") => assignment(line, &dotted),
+                _ => None,
+            };
+            if let Some((value_start, rest)) = found {
+                let lead = rest.len() - rest.trim_start().len();
+                let start = at + value_start + lead;
+                if !text[start..].starts_with('[') {
+                    return Ok(None);
+                }
+                let Some(end) = array_end(text, start) else {
+                    return Ok(None);
+                };
+                return Ok(check(format!("{}{array}{}", &text[..start], &text[end..])));
+            }
+        }
+        at += line.len();
+    }
+    if !existing.is_null() {
+        return Ok(None);
+    }
+    let Some(end) = header_end else {
+        return Ok(None);
+    };
+    let newline = if text[..end].ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    Ok(check(format!(
+        "{}{newline}{key} = {array}\n{}",
+        &text[..end],
+        &text[end..]
+    )))
+}
+
+/// `text` without the line(s) setting the array `key` in `[table]` (or `table.key` at the top
+/// level), or `None` when there is no such assignment. The result is checked.
+pub fn remove_array_key(text: &str, table: &str, key: &str) -> Result<Option<String>, String> {
+    let before = parse(text)?;
+    if !before[table][key].is_array() {
+        return Ok(None);
+    }
+    let mut expected = before.clone();
+    if let Some(object) = expected[table].as_object_mut() {
+        object.remove(key);
+    }
+    let dotted = format!("{table}.{key}");
+    let mut current_table = String::new();
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            current_table = trimmed
+                .trim_start_matches('[')
+                .split(']')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+        } else {
+            let found = if current_table == table {
+                assignment(line, key)
+            } else if current_table.is_empty() {
+                assignment(line, &dotted)
+            } else {
+                None
+            };
+            if let Some((value_start, rest)) = found {
+                let lead = rest.len() - rest.trim_start().len();
+                let start = at + value_start + lead;
+                let Some(end) = array_end(text, start) else {
+                    return Ok(None);
+                };
+                // To the end of the array's last line.
+                let line_end = text[end..].find('\n').map_or(text.len(), |n| end + n + 1);
+                let new = format!("{}{}", &text[..at], &text[line_end..]);
+                let mut expected = expected.clone();
+                if expected[table].as_object().is_some_and(|o| o.is_empty())
+                    && parse(&new).is_ok_and(|v| v[table].is_null())
+                    && let Some(object) = expected.as_object_mut()
+                {
+                    object.remove(table);
+                }
+                return Ok((parse(&new).ok() == Some(expected)).then_some(new));
+            }
+        }
+        at += line.len();
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_string_array_is_set_in_place_inserted_and_removed() {
+        let names = vec!["a".to_string(), "b-c".to_string()];
+        let text =
+            "x = 1\n\n[tools]\nalways_load = [\n  \"mine\", # keep\n  'x]y',\n]\nother = 2\n";
+        let new = set_string_array(text, "tools", "always_load", &names)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            new,
+            "x = 1\n\n[tools]\nalways_load = [\"a\", \"b-c\"]\nother = 2\n"
+        );
+        let removed = remove_array_key(&new, "tools", "always_load")
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed, "x = 1\n\n[tools]\nother = 2\n");
+        // A table without the key gets it after its header.
+        let inserted = set_string_array("[tools]\nother = 2\n", "tools", "always_load", &names)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            inserted,
+            "[tools]\nalways_load = [\"a\", \"b-c\"]\nother = 2\n"
+        );
+        // The dotted top-level form.
+        let dotted = set_string_array(
+            "tools.always_load = [\"m\"]\n[x]\n",
+            "tools",
+            "always_load",
+            &names,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(dotted, "tools.always_load = [\"a\", \"b-c\"]\n[x]\n");
+        // No table, an inline table, or another type: not edited here.
+        assert_eq!(
+            set_string_array("x = 1\n", "tools", "always_load", &names).unwrap(),
+            None
+        );
+        assert_eq!(
+            set_string_array(
+                "tools = { always_load = [] }\n",
+                "tools",
+                "always_load",
+                &names
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            set_string_array("[tools]\nalways_load = 3\n", "tools", "always_load", &names).unwrap(),
+            None
+        );
+        assert_eq!(
+            remove_array_key("x = 1\n", "tools", "always_load").unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn a_table_boolean_is_inserted_replaced_and_removed() {

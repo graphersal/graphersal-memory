@@ -788,6 +788,30 @@ pub fn servers(setup: &Setup, project: Option<&Path>) -> Vec<Server> {
             &mut out,
         );
     }
+    // CodeWhale: its mcp.json (`servers` or `mcpServers`) and the project's .codewhale/mcp.json.
+    let mut codewhale_files = vec![(setup.codewhale.mcp_file.clone(), None)];
+    if let Some(root) = project {
+        codewhale_files.push((
+            root.join(".codewhale").join("mcp.json"),
+            Some(root.display().to_string()),
+        ));
+    }
+    for (file, owner) in codewhale_files {
+        let value = crate::install::read_json(&file, &mut Vec::new());
+        for key in ["servers", "mcpServers"] {
+            servers_in(
+                setup,
+                Kind::CodeWhale,
+                &file,
+                &[key],
+                &value[key],
+                owner.clone(),
+                &none,
+                if owner.is_none() { &off_by_us } else { &[] },
+                &mut out,
+            );
+        }
+    }
     // Entries install switched off by removing them (Claude Code, Cursor): from the records.
     for (kind, file, name, record) in off_by_us {
         if out
@@ -969,6 +993,32 @@ pub fn built_in(setup: &Setup) -> Vec<BuiltIn> {
             });
         }
     }
+    if present(Kind::CodeWhale) {
+        let on = crate::codewhale::memory_on(
+            &read_text(&setup.codewhale.config_file)
+                .ok()
+                .flatten()
+                .and_then(|text| tomledit::parse(&text).ok())
+                .unwrap_or(Value::Null),
+            setup.codewhale.memory_env_on,
+        );
+        let store = &setup.codewhale.memory_store;
+        let entries = crate::codewhale::memory::read(store)
+            .map(|e| e.len())
+            .unwrap_or(0);
+        if on || store.is_file() {
+            out.push(BuiltIn {
+                harness: Kind::CodeWhale,
+                text: format!(
+                    "CodeWhale's memory: {}; {entries} reviewed entr{} in {}",
+                    if on { "on" } else { "off" },
+                    if entries == 1 { "y" } else { "ies" },
+                    setup.show(&store.display().to_string())
+                ),
+                entries,
+            });
+        }
+    }
     if present(Kind::Cursor) {
         out.push(BuiltIn {
             harness: Kind::Cursor,
@@ -1096,6 +1146,11 @@ pub fn instruction_files(setup: &Setup, project: Option<&Path>) -> Vec<(PathBuf,
                 .collect()
         })
         .unwrap_or_default();
+    // CodeWhale: the global file it loads (the first of its candidates).
+    add(
+        crate::codewhale::instruction_file(&setup.codewhale.home),
+        Kind::CodeWhale,
+    );
     // Cursor: user rules other than ours.
     for file in md_in(&setup.cursor.cursor_dir.join("rules"), "mdc") {
         if file != setup.cursor.rules_file {
@@ -1109,7 +1164,7 @@ pub fn instruction_files(setup: &Setup, project: Option<&Path>) -> Vec<(PathBuf,
         for file in md_in(&root.join(".claude").join("rules"), "md") {
             add(file, Kind::ClaudeCode);
         }
-        for kind in [Kind::Codex, Kind::OpenCode, Kind::Cursor] {
+        for kind in [Kind::Codex, Kind::OpenCode, Kind::Cursor, Kind::CodeWhale] {
             add(root.join("AGENTS.md"), kind);
         }
         add(root.join("AGENTS.override.md"), Kind::Codex);
@@ -1517,6 +1572,7 @@ fn opencode_switch(path: &[String]) -> (&'static str, bool) {
 /// - opencode: `"enabled": false` (1.x) or `"disabled": true` (2.x) (`how: flag`, with the
 ///   value before, `null` when absent).
 /// - Codex: `enabled = false` in its table (`how: toml`, with the value before).
+/// - CodeWhale: `"disabled": true` (`how: flag`, `off: true`, with the value before).
 pub fn disable_edit(server: &Server, text: &str) -> Result<Option<(String, Value)>, String> {
     let path: Vec<&str> = server.path.iter().map(String::as_str).collect();
     match server.harness {
@@ -1538,6 +1594,22 @@ pub fn disable_edit(server: &Server, text: &str) -> Result<Option<(String, Value
                     json!({"how": "flag", "path": server.path, "key": key, "previous": previous}),
                 )
             }))
+        }
+        Kind::CodeWhale => {
+            let previous = server.entry.get("disabled").cloned().unwrap_or(Value::Null);
+            let mut entry_path = path.clone();
+            entry_path.push(&server.name);
+            Ok(
+                jsonedit::set_member(text, &entry_path, "disabled", &json!(true))?.map(
+                    |(new, _)| {
+                        (
+                            new,
+                            json!({"how": "flag", "path": server.path, "key": "disabled",
+                                   "off": true, "previous": previous}),
+                        )
+                    },
+                ),
+            )
         }
         Kind::Codex => {
             let previous = server.entry.get("enabled").cloned().unwrap_or(Value::Null);
@@ -1586,7 +1658,10 @@ pub fn restore_edit(
         Some("flag") => {
             let parsed = jsonedit::value_of(text).map_err(|err| err.to_string())?;
             let entry = &path.iter().fold(&parsed, |v, k| &v[*k])[name];
-            let (_, off) = opencode_switch(&path.iter().map(|p| p.to_string()).collect::<Vec<_>>());
+            let off = match &record["off"] {
+                Value::Bool(off) => *off,
+                _ => opencode_switch(&path.iter().map(|p| p.to_string()).collect::<Vec<_>>()).1,
+            };
             if entry[key] != json!(off) {
                 return Ok(None);
             }
@@ -1634,6 +1709,7 @@ pub fn off_by_hand(server: &Server) -> String {
         }
         (Kind::Codex, _) => format!("set `enabled = false` in [mcp_servers.{}]", server.name),
         (Kind::Cursor, _) => format!("switch {} off in Cursor Settings, MCP", server.name),
+        (Kind::CodeWhale, _) => format!("`codewhale mcp disable {}`", server.name),
     }
 }
 

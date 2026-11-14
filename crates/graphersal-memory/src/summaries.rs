@@ -395,7 +395,8 @@ pub fn harness_args(command: &[String]) -> Vec<String> {
 /// A Codex command (`codex exec ...`) runs with `--json --ephemeral --sandbox read-only` in a
 /// `CODEX_HOME` of its own in `work_dir` (the model settings of `codex_home`'s `config.toml`,
 /// a copy of its login; no MCP servers, hooks, rules or history), and its events are read as
-/// the answer.
+/// the answer. A CodeWhale command (`codewhale exec ...`) runs with `--json --prompt-file -`
+/// (a one-shot run: no tools, no hooks, no saved session) and its summary object is read.
 pub fn run_harness_with(
     command: &[String],
     prompt: &str,
@@ -413,6 +414,12 @@ pub fn run_harness_with(
     }
     let opencode = crate::opencode::is_opencode(command);
     let codex = crate::codex::is_codex(command);
+    let codewhale = crate::codewhale::is_codewhale(command);
+    if codewhale {
+        // A one-shot run has no tools, fires no hooks and saves no session: the user's own
+        // configuration (provider, model, keys) in our working directory.
+        args = crate::codewhale::exec_args(&args);
+    }
     let mut env: Vec<(String, String)> = vec![(HOOK_ENV.to_string(), "off".to_string())];
     if codex {
         args = crate::codex::exec_args(&args);
@@ -459,6 +466,12 @@ pub fn run_harness_with(
     } else if codex {
         crate::codex::normalize_exec_output(&output.stdout, crate::codex::local_model(command))
             .to_string()
+    } else if codewhale {
+        crate::codewhale::normalize_exec_output(
+            &output.stdout,
+            crate::codewhale::local_model(command),
+        )
+        .to_string()
     } else {
         output.stdout.clone()
     };
@@ -498,7 +511,7 @@ pub fn parse_answer(text: &str) -> Result<Summary, String> {
 
 /// The JSON object in `text`: the whole text, or from its first `{` to its last `}` (a model
 /// may wrap it in a code fence).
-fn json_in(text: &str) -> Option<Value> {
+pub fn json_in(text: &str) -> Option<Value> {
     let text = text.trim();
     if let Ok(value @ Value::Object(_)) = serde_json::from_str(text) {
         return Some(value);

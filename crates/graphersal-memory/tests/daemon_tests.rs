@@ -1329,3 +1329,49 @@ fn daemon_restart_starts_a_new_daemon_and_open_sessions_reconnect_to_it() {
     assert!(text.starts_with("daemon: was not running"), "{text}");
     assert!(env.status().is_some());
 }
+
+/// CodeWhale kills its MCP servers when it exits, before our shim can send the session end
+/// (seen live with CodeWhale 0.10.2): the daemon itself indexes the project's CodeWhale sessions
+/// written while the connection was open, as ended, when the connection closes.
+#[test]
+fn a_killed_codewhale_connection_still_ends_its_sessions() {
+    let env = Env::new("120s");
+    let project = env.root.join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = support::canonical(&project);
+    let mut shim = env.spawn_shim_env(
+        &project.display().to_string(),
+        &[],
+        &[("GRAPHERSAL_MEMORY_HARNESS", "codewhale")],
+    );
+    let init = shim.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {},
+               "clientInfo": {"name": "codewhale", "version": "0.10.2"}}),
+    );
+    assert!(init["result"].is_object(), "{init}");
+    shim.notify("notifications/initialized");
+    // A turn of CodeWhale in the project, saved while the connection is open.
+    let sessions = env.root.join(".codewhale").join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let id = "0a1b2c3d-0000-4000-8000-0000000000aa";
+    let document = json!({
+        "schema_version": 1,
+        "metadata": {"id": id, "title": "Fix the parser", "created_at": "2026-11-14T10:00:00Z",
+                     "updated_at": "2026-11-14T10:01:00Z", "workspace": project},
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Fix the parser."}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Fixed it."}]}
+        ]
+    });
+    std::fs::write(sessions.join(format!("{id}.json")), document.to_string()).unwrap();
+    // CodeWhale exits: the shim is killed, its session end never sent.
+    shim.child.kill().unwrap();
+    let _ = shim.child.wait();
+    let state = env.data_dir().join("sessions").join("codewhale.json");
+    // The indexer saves its state, then logs the run: wait for both.
+    env.wait_for("the CodeWhale session to be indexed", || {
+        std::fs::read_to_string(&state).is_ok_and(|text| text.contains(id))
+            && env.log().contains("1 indexed (1 turns)")
+    });
+}

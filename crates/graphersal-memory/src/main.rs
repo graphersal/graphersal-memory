@@ -14,6 +14,7 @@ mod bench_tests;
 mod catalog;
 mod cli;
 mod client;
+mod codewhale;
 mod codex;
 mod coexist;
 #[cfg(test)]

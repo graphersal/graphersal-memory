@@ -210,6 +210,7 @@ fn setup_with(home: &Path, data: &Path, endpoint: &str) -> Setup {
         opencode: crate::opencode::OpenCodePaths::of_home(home),
         codex: crate::codex::CodexPaths::of_home(home),
         cursor: crate::cursor::CursorPaths::of_home(home, data),
+        codewhale: crate::codewhale::CodeWhalePaths::of_home(home),
         // A machine with Claude Code's program (install refuses when none is found).
         search_path: Some({
             let bin = std::env::temp_dir().join(format!("gmm{}.bin", std::process::id()));

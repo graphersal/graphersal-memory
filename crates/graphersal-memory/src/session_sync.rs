@@ -70,6 +70,7 @@ pub fn plan(setup: &Setup, harness: &str, cwd: &Path, project: &Path) -> Plan {
             Kind::OpenCode => setup.opencode.db.is_file(),
             Kind::Codex => setup.codex.sessions.is_dir(),
             Kind::Cursor => setup.cursor.registry.is_file(),
+            Kind::CodeWhale => setup.codewhale.sessions.is_dir(),
         })
         .map(|kind| Request::for_harness(*kind, setup.agent_of(*kind).projects_dir()))
         .collect();
@@ -130,9 +131,35 @@ pub fn start(
 }
 
 /// The session end: queues the indexing.
+#[cfg(test)]
 pub fn end(plan: &Plan, enqueue: &mut Enqueue<'_>) -> Done {
+    end_since(plan, None, enqueue)
+}
+
+/// The session end of a shim that started at `since` (seconds since the epoch): queues the
+/// indexing, with CodeWhale's sessions of the shim's directories written since then marked
+/// ended. CodeWhale has no hooks of ours, and its stdio MCP servers live as long as the TUI
+/// (`crate::codewhale`), so the connection's end is the end of the sessions it served. A
+/// session of a second CodeWhale in the same directory may be marked too; it is indexed again
+/// when it changes.
+pub fn end_since(plan: &Plan, since: Option<u64>, enqueue: &mut Enqueue<'_>) -> Done {
     let mut done = Done::default();
-    queue(plan, enqueue, &mut done);
+    let mut plan = plan.clone();
+    if let Some(since) = since {
+        for request in &mut plan.requests {
+            if request.harness != Kind::CodeWhale {
+                continue;
+            }
+            for dir in &plan.dirs {
+                for path in
+                    crate::codewhale::sessions::written_since(&request.projects_dir, dir, since)
+                {
+                    request.ended.insert(path);
+                }
+            }
+        }
+    }
+    queue(&plan, enqueue, &mut done);
     done
 }
 
@@ -183,6 +210,44 @@ mod tests {
         let again = super::plan(&setup, "claude-code", home.path(), home.path());
         assert_eq!(again.requests.len(), 1);
         assert_eq!(again.dirs.len(), 1);
+    }
+
+    #[test]
+    fn codewhale_sessions_of_the_directory_end_with_the_connection() {
+        let home = TempDir::new("ss-cw-home");
+        let data = TempDir::new("ss-cw-data");
+        let setup = setup_in(home.path(), data.path());
+        let work = home.path().join("work");
+        let session = crate::codewhale::sessions::tests::write_fixture(
+            &setup.codewhale.sessions,
+            &work.display().to_string(),
+        );
+        crate::codewhale::sessions::tests::write_fixture(
+            &home.path().join("other-sessions"),
+            "/elsewhere",
+        );
+        let plan = plan(&setup, "codewhale", &work, &work);
+        assert_eq!(plan.requests.len(), 1);
+        assert_eq!(plan.requests[0].harness, Kind::CodeWhale);
+        let mut seen = Vec::new();
+        end_since(&plan, Some(0), &mut |request: Request| {
+            seen.push(request);
+            Ok(())
+        });
+        assert!(seen[0].ended.contains(&session), "{:?}", seen[0]);
+        // A session last written before the shim started is not its own.
+        let mut later = Vec::new();
+        end_since(&plan, Some(u64::MAX), &mut |request: Request| {
+            later.push(request);
+            Ok(())
+        });
+        assert!(later[0].ended.is_empty());
+        let mut plain = Vec::new();
+        end(&plan, &mut |request: Request| {
+            plain.push(request);
+            Ok(())
+        });
+        assert!(plain[0].ended.is_empty());
     }
 
     #[test]

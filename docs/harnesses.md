@@ -3,7 +3,8 @@
 > graphersal-memory 0.1.0 supports Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI and Cursor
 > (Cursor without summaries and `bench`, and checked against its documentation and fixtures only:
 > a live check is pending). Any of them can be installed at once and share one store and one
-> daemon.
+> daemon. CodeWhale support (built for the next release) is a **preview**: built from CodeWhale's
+> source (v0.10.2), tested against fixtures and run live once on macOS (details in its section).
 
 Every harness below supports MCP, so the memory tools work the same way everywhere. What differs is
 how graphersal-memory is installed into the harness, where the harness keeps its rules and
@@ -15,6 +16,7 @@ transcripts, and whether it has hooks.
 | opencode 1.x and 2.x | install, rule file, session plugin, past sessions, opt-in summaries, bench | 1.x: members of `mcp`, 2.x: members of `mcp.servers`, in `~/.config/opencode/opencode.json(c)` (JSONC kept), edited in place with a backup | a rules file of our own, listed in `instructions` | its SQLite database (`~/.local/share/opencode/opencode.db`, both lines' tables), read-only | one plugin file for both lines: a session's start, and shutdown |
 | OpenAI Codex CLI | install, rule block, hooks, past sessions, opt-in summaries, bench with a local model | one managed block of `[mcp_servers.*]` tables in `~/.codex/config.toml` (`$CODEX_HOME`), edited as text with a backup | a marked block in `~/.codex/AGENTS.md` (or `AGENTS.override.md` when that is the one Codex loads) | its rollout files (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`), read-only | SessionStart / SessionEnd in `~/.codex/hooks.json` (run once you trust them in `/hooks`) |
 | Cursor | install, rule file, hooks, past sessions the hooks report (no summaries or bench through Cursor; not yet checked with a live Cursor) | a member of `mcpServers` in `~/.cursor/mcp.json`, edited in place with a backup | a rule file of our own, `~/.cursor/rules/graphersal-memory.mdc` (`alwaysApply: true`) | the transcripts its hooks name (`transcript_path`), read-only | sessionStart / sessionEnd in `~/.cursor/hooks.json` |
+| CodeWhale (preview) | install, rule block, past sessions, the import of its own memory, opt-in summaries (no bench through CodeWhale yet; run live once, on macOS) | members of `servers` (or `mcpServers`) in `~/.codewhale/mcp.json`, edited in place with a backup; our tools in `[tools] always_load` of `~/.codewhale/config.toml` | a marked block in `~/.codewhale/AGENTS.md` (or the global file CodeWhale loads) | its saved sessions (`~/.codewhale/sessions/<id>.json`), read-only | none: the MCP connection marks the start and end |
 
 The rule block tells the agent how to use the memory tools and which memory language to use; it
 holds none of your memories. The memories that always apply reach the agent through the start
@@ -657,6 +659,131 @@ budget could not be kept and a run could not be sandboxed, so summaries and `ben
 Cursor command. With Cursor alone, summaries stay off unless another harness's command
 (`claude -p`, `opencode run`, `codex exec`) is installed and set as `summaries.harness_command`;
 the raw turns are indexed either way.
+
+## CodeWhale (preview)
+
+[CodeWhale](https://github.com/Hmbown/CodeWhale) is an open-source terminal coding agent
+(formerly "DeepSeek TUI"; DeepSeek, Claude, GPT or local models). Built against the source of
+release **v0.10.2** (2026-10-24); each fact below names the file it comes from. CodeWhale moves
+fast (daily commits, a rename in 2026); a later version may differ.
+
+**Live run (2026-11-14, CodeWhale 0.10.2 from Homebrew, macOS arm64, `openai/gpt-oss-20b` in LM
+Studio):** installed beside Claude Code and opencode on one store (their files untouched); the
+MCP server connected (on the first start after install it showed "disconnected" once and was
+connected by hand in `/mcp`; on every later start it connected by itself); the model listed the
+memory tools and called `memories` and `recall` against the shared store; asked "How should I
+write tests that check file sizes?" without a word about memory, it quoted the user's rule from
+the start context (and then applied it poorly: a model's quality, not the delivery); a session was
+indexed in the second CodeWhale exited; `status` showed every part installed. Not yet seen live:
+a memory written through CodeWhale, the import of its own memory, summaries through `codewhale
+exec`, Linux and Windows. [codewhale-live-check.md](codewhale-live-check.md) is the checklist.
+
+### Where CodeWhale keeps things
+
+- **Home**: `$CODEWHALE_HOME` when set, else `~/.codewhale` (the home directory being `HOME`, then
+  `USERPROFILE`; `crates/paths/src/lib.rs`). Without `CODEWHALE_HOME`, a file that exists only
+  under the old `~/.deepseek` is read from there, so install edits the file CodeWhale actually
+  reads: a new `~/.codewhale/mcp.json` beside an old `~/.deepseek/mcp.json` would hide the old
+  one.
+- **MCP servers**: `mcp.json` in the home (`CODEWHALE_MCP_CONFIG`, `DEEPSEEK_MCP_CONFIG` or
+  `mcp_config_path` in `config.toml` move it), strict JSON, the servers under `servers` or
+  `mcpServers` (a file with both does not parse; install refuses it), each `{command, args, env,
+  disabled}` (`crates/tui/src/mcp.rs`). The file must be a regular file: CodeWhale refuses a
+  symbolic link (`doctor` says so). The model sees a tool as `mcp_<server>_<tool>` with the
+  server's name unchanged, so ours are `mcp_graphersal-memory_memories` and so on.
+- **Deferred tools**: CodeWhale loads every MCP tool only after the model searched for it
+  (`tool_search`), unless its exact name is listed in `[tools] always_load` of `config.toml`
+  (`crates/tui/src/core/engine/tool_catalog.rs`). Install lists our `use` tools there, so the
+  memory is there from the first turn; the rule block also tells the model to `tool_search`
+  `graphersal-memory` if the tools are missing. Listing them costs their descriptions on every
+  turn.
+- **The start context**: CodeWhale gives the model a server's MCP instructions as a marked,
+  non-authoritative runtime note, cut after 4,096 bytes (`crates/mcp/src/lib.rs`,
+  `crates/tui/src/runtime_handoff.rs`). Our entry sets `GRAPHERSAL_MEMORY_HARNESS=codewhale` in
+  its `env`, so our server knows it runs under CodeWhale and cuts the start context to fit, as it
+  does for Claude Code without its hook (characters are counted; text beyond ASCII may still be
+  cut by CodeWhale). Seen live: the memories arrived and the model used them unasked. To see
+  what a session got, look for `mcp_server_instructions` in its `~/.codewhale/sessions/<id>.json`.
+- **Rules**: one global instruction file, the first that exists of `~/.codewhale/AGENTS.md`,
+  `~/.agents/AGENTS.md`, `~/.deepseek/AGENTS.md` (then the same names `instructions.md`), always
+  under the home directory, even with `CODEWHALE_HOME`; it is loaded before the project's
+  `AGENTS.md` files (`crates/tui/src/project_context.rs`). **All instructions share one budget of
+  48 KiB**, trimmed from the front: when a project's `AGENTS.md` files are large, the global file
+  (and our rule block in it) is dropped first. `doctor` warns when the current project's files
+  leave no room; the memory tools stay loaded through `always_load` either way.
+- **Session start and end**: CodeWhale has `session_start`/`session_end` hooks, but they run only
+  with `[hooks] enabled = true` (a `config.toml` without a `[hooks]` table runs no hook at all)
+  and carry a per-launch id that is not the saved session's (`crates/tui/src/hooks/executor.rs`).
+  So install adds no hooks. CodeWhale starts its stdio MCP servers with the TUI and keeps them
+  for the whole run, across `/new` and `/resume` (`docs/MCP.md`, "Connection Lifecycle"), so the
+  MCP connection does the hooks' work: at its start the indexing of finished sessions is queued;
+  when CodeWhale exits it kills our server at once (seen live), so the daemon, which sees the
+  connection close, indexes that project's CodeWhale sessions written meanwhile as ended. A
+  session left behind (a crash, a second CodeWhale in the same project) is indexed once
+  unchanged for 30 minutes.
+- **Tool approvals**: CodeWhale asks before every call of a tool of an MCP server you
+  configured; "Allow for this conversation" lasts for the run, per tool, so a session asks once
+  for each memory tool it uses. In 0.10.2 nothing makes that permanent: the `allow` rules of
+  `~/.codewhale/permissions.toml` apply to shell commands and file tools only
+  (`crates/tui/src/core/engine/turn_loop.rs`; `/permissions` lists rules for MCP tools but they do
+  not apply, seen live), and a tool's `readOnlyHint` counts only for reviewed plugins
+  (`crates/tui/src/mcp.rs`). Full Access (Shift+Tab) asks for nothing at all, shell included;
+  install changes none of this.
+- **Local models**: CodeWhale's system prompt and tool list do not fit an 8,192-token context
+  (LM Studio's default answered "the number of tokens to keep from the initial prompt is greater
+  than the context length"); load the model with 32,768 or more
+  (`lms load <model> --context-length 32768`).
+- **Sessions**: one JSON document per session, `<home>/sessions/<uuid>.json`, rewritten whole
+  after every turn (`crates/tui/src/session_manager.rs`). The reader takes the active branch of
+  the session's journal (with its times; else the `messages`): your prompts, the assistant's
+  text, tool names, files edited (`write_file`, `edit_file`, `apply_patch`), the memories our
+  tools wrote and CodeWhale's compaction summaries; thinking, tool results and the runtime notes
+  CodeWhale adds as user messages (`<codewhale:runtime_event ...>`) are not read.
+  Sub-agents are not saved as sessions. A plain one-shot `codewhale exec` saves nothing.
+- **Memory**: CodeWhale has its own memory, off by default (`[memory] enabled = true`, `[memory]
+  backend = "native"`, or `CODEWHALE_MEMORY`/`DEEPSEEK_MEMORY`). Its store is SQLite,
+  `~/.codewhale/memory/store.sqlite3` (the `MEMORY.md` paths its `docs/MEMORY.md` names are only
+  labels in v0.10.2; `crates/runtime/src/native_memory.rs`). What the model writes there stays a
+  candidate until you review it. When it is on, the wizard offers to switch it off (`enabled =
+  false`; uninstall switches it on again). A `backend` or environment switch is not changed: the
+  plan says how. Its reviewed entries (`active`, not hidden) are imported read-only as
+  `codewhale-<title>-<id>` memories: global ones as global memories, a repository's ones into
+  that project, found by the SHA-256 of the repository's `origin` URL as CodeWhale computes it.
+  Entries of a repository graphersal-memory has not seen yet are left out until a session ran
+  there. The store is never written.
+
+### What `install` writes
+
+| File | What | How it is recognised |
+|---|---|---|
+| `~/.codewhale/mcp.json` | `graphersal-memory` (`{"command": <this binary>, "args": ["mcp", "--profile", "use"], "env": {"GRAPHERSAL_MEMORY_HARNESS": "codewhale"}, "connect_timeout": 60}`) and `graphersal-memory-develop` with `"disabled": true` (`--enable-develop` switches it on), under the key the file uses | the command |
+| `~/.codewhale/config.toml` | `[tools] always_load` with our tool names: a managed block when the file has no `tools` table, else our names appended to your list in place (your list recorded, restored by uninstall); and `[memory] enabled = false` only when you agreed | the marker lines; the recorded names |
+| `~/.codewhale/AGENTS.md` (or the global file CodeWhale loads) | the managed rule block, after your own text | the marker lines; a hand edit inside is a conflict |
+
+Backups, the state (`<data dir>/install/codewhale.json`) and the byte-identical `uninstall` of an
+untouched file work as for Claude Code. CodeWhale edits `config.toml` itself (through
+`toml_edit`, which keeps comments, so our marker lines stay); then uninstall takes out only our
+block, our names and the memory switch, and CodeWhale's own settings stay.
+
+### `uninstall` and the export
+
+CodeWhale's own memory is a SQLite store whose entries need your review, so graphersal-memory does
+not write into it. Uninstall exports every memory as readable Markdown under
+`~/graphersal-memory-export/codewhale/` (per project `MEMORY.md` and one file per memory,
+`global.md`). It is not loaded automatically; paste what you need into `~/.codewhale/AGENTS.md`
+or a project's `AGENTS.md`. `graphersal-memory export --to-files --harness codewhale` writes it
+again.
+
+### Summaries through `codewhale exec`; `bench` planned
+
+With summaries on and CodeWhale alone, they run through `codewhale exec --json --prompt-file -`
+with your own provider and model. A one-shot run has no tools, fires no hooks and saves no session
+(`crates/tui/src/exec_agent.rs`), so it runs with your configuration in
+`<data dir>/sessions/harness`. CodeWhale reports tokens but no cost: each call counts the
+estimate against the monthly budget, except with a local provider named in the command
+(`codewhale exec --provider ollama`, also `vllm`, `sglang`, `ds4`, `lm-studio`), which counts $0.
+`bench` refuses a CodeWhale command for now: runs with tools are saved as sessions in your
+CodeWhale home, and a run in a home of its own would need a copy of your provider credentials.
 
 ## Windows
 

@@ -87,10 +87,11 @@ fn harness_not_implemented(command: &str, harness: Harness) -> String {
         Harness::All => "all",
         Harness::Codex => "codex",
         Harness::Cursor => "cursor",
+        Harness::Codewhale => "codewhale",
     };
     format!(
         "graphersal-memory {command} --harness {name}: not supported; it takes the harnesses one \
-         at a time: claude-code, opencode, codex or cursor."
+         at a time: claude-code, opencode, codex, cursor or codewhale."
     )
 }
 
@@ -227,6 +228,7 @@ pub fn run_cli(
                 Harness::Opencode => crate::agents::Kind::OpenCode,
                 Harness::Codex => crate::agents::Kind::Codex,
                 Harness::Cursor => crate::agents::Kind::Cursor,
+                Harness::Codewhale => crate::agents::Kind::CodeWhale,
                 other => {
                     let _ = writeln!(stderr, "{}", harness_not_implemented(name, *other));
                     return EXIT_NOT_IMPLEMENTED;
@@ -525,6 +527,7 @@ fn setup_with(cli: &Cli, probe: bool) -> Result<Setup, String> {
     let opencode = crate::opencode::OpenCodePaths::resolve_for(&env, detected)?;
     let codex = crate::codex::CodexPaths::resolve(&env)?;
     let cursor = crate::cursor::CursorPaths::resolve(&env, &data_dir)?;
+    let codewhale = crate::codewhale::CodeWhalePaths::resolve(&env)?;
     let exe =
         std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
     let mut dir_args = Vec::new();
@@ -541,6 +544,7 @@ fn setup_with(cli: &Cli, probe: bool) -> Result<Setup, String> {
         opencode,
         codex,
         cursor,
+        codewhale,
         search_path: None,
         data_dir,
         run_dir,
@@ -665,6 +669,10 @@ pub fn export_note(agent: &dyn crate::agents::Agent) -> String {
         crate::agents::Kind::Cursor => {
             "to give the agent a file, paste it into a project's AGENTS.md or into a rule file \
              under ~/.cursor/rules (a .mdc file with `alwaysApply: true`)"
+        }
+        crate::agents::Kind::CodeWhale => {
+            "to give the agent a file, paste it into ~/.codewhale/AGENTS.md or a project's \
+             AGENTS.md"
         }
         _ => {
             "to give the agent a file, add its path to `instructions` in the agent's configuration"
@@ -1030,6 +1038,7 @@ pub fn session_harnesses(setup: &Setup) -> Vec<crate::agents::Kind> {
             crate::agents::Kind::OpenCode => setup.opencode.db.is_file(),
             crate::agents::Kind::Codex => setup.codex.sessions.is_dir(),
             crate::agents::Kind::Cursor => setup.cursor.registry.is_file(),
+            crate::agents::Kind::CodeWhale => setup.codewhale.sessions.is_dir(),
             crate::agents::Kind::ClaudeCode => true,
         })
         .collect();
@@ -1217,6 +1226,9 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
             Kind::OpenCode => crate::opencode::install::doctor(setup),
             Kind::Codex => crate::codex::install::doctor(setup),
             Kind::Cursor => crate::cursor::install::doctor(setup),
+            Kind::CodeWhale => {
+                crate::codewhale::install::doctor(setup, current_project().as_deref())
+            }
         };
         sections.push((kind.display_name().to_string(), findings));
     }
@@ -1314,6 +1326,15 @@ fn run_hook(
             "graphersal-memory hook: run by Cursor for Claude Code's settings; nothing to do \
              (graphersal-memory's own Cursor hooks handle Cursor: `graphersal-memory install \
              --harness cursor`)"
+        );
+        return 0;
+    }
+    // CodeWhale has no hooks of ours: the MCP connection does their work.
+    if harness == Harness::Codewhale {
+        let _ = writeln!(
+            stderr,
+            "graphersal-memory hook: CodeWhale needs no hook (the MCP server's connection does \
+             the session start and end); nothing to do"
         );
         return 0;
     }
@@ -1621,9 +1642,10 @@ fn shim_options(
 
 /// Whether a `use` connection's instructions carry the start context: not for Claude Code
 /// with our SessionStart hook (the hook delivers it as `additionalContext`, so it is not sent
-/// twice), cut to Claude Code's instruction limit for Claude Code without the hook, whole for
-/// every other harness (opencode, Codex, Cursor, Claude Desktop: their hooks print only the
-/// short start line, or there is none).
+/// twice), cut to Claude Code's instruction limit for Claude Code without the hook and for
+/// CodeWhale (whose limit is the same number of bytes: text beyond ASCII may still be cut by
+/// CodeWhale), whole for every other harness (opencode, Codex, Cursor, Claude Desktop: their
+/// hooks print only the short start line, or there is none).
 pub fn start_context_mode(
     harness: &str,
     claude_hook_installed: bool,
@@ -1631,6 +1653,9 @@ pub fn start_context_mode(
     match (harness, claude_hook_installed) {
         ("claude-code", true) => protocol::StartContextMode::None,
         ("claude-code", false) => protocol::StartContextMode::Short,
+        // CodeWhale cuts a server's instructions after 4,096 bytes (`crates/mcp/src/lib.rs`,
+        // `MAX_SERVER_INSTRUCTIONS_BYTES`).
+        ("codewhale", _) => protocol::StartContextMode::Short,
         _ => protocol::StartContextMode::Full,
     }
 }
@@ -1657,6 +1682,10 @@ fn session_events(
     }
     let plan = std::sync::Arc::new(plan);
     let start_plan = plan.clone();
+    // CodeWhale's sessions written from now on in this workspace end with this connection.
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
     let location = setup_location(&setup);
     let run_dir = setup.run_dir.clone();
     let mut connect = daemon_connector(&setup);
@@ -1685,7 +1714,7 @@ fn session_events(
                 Some(answer) => taken(&answer),
                 None => Ok(()),
             };
-            session_sync::end(&plan, &mut enqueue).notes
+            session_sync::end_since(&plan, Some(started), &mut enqueue).notes
         }),
     })
 }
@@ -2074,6 +2103,9 @@ pub fn status_text_for(
             }
             if kinds.contains(&crate::agents::Kind::Cursor) {
                 lines.extend(crate::cursor::install::status_lines(setup));
+            }
+            if kinds.contains(&crate::agents::Kind::CodeWhale) {
+                lines.extend(crate::codewhale::install::status_lines(setup));
             }
             // Claude Code's own section is shown when nothing is installed: not listed again.
             let shown = |kind: &crate::agents::Kind| {
