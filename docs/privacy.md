@@ -1,7 +1,6 @@
 # Privacy
 
-> Pre-release: this page states the design commitments the product is built to. See the
-> [status table](../README.md#status).
+> What graphersal-memory 0.1.0 keeps, where, and what (if anything) leaves your machine.
 
 Agent transcripts can contain anything: code, credentials pasted by mistake, customer names.
 graphersal-memory is designed so that nothing leaves your machine unless you ask for it.

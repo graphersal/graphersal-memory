@@ -1,12 +1,8 @@
 # How it works
 
-> Pre-release: this page describes the target design. Implemented so far (M1 to M5): the store in
-> the per-user data directory, project and global memories, the two profiles with their access
-> policy, the daemon with the shim, the socket, the handshake, start on demand, idle exit, upgrade
-> and crash recovery, the settings file, the project records, the installation into Claude Code
-> with its hooks, the import of the file memory, and the background indexing of past sessions
-> with opt-in summaries, and the built-in A/B ([Measuring it](ab-testing.md)). The browser UI (`graphersal-memory ui`, see [The browser UI](#the-browser-ui)). Not yet: isolated project stores; see the
-> [status table](../README.md#status).
+> How graphersal-memory 0.1.0 works inside: its processes, stores, past sessions, the start
+> context, conflicts, the browser UI and the installation into a harness. Parts that are planned
+> and not built yet (isolated project stores) say so; see also the [roadmap](roadmap.md).
 
 ## Processes
 
@@ -203,7 +199,7 @@ anything changes.
   last snapshot is more than four times `store.checkpoint_after` (checkpoints are not happening)
   or the last automatic checkpoint failed.
 - **Start time.** Measured on 2026-11-10 (Apple Silicon laptop under other load, release build of
-  this repository at M8, engine 0.6.0; median of 3 starts each; synthetic stores generated
+  this repository before 0.1.0, engine 0.6.0; median of 3 starts each; synthetic stores generated
   through the product's own paths in temporary directories: `import --sessions` of 100 Claude
   Code transcripts with 100 records each = 5,000 turns, plus 300 memories through `remember`). The
   time is from starting the shim (`graphersal-memory mcp`, which starts the daemon) to the answer;
@@ -370,7 +366,7 @@ candidates; the agent's own model decides (no model call of graphersal-memory's,
   is always loaded, their files; at most five, then "N more") and the number of imported
   memories waiting for their check, both naming `conflicts()`; Claude Code's start line adds the
   same counts.
-- **Measured** (M12 experiment, 2026-11-12, before this was built): on 64 hand-labelled pairs
+- **Measured** (an experiment on 2026-11-12, before this was built): on 64 hand-labelled pairs
   (contradictions, superseded decisions, near duplicates, similar but compatible, unrelated)
   among 232 unrelated memories, the nearest five held the conflicting or superseded memory in
   94 % of the cases (one project and the global memories; 91 % over everything), and Claude
