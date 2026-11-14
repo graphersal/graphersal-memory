@@ -56,8 +56,9 @@ fn slugs(runtime: &StoreRuntime) -> Value {
 #[test]
 fn a_store_checkpoints_by_itself_at_the_threshold() {
     let data = TempDir::new("ckpt");
+    // Above the WAL of a new store's catalog (about 74 KiB), below it plus the writes.
     let settings = Settings {
-        checkpoint_after: 64 << 10,
+        checkpoint_after: 128 << 10,
         keep_history: None,
     };
     let runtime = open(&data, &settings);
@@ -76,12 +77,12 @@ fn a_store_checkpoints_by_itself_at_the_threshold() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let status = runtime.maintenance_status();
-    assert_eq!(status["checkpoint_after"], 64 << 10, "{status}");
+    assert_eq!(status["checkpoint_after"], 128 << 10, "{status}");
     assert!(status["snapshots"].as_u64().unwrap() >= 2, "{status}");
     assert!(status["size"].as_u64().unwrap() > 0, "{status}");
     let lines = maintenance::status_lines("default", &status).join("\n");
     assert!(lines.contains("WAL since the last snapshot"), "{lines}");
-    assert!(lines.contains("checkpoint after 64.0 KiB"), "{lines}");
+    assert!(lines.contains("checkpoint after 128.0 KiB"), "{lines}");
     assert!(lines.contains("history kept: forever"), "{lines}");
     runtime.close().unwrap();
 

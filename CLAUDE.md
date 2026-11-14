@@ -155,8 +155,11 @@ design is in `README.md` and `docs/`, and the stage plan is in `docs/roadmap.md`
   - `src/instructions.rs`: memories against the instruction files the harnesses load (the
     conflict check, `docs/how-it-works.md#memories-against-instruction-files`): `files` (the
     installed harnesses' user-level and project files from `coexist::instruction_files`),
-    `rules_in` (list items, paragraphs, quotes; headings, tables, code, comments, front matter,
-    our managed block and short units left out), `rule_id` (project + relative file + text),
+    `rules_in`/`rules_in_file` (list items, paragraphs, quotes that are directives,
+    `is_directive`: an English directive word, a rules heading, or a rules file; headings,
+    tables, code, comments, front matter, link lists, our managed block and short units left
+    out), `rescan_once` (the one-time drop of waiting candidates per store, marker
+    `<data dir>/import/instructions-rescanned-<store>`), `rule_id` (project + relative file + text),
     `read_rules` (the daemon's side of the control request `sync_instructions`), `sync` (skips
     files unchanged since the last finished sync, `<data dir>/import/instructions.json`); called
     by the shim's session start, the Claude Code / Cursor start-context fetch and `import`;

@@ -303,35 +303,20 @@ impl StartContext {
                 if self.unchecked == 1 { "y" } else { "ies" }
             ));
         }
-        if !self.rule_conflicts.is_empty() {
+        if !self.rule_conflicts.is_empty() || self.rules_unchecked > 0 {
+            // Only the pairs the agent confirmed are conflicts; the others are its work.
+            let n = self.rule_conflicts.len();
             lines.push(format!(
-                "memory conflicts: {} memor{} contradict{} a line of your instruction files; \
-                 ask your agent which holds (conflicts()), or edit the file",
-                self.rule_conflicts.len(),
-                if self.rule_conflicts.len() == 1 {
-                    "y"
-                } else {
-                    "ies"
-                },
-                if self.rule_conflicts.len() == 1 {
-                    "s"
+                "memory vs instruction files: {n} conflict{}{}, {}",
+                if n == 1 { "" } else { "s" },
+                if n > 0 {
+                    " (ask your agent which holds: conflicts(); or edit the file)"
                 } else {
                     ""
-                }
+                },
+                waiting_text(self.rules_unchecked)
             ));
             lines.extend(self.rule_conflicts.iter().map(|line| format!("  {line}")));
-        }
-        if self.rules_unchecked > 0 {
-            lines.push(format!(
-                "memory conflicts: {} memor{} near a line of your instruction files not yet \
-                 checked (your agent: conflicts())",
-                self.rules_unchecked,
-                if self.rules_unchecked == 1 {
-                    "y"
-                } else {
-                    "ies"
-                }
-            ));
         }
         lines
     }
@@ -369,17 +354,8 @@ impl StartContext {
                 }
             ));
         }
-        if self.rules_unchecked > 0 {
-            parts.push(format!(
-                "{} memor{} to check against your instruction files",
-                self.rules_unchecked,
-                if self.rules_unchecked == 1 {
-                    "y"
-                } else {
-                    "ies"
-                }
-            ));
-        }
+        // The pairs still waiting for the agent's check are its work, not the user's: the start
+        // context asks the agent (conflicts_text), the user's line does not name them.
         if parts.is_empty() {
             String::new()
         } else {
@@ -429,6 +405,15 @@ impl StartContext {
             rules_unchecked: count("rules_unchecked").unwrap_or(0),
         })
     }
+}
+
+/// "N pairs waiting for the agent's check": candidates (a memory near a line of an instruction
+/// file) are never called conflicts.
+pub fn waiting_text(n: usize) -> String {
+    format!(
+        "{n} pair{} waiting for the agent's check",
+        if n == 1 { "" } else { "s" }
+    )
 }
 
 /// The first line of the text.
@@ -592,10 +577,10 @@ fn conflicts_text(
             out.push('\n');
         }
         out.push_str(&format!(
-            "{rules_unchecked} memor{} near lines of your instruction files {} not yet checked \
-             for a contradiction: conflicts() lists {}.",
-            if rules_unchecked == 1 { "y" } else { "ies" },
-            if rules_unchecked == 1 { "is" } else { "are" },
+            "{rules_unchecked} pair{} of a memory and a line of your instruction files wait{} for \
+             your check: conflicts() lists {}; settle each.",
+            if rules_unchecked == 1 { "" } else { "s" },
+            if rules_unchecked == 1 { "s" } else { "" },
             if rules_unchecked == 1 { "it" } else { "them" }
         ));
     }
@@ -1054,8 +1039,8 @@ mod tests {
             format!(
                 "{HEADLINE}\n\n{RULE_CONFLICTS_HEADING}\n- Use pnpm — Install with pnpm (memory: \
                  use-pnpm, always loaded)\n  CONTRADICTS /w/CLAUDE.md line 12: Always use npm for \
-                 packages.\n3 memories near lines of your instruction files are not yet checked \
-                 for a contradiction: conflicts() lists them.\n\n{FOOTER}"
+                 packages.\n3 pairs of a memory and a line of your instruction files wait for \
+                 your check: conflicts() lists them; settle each.\n\n{FOOTER}"
             )
         );
         assert_eq!(
@@ -1065,14 +1050,13 @@ mod tests {
         assert_eq!(context.rules_unchecked, 3);
         assert_eq!(
             context.start_note(),
-            " 1 memory contradicts your instruction files; 3 memories to check against your \
-             instruction files: conflicts()."
+            " 1 memory contradicts your instruction files: conflicts()."
         );
         let lines = context.conflict_lines();
-        assert_eq!(lines.len(), 3, "{lines:?}");
-        assert!(lines[0].contains("1 memory contradicts a line of your instruction files"));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].starts_with("memory vs instruction files: 1 conflict (ask your agent"));
         assert_eq!(lines[1], "  use-pnpm (remember) vs /w/CLAUDE.md:12");
-        assert!(lines[2].contains("3 memories near a line of your instruction files"));
+        assert!(lines[0].ends_with(", 3 pairs waiting for the agent's check"));
         // The daemon's answer carries both, and an older one's neither.
         assert_eq!(
             StartContext::from_json(&context.to_json()),
@@ -1085,6 +1069,39 @@ mod tests {
         // Nothing of it: no text.
         let none = render_all(Vec::new(), Vec::new(), 0, (Vec::new(), 0), DEFAULT_CHARS);
         assert!(none.text.is_empty());
+    }
+
+    #[test]
+    fn pairs_waiting_for_the_check_are_the_agents_work_and_never_called_conflicts() {
+        let open = json!({"open": [], "unchecked": 0, "rules_unchecked": 5, "rules_open": []});
+        let context = render_all(
+            Vec::new(),
+            Vec::new(),
+            0,
+            rule_conflicts(&open),
+            DEFAULT_CHARS,
+        );
+        // One line for the agent in the start context.
+        assert_eq!(
+            context.text,
+            format!(
+                "{HEADLINE}\n\n5 pairs of a memory and a line of your instruction files wait for \
+                 your check: conflicts() lists them; settle each.\n\n{FOOTER}"
+            )
+        );
+        // Nothing on the user's session-start line; status and doctor count them apart.
+        assert_eq!(context.start_note(), "");
+        assert_eq!(
+            context.conflict_lines(),
+            ["memory vs instruction files: 0 conflicts, 5 pairs waiting for the agent's check"]
+        );
+        assert!(
+            context
+                .conflict_lines()
+                .iter()
+                .all(|l| !l.contains("memory conflicts"))
+        );
+        assert_eq!(waiting_text(1), "1 pair waiting for the agent's check");
     }
 
     #[test]

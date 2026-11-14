@@ -1006,6 +1006,17 @@ impl Daemon {
                 Err(err) => log(&format!("the import source migration failed: {err}")),
             }
         }
+        {
+            let call = |function: &str, args: serde_json::Value| store.call(function, args);
+            match crate::instructions::rescan_once(&self.options.data_dir, name, &call) {
+                Ok(0) => {}
+                Ok(n) => log(&format!(
+                    "dropped {n} unchecked memory/instruction-line pairs of the store {name}; \
+                     its instruction lines are scanned again under the new rules"
+                )),
+                Err(err) => log(&format!("the instruction line rescan failed: {err}")),
+            }
+        }
         stores.insert(name.to_string(), store.clone());
         drop(stores);
         self.apply_embedder(store.clone());

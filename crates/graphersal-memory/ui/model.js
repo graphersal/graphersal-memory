@@ -473,6 +473,11 @@ export function mergeRulePairs(answers) {
   return pairs;
 }
 
+/** "N pairs waiting for the agent's check": unchecked memory / instruction line pairs are never called conflicts. */
+export function waitingText(n) {
+  return `${n} ${n === 1 ? 'pair' : 'pairs'} waiting for the agent's check`;
+}
+
 /** The key of a memory / instruction line pair (a pair of global ones is the same in every project). */
 export function rulePairKey(pair, project = pair.project) {
   const memory = pair.memory.scope === 'global' && pair.rule.scope === 'global' ? `global/${pair.memory.slug}` : `${project}/${pair.memory.slug}`;

@@ -137,20 +137,42 @@ fn remember(slug, kind, summary, body, why, how_to_apply, title, hook, pinned, o
     } else if imported {
         g.v(id).properties("unchecked").drop().iterate();
     }
-    // The lines of the harness's instruction files nearest to the memory (the same scoring and
-    // limits as scan_instructions): candidates of the conflict check, kept until settled. A
-    // project memory is checked against its project's lines, a global one against every line
-    // it sees.
+    // The lines of the harness's instruction files nearest to the memory (the same bar as
+    // scan_instructions: a semantic similarity of at least 0.6 and at least 2 shared content
+    // words, at most 3): candidates of the conflict check, kept until settled. A project memory
+    // is checked against its project's lines, a global one against every line it sees.
     if text_changed {
         g.v(id).in_e("compared_with").drop().iterate();
+        let stop = "the and for with from into this that these those are was were been has have had not but all any can cannot use used uses using when what which who why how where its our your you they them their then than there here also only never always must should don don't does did each every other anothe more most some such very just like about over under after before withou within will would could may might one two new via per etc instea prefer avoid requir make sure user agent it's".split(" ");
+        // The memory's content words (their first 6 letters), read when a line is close enough.
+        let words = ();
         let lines = g.query("recall", #{text: slug + ": " + summary, k: 12, label: "instruction", project: project});
-        let floor = 0.15;
-        if lines.len() >= 12 && lines[11].score * 1.5 > floor { floor = lines[11].score * 1.5; }
         let rules = [];
         for h in lines {
-            if rules.len() >= 3 || h.score < floor { break; }
-            if h.keywords <= 0.0 && h.semantic < 0.45 { continue; }
+            if rules.len() >= 3 { break; }
+            if h.semantic < 0.6 { continue; }
             if scoped && g.v(h.id).has("project").count().next() == 0 { continue; }
+            if words == () {
+                words = [];
+                let cur = "";
+                for c in (slug + ": " + summary + " " + text + " ").to_lower().chars() {
+                    if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '\'' { cur += c; continue; }
+                    if cur.len() > 6 { cur = cur.sub_string(0, 6); }
+                    if cur.len() >= 3 && !stop.contains(cur) && !words.contains(cur) { words.push(cur); }
+                    cur = "";
+                }
+            }
+            let theirs = [];
+            let cur = "";
+            for c in (g.v(h.id).values("text").next() + " ").to_lower().chars() {
+                if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '\'' { cur += c; continue; }
+                if cur.len() > 6 { cur = cur.sub_string(0, 6); }
+                if cur.len() >= 3 && !theirs.contains(cur) { theirs.push(cur); }
+                cur = "";
+            }
+            let common = 0;
+            for w in words { if theirs.contains(w) { common += 1; } }
+            if common < 2 { continue; }
             g.merge_e(#{"T.label": "compared_with", "Direction.OUT": h.id, "Direction.IN": id})
                 .option(Merge.onCreate, #{origin: "instructions", source: "derived", visibility: "private", decision: "unchecked", at: now}).iterate();
             let r = g.v(h.id).project("file", "line", "text").by("file").by("line").by("text").next();

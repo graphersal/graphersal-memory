@@ -2,9 +2,11 @@
 // the other, both hold; or forget one, never an imported one), and the imported memories not yet
 // checked against their nearest memories, in a collapsed section, checked one by one (no bulk
 // button: user decision 9a). Then "Memory vs instruction files": a memory beside the line of an
-// instruction file the harness loads (CLAUDE.md, AGENTS.md, rules files) that may contradict it:
-// both hold, the memory is outdated (forget it; never an imported one), or the file is outdated
-// (recorded as a conflict; the user edits the file, nothing here writes it).
+// instruction file the harness loads (CLAUDE.md, AGENTS.md, rules files) that the agent found to
+// contradict it: both hold, the memory is outdated (forget it; never an imported one), or the
+// file is outdated (recorded as a conflict; the user edits the file, nothing here writes it).
+// Pairs the agent has not checked yet are its work, not the user's (user decision 2026-11-14):
+// one quiet line with their count, the pairs in a collapsed disclosure without buttons.
 
 import { ref, reactive, watch, onMounted, computed } from 'vue';
 import * as model from './model.js';
@@ -64,7 +66,8 @@ export default {
       });
     }
     const done = (memory) => act(memory.slug, () => one(props.api, 'settle', { slug: memory.slug, decision: 'compatible', other: '', project: memory.project }), `"${memory.slug}" is checked.`);
-    const rulePairs = computed(() => (data.value ? data.value.rules.filter((p) => !later.has(model.rulePairKey(p))) : []));
+    const rulePairs = computed(() => (data.value ? data.value.rules.filter((p) => p.status === 'conflict' && !later.has(model.rulePairKey(p))) : []));
+    const waitingPairs = computed(() => (data.value ? data.value.rules.filter((p) => p.status !== 'conflict') : []));
     const fileNotes = reactive({});
     const settleRule = (pair, args, done) => act(model.rulePairKey(pair), () => one(props.api, 'settle', args), done);
     function forgetMemory(pair) {
@@ -82,7 +85,7 @@ export default {
     return {
       data, error, busy, open, current, expanded, checking, checked, later, keyOf, state, model,
       settle, forget, choices, decide, done, edit, load,
-      rulePairs, fileNotes, settleRule, forgetMemory, fileOutdated,
+      rulePairs, waitingPairs, fileNotes, settleRule, forgetMemory, fileOutdated,
     };
   },
   template: `
@@ -138,11 +141,17 @@ export default {
         <p v-if="!current" class="mem-ok">Nothing to check.</p>
       </details>
       <h3 class="mem-rules-heading">Memory vs instruction files</h3>
-      <p class="muted">Lines of the instruction files your agent's harness loads (CLAUDE.md, AGENTS.md, rules files) next to the memories near them. graphersal-memory only reads these files; most pairs are merely on a similar topic.</p>
-      <p v-if="!rulePairs.length" class="mem-ok">No memory waits for a check against your instruction files.</p>
-      <p v-else class="muted">{{ rulePairs.filter((p) => p.status === 'conflict').length }} contradicting · {{ data.rules_unchecked_total }} to check</p>
+      <p class="muted">Memories your agent found to contradict a rule of the instruction files its harness loads (CLAUDE.md, AGENTS.md, rules files). graphersal-memory only reads these files.</p>
+      <p v-if="!rulePairs.length" class="mem-ok">No memory contradicts your instruction files.</p>
+      <details v-if="data.rules_unchecked_total" class="mem-rules-waiting">
+        <summary class="muted">{{ model.waitingText(data.rules_unchecked_total) }}</summary>
+        <p class="muted">A memory near a rule of an instruction file, not yet checked by your agent (conflicts() in a session). Most are merely on a similar topic; only a contradiction it confirms shows up above.</p>
+        <ul class="mem-rules-waiting-list">
+          <li v-for="pair in waitingPairs" :key="model.rulePairKey(pair)"><strong>{{ pair.memory.slug }}</strong> <span class="muted">vs {{ model.baseName(pair.rule.file) }} line {{ pair.rule.line }}:</span> {{ pair.rule.text }}</li>
+        </ul>
+      </details>
       <section v-for="pair in rulePairs" :key="model.rulePairKey(pair)" class="mem-conflict mem-rule-pair" :class="{ 'mem-rule-open': pair.status === 'conflict' }">
-        <p class="muted"><strong v-if="pair.status === 'conflict'" class="mem-error">They contradict</strong><span v-else>To check</span> · since {{ pair.since || 'unknown' }}<span v-if="state.selection === model.ALL"> · {{ model.projectName(pair.project, state.projects) }}</span></p>
+        <p class="muted"><strong class="mem-error">They contradict</strong> · since {{ pair.since || 'unknown' }}<span v-if="state.selection === model.ALL"> · {{ model.projectName(pair.project, state.projects) }}</span></p>
         <div class="mem-sides">
           <div class="mem-side">
             <h4>Memory {{ pair.memory.slug }} <span class="muted">({{ model.sourceText(pair.memory) }})</span></h4>

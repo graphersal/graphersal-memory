@@ -1,12 +1,16 @@
 fn scan_instructions(project, limit) {
-    // The conflict check's candidates for up to `limit` rules not yet scanned: the nearest
-    // memories of each (the recall scoring on the rule's text; a project's rule against the
-    // project's and the global memories, a global rule against the global ones), at most 3 per
-    // rule, each scoring at least 0.15 and 1.5 times the 12th best score and sharing a subject
-    // word with the rule (or a semantic similarity of 0.45), superseded memories left out. They
-    // become `compared_with` edges with decision "unchecked" for the agent or the user to settle.
-    // No new candidates while 50 wait for their check (the rest of the rules stay unscanned until
-    // then).
+    // The conflict check's candidates for up to `limit` rules not yet scanned (only directive
+    // lines are rules: crate::instructions): the nearest memories of each (the recall scoring on
+    // the rule's text; a project's rule against the project's and the global memories, a global
+    // rule against the global ones), at most 3 per rule, each with a semantic similarity of at
+    // least 0.6 AND at least 2 content words shared with the rule (words of 3+ letters, stop
+    // words and directive markers left out, the first 6 letters compared), superseded memories
+    // left out. The bar is high on purpose: a candidate only on the same topic is noise for the
+    // agent. They become `compared_with` edges with decision "unchecked" for the agent to settle.
+    // No new candidates while 20 wait for their check (the rest of the rules stay unscanned
+    // until then). remember.rhai applies the same bar to a new memory.
+    let cap = 20;
+    let stop = "the and for with from into this that these those are was were been has have had not but all any can cannot use used uses using when what which who why how where its our your you they them their then than there here also only never always must should don don't does did each every other anothe more most some such very just like about over under after before withou within will would could may might one two new via per etc instea prefer avoid requir make sure user agent it's".split(" ");
     let mine = if project == "" { __.not(__.has("project")) }
                else { __.or(__.not(__.has("project")), __.has("project", project)) };
     let now = g.gql("RETURN CURRENT_TIMESTAMP AS t").next()["t"];
@@ -19,17 +23,37 @@ fn scan_instructions(project, limit) {
     let scanned = 0;
     let found = 0;
     for r in todo {
-        if waiting >= 50 { break; }
+        if waiting >= cap { break; }
         let visible = if r.project == "" { __.not(__.has("project")) }
                       else { __.or(__.not(__.has("project")), __.has("project", r.project)) };
+        // The rule's content words (their first 6 letters).
+        let words = [];
+        let cur = "";
+        for c in (r.text.to_lower() + " ").chars() {
+            if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '\'' { cur += c; continue; }
+            if cur.len() > 6 { cur = cur.sub_string(0, 6); }
+            if cur.len() >= 3 && !stop.contains(cur) && !words.contains(cur) { words.push(cur); }
+            cur = "";
+        }
         let hits = g.query("recall", #{text: r.text, k: 12, label: "memory", project: r.project});
-        let floor = 0.15;
-        if hits.len() >= 12 && hits[11].score * 1.5 > floor { floor = hits[11].score * 1.5; }
         let taken = 0;
         for h in hits {
-            if taken >= 3 || h.score < floor { break; }
-            // A shared subject word, or a meaning clearly alike (a model embedder).
-            if h.keywords <= 0.0 && h.semantic < 0.45 { continue; }
+            if taken >= 3 { break; }
+            if h.semantic < 0.6 { continue; }
+            // At least 2 content words shared with the memory's text.
+            let theirs = [];
+            let cur = "";
+            let text = "";
+            for x in g.v(h.id).values("embed_text", "body").to_list() { text += " " + x; }
+            for c in (text.to_lower() + " ").chars() {
+                if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '\'' { cur += c; continue; }
+                if cur.len() > 6 { cur = cur.sub_string(0, 6); }
+                if cur.len() >= 3 && !theirs.contains(cur) { theirs.push(cur); }
+                cur = "";
+            }
+            let common = 0;
+            for w in words { if theirs.contains(w) { common += 1; } }
+            if common < 2 { continue; }
             if g.v(h.id).in_("supersedes").has_label("memory").filter(visible).count().next() > 0 { continue; }
             taken += 1;
             if g.v(r.id).out_e("compared_with").filter(__.in_v().has_id(h.id)).count().next() > 0 { continue; }
@@ -42,5 +66,5 @@ fn scan_instructions(project, limit) {
         scanned += 1;
     }
     let remaining = g.v().has_label("instruction").filter(mine).has("scanned", false).count().next();
-    #{scanned: scanned, found: found, remaining: remaining, waiting: waiting, capped: waiting >= 50 && remaining > 0}
+    #{scanned: scanned, found: found, remaining: remaining, waiting: waiting, capped: waiting >= cap && remaining > 0}
 }

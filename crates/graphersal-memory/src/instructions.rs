@@ -3,7 +3,8 @@
 //!
 //! The rules of those files are never imported as memories (the harness loads the files
 //! itself, so a rule would reach the agent twice) and the files are never edited. Each rule (a
-//! list item, a paragraph or a line, [`rules_in`]) becomes an `instruction` vertex, known by a
+//! list item, a paragraph or a line that is a directive, [`rules_in_file`]: descriptions of the
+//! project are no rules) becomes an `instruction` vertex, known by a
 //! fingerprint of its project, its file and its text ([`rule_id`]): a moved line keeps its
 //! vertex, a changed or removed one is dropped with its candidates and decisions. The catalog
 //! functions `sync_instructions` and `scan_instructions` (and `remember`, for a memory whose
@@ -104,23 +105,50 @@ pub fn files(setup: &Setup, kinds: &[Kind], project: Option<&Path>) -> Vec<FileS
         .collect()
 }
 
-/// The rules of an instruction file's text as (first line, text): list items, paragraphs and
-/// block quotes, a wrapped line joined to its item, the list marker taken off. Left out:
-/// headings, tables, code blocks, HTML comments, a front matter (`---` ... `---`, as in
-/// Cursor's `.mdc` files), graphersal-memory's managed block, and units shorter than
-/// [`MIN_RULE_CHARS`] characters or [`MIN_RULE_WORDS`] words. A text longer than
-/// [`MAX_RULE_CHARS`] is cut.
+/// The rules of an instruction file's text as (first line, text): [`rules_in_file`] of a file
+/// that is not a rules file by its path (the tests' view).
+#[cfg(test)]
 pub fn rules_in(text: &str) -> Vec<(usize, String)> {
+    rules_in_file(text, false)
+}
+
+/// The rules of an instruction file's text as (first line, text): list items, paragraphs and
+/// block quotes, a wrapped line joined to its item, the list marker taken off, that are
+/// DIRECTIVES ([`is_directive`]): a unit with an English directive marker ("never", "always",
+/// "must", "do not", "prefer", "instead", ...), or any unit under a heading that names rules
+/// ("Rules", "Conventions", "Guidelines", "Do", "Don't", "Main rule", [`is_rules_heading`]),
+/// or any unit of a rules file (`rules_file`: a file in a rules directory, Cursor's `.mdc`,
+/// `.cursorrules`; or a text with a front matter, as rules files have). Descriptions ("`io`:
+/// GraphSON 3.0 ..."), table rows, headings and link lists are no rules: comparing them with
+/// the memories found only lines on the same topic, never a contradiction.
+///
+/// Limitation: the markers are English words. A line in another language (or English without a
+/// marker) counts only under a rules-like heading or in a rules file; elsewhere it is skipped.
+///
+/// Left out besides: headings, tables, code blocks, HTML comments, a front matter (`---` ...
+/// `---`, as in Cursor's `.mdc` files), graphersal-memory's managed block, and units shorter
+/// than [`MIN_RULE_CHARS`] characters or [`MIN_RULE_WORDS`] words. A text longer than
+/// [`MAX_RULE_CHARS`] is cut.
+pub fn rules_in_file(text: &str, rules_file: bool) -> Vec<(usize, String)> {
     let mut rules = Vec::new();
     let mut current: Vec<(usize, &str)> = Vec::new();
-    let flush = |current: &mut Vec<(usize, &str)>, rules: &mut Vec<(usize, String)>| {
-        if let Some(rule) = unit_text(current) {
+    // The open headings (level, names rules): a unit is under a rules heading when any of them
+    // names rules.
+    let mut headings: Vec<(usize, bool)> = Vec::new();
+    let mut in_front = text.lines().next().is_some_and(|l| l.trim() == "---");
+    let all_rules = rules_file || in_front;
+    let flush = |current: &mut Vec<(usize, &str)>,
+                 rules: &mut Vec<(usize, String)>,
+                 headings: &[(usize, bool)]| {
+        let ruled = all_rules || headings.iter().any(|(_, rules)| *rules);
+        if let Some(rule) = unit_text(current)
+            && is_directive(&rule.1, ruled)
+        {
             rules.push(rule);
         }
         current.clear();
     };
     let (mut in_block, mut in_code, mut in_comment) = (false, false, false);
-    let mut in_front = text.lines().next().is_some_and(|l| l.trim() == "---");
     for (i, line) in text.lines().enumerate() {
         let trimmed = line.trim();
         if in_front {
@@ -130,7 +158,7 @@ pub fn rules_in(text: &str) -> Vec<(usize, String)> {
             continue;
         }
         if trimmed.starts_with(crate::install::BLOCK_BEGIN) {
-            flush(&mut current, &mut rules);
+            flush(&mut current, &mut rules, &headings);
             in_block = true;
             continue;
         }
@@ -147,7 +175,7 @@ pub fn rules_in(text: &str) -> Vec<(usize, String)> {
             continue;
         }
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            flush(&mut current, &mut rules);
+            flush(&mut current, &mut rules, &headings);
             in_code = !in_code;
             continue;
         }
@@ -155,21 +183,157 @@ pub fn rules_in(text: &str) -> Vec<(usize, String)> {
             continue;
         }
         if trimmed.starts_with("<!--") {
-            flush(&mut current, &mut rules);
+            flush(&mut current, &mut rules, &headings);
             in_comment = !trimmed.contains("-->");
             continue;
         }
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('|') {
-            flush(&mut current, &mut rules);
+        if trimmed.starts_with('#') {
+            flush(&mut current, &mut rules, &headings);
+            let level = trimmed.chars().take_while(|c| *c == '#').count();
+            while headings.last().is_some_and(|(l, _)| *l >= level) {
+                headings.pop();
+            }
+            headings.push((level, is_rules_heading(&trimmed[level..])));
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('|') {
+            flush(&mut current, &mut rules, &headings);
             continue;
         }
         if crate::coexist::starts_list_item(trimmed) || trimmed.starts_with('>') {
-            flush(&mut current, &mut rules);
+            flush(&mut current, &mut rules, &headings);
         }
         current.push((i + 1, line));
     }
-    flush(&mut current, &mut rules);
+    flush(&mut current, &mut rules, &headings);
     rules
+}
+
+/// The words of a heading that names rules (any of them, case-insensitive, as a whole word):
+/// "Rules", "Conventions", "Guidelines", "Do", "Don't", "Main rule", "Policies", ...
+const RULES_HEADING_WORDS: [&str; 17] = [
+    "rule",
+    "rules",
+    "convention",
+    "conventions",
+    "guideline",
+    "guidelines",
+    "do",
+    "dos",
+    "don't",
+    "dont",
+    "don'ts",
+    "donts",
+    "do's",
+    "policy",
+    "policies",
+    "requirements",
+    "constraints",
+];
+
+/// Whether a heading's text (without its `#`s) names rules ([`RULES_HEADING_WORDS`]).
+pub fn is_rules_heading(heading: &str) -> bool {
+    words_of(heading)
+        .iter()
+        .any(|w| RULES_HEADING_WORDS.contains(&w.as_str()))
+}
+
+/// The English directive markers, each a whole word (or words) of a unit, case-insensitive.
+const DIRECTIVE_WORDS: [&str; 21] = [
+    "never",
+    "always",
+    "must",
+    "mustn't",
+    "should",
+    "shouldn't",
+    "don't",
+    "dont",
+    "do not",
+    "prefer",
+    "avoid",
+    "instead",
+    "required",
+    "forbidden",
+    "prohibited",
+    "make sure",
+    "only when",
+    "only if",
+    "only after",
+    "only through",
+    "only via",
+];
+
+/// Whether a unit's text is a directive: under a rules heading (or in a rules file, `ruled`)
+/// every unit that is not a mere link list, elsewhere a unit in English (a majority of ASCII
+/// letters) with a directive marker ([`DIRECTIVE_WORDS`], or "no" opening a sentence: "No
+/// panics in step paths").
+pub fn is_directive(text: &str, ruled: bool) -> bool {
+    if is_link_list(text) {
+        return false;
+    }
+    if ruled {
+        return true;
+    }
+    let letters = text.chars().filter(|c| c.is_alphabetic()).count();
+    let ascii = text.chars().filter(char::is_ascii_alphabetic).count();
+    if ascii * 2 <= letters {
+        return false;
+    }
+    let words = words_of(text);
+    let has = |marker: &str| {
+        let parts: Vec<&str> = marker.split(' ').collect();
+        words
+            .windows(parts.len())
+            .any(|w| w.iter().zip(&parts).all(|(a, b)| a == b))
+    };
+    if DIRECTIVE_WORDS.iter().any(|m| has(m)) {
+        return true;
+    }
+    // "No <noun> ...": "no" opening the text or a sentence.
+    let lower = text.to_lowercase().replace('\u{2019}', "'");
+    lower.starts_with("no ")
+        || lower
+            .split(['.', '!', '?', ':', ';'])
+            .skip(1)
+            .any(|s| s.trim_start().starts_with("no "))
+}
+
+/// The lowercase words of `text` (letters, digits and apostrophes; a curly apostrophe made
+/// straight), for whole-word matching.
+fn words_of(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .replace('\u{2019}', "'")
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .map(|w| w.trim_matches('\''))
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether a unit is only links (`[text](url)` and bare URLs, with less than
+/// [`MIN_RULE_WORDS`] words besides): a link list, no rule.
+fn is_link_list(text: &str) -> bool {
+    let mut rest = String::new();
+    let mut skip_to = 0;
+    for (i, c) in text.char_indices() {
+        if i < skip_to {
+            continue;
+        }
+        if c == '['
+            && let Some(close) = text[i..].find("](")
+            && let Some(end) = text[i + close..].find(')')
+        {
+            skip_to = i + close + end + 1;
+            continue;
+        }
+        rest.push(c);
+    }
+    let words = rest
+        .split_whitespace()
+        .filter(|w| !w.starts_with("http://") && !w.starts_with("https://"))
+        .filter(|w| w.chars().any(char::is_alphanumeric))
+        .count();
+    words < MIN_RULE_WORDS
 }
 
 /// The rule of one unit's lines (`None` when it is too short to be one).
@@ -284,7 +448,10 @@ pub fn read_rules(files: &[Value], root: &str, project: &str) -> (Vec<Value>, Ve
             .collect::<Vec<_>>()
             .join(",");
         let scope = if global { "" } else { project };
-        for (line, text) in rules_in(&text).into_iter().take(MAX_RULES_PER_FILE) {
+        for (line, text) in rules_in_file(&text, is_rules_file(&path))
+            .into_iter()
+            .take(MAX_RULES_PER_FILE)
+        {
             let id = rule_id(scope, &key, &text);
             if !seen.insert(id.clone()) {
                 continue;
@@ -302,6 +469,17 @@ pub fn read_rules(files: &[Value], root: &str, project: &str) -> (Vec<Value>, Ve
         }
     }
     (rules, notes)
+}
+
+/// Whether `path` is a rules file, every unit of which is a rule: a file in a `rules` directory
+/// (`.claude/rules/`, `.cursor/rules/`, opencode's), a Cursor `.mdc` file, `.cursorrules`.
+fn is_rules_file(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "mdc")
+        || path.file_name().is_some_and(|n| n == ".cursorrules")
+        || path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == "rules")
 }
 
 /// The control request that syncs the instruction files `files` of the project at `root`
@@ -399,6 +577,9 @@ impl Synced {
     }
 }
 
+/// The version of the record of the last syncs ([`State`]): 2 since only directives are rules.
+const STATE_VERSION: u64 = 2;
+
 /// The record of the last syncs, `<data dir>/import/instructions.json`: per project root
 /// (`""`: none) the fingerprint of the files and whether that sync finished its scan.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -414,6 +595,12 @@ impl State {
             return Self::default();
         };
         let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        // A record of another version (version 1: before only directives were rules) is no
+        // record: every project's files are synced again, so the vertices of lines that are no
+        // rules any more go with their candidates.
+        if value["version"] != STATE_VERSION {
+            return Self::default();
+        }
         Self(
             value["projects"]
                 .as_object()
@@ -448,10 +635,40 @@ impl State {
             std::fs::create_dir_all(dir)
                 .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
         }
-        let text = serde_json::to_string_pretty(&json!({"version": 1, "projects": projects}))
-            .map_err(|err| err.to_string())?;
+        let text =
+            serde_json::to_string_pretty(&json!({"version": STATE_VERSION, "projects": projects}))
+                .map_err(|err| err.to_string())?;
         crate::fsutil::write_atomic(&path, format!("{text}\n").as_bytes())
     }
+}
+
+/// The marker of the one-time rescan of a store's instruction lines ([`rescan_once`]), in
+/// `<data dir>/import/`, followed by the store's name.
+const RESCANNED_PREFIX: &str = "instructions-rescanned-";
+
+/// Once per store (graphersal-memory 2026-11-14, when only directive lines became rules and the
+/// candidate bar went up): the candidates still waiting for their check (`compared_with` edges
+/// with decision "unchecked") are dropped and every instruction line is scanned again under the
+/// new bar; settled decisions (compatible, conflict) stay. The lines that are no rules any more
+/// go at the next sync of their project (the sync record's version changed, [`STATE_VERSION`]).
+/// A marker file keeps it from running again. Returns how many candidates it dropped.
+pub fn rescan_once(
+    data_dir: &Path,
+    store: &str,
+    call: &dyn Fn(&str, Value) -> Result<Value, String>,
+) -> Result<u64, String> {
+    let dir = data_dir.join("import");
+    let marker = dir.join(format!("{RESCANNED_PREFIX}{store}"));
+    if marker.exists() {
+        return Ok(0);
+    }
+    let dropped = call("rescan_instructions", json!({}))?["dropped"]
+        .as_u64()
+        .unwrap_or(0);
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+    crate::fsutil::write_atomic(&marker, format!("{dropped}\n").as_bytes())?;
+    Ok(dropped)
 }
 
 /// Sends a control request to the daemon and returns its answer.
@@ -533,6 +750,250 @@ mod tests {
         );
     }
 
+    /// A copy-shaped excerpt of a real project CLAUDE.md: descriptions of the workspace and the
+    /// feature flags, a commands block, a table, and a numbered "## Rules" section.
+    const REAL_CLAUDE_MD: &str = r#"# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+**Graphersal** is an in-memory graph traversal engine in Rust modelled on Apache TinkerPop Gremlin. Keep this file short: detail of a subsystem goes into its nested file, not here.
+
+| Nested guidance | Covers |
+|---|---|
+| `crates/graphersal/src/graph/CLAUDE.md` | storage, handles, custom storages |
+
+## Workspace
+
+- `crates/graphersal`: the core library. Almost all work happens here.
+- `crates/graphersal-cli`: the REPL, a one-shot scriptable query runner, `graphersal store ...`, and `--server`.
+- `crates/graphersal-session`: the playground session logic (JSON in, JSON out), shared by `graphersal-wasm` and the dev server; serves any storage. Publishable but internal.
+- `book/`: mdBook docs.
+
+`graphersal` feature flags. All are off by default and must stay strictly additive:
+- `io`: GraphSON 3.0 (primary exchange format, dependency-free) and GraphML (`quick-xml`); neither carries the schema.
+- `script`: the Rhai DSL.
+- `display`: tables via `tabled`. Never pull `tabled` into `script` or the engine.
+- `serde`: `ChangeSet` serialization and the `json` visualizer. It is not a graph file format.
+
+The workspace is on Rust edition 2024 (MSRV 1.88).
+
+## Commands
+
+```bash
+cargo fmt   --all --check                       # rustfmt.toml: max_width = 100, stable options only
+cargo test  --package graphersal --features script,io,display,serde,persist,gql
+```
+
+Use `web_time::Instant`, never `std::time::Instant` (it panics on wasm32-unknown-unknown).
+
+## Rules
+
+1. **No panics in step or script paths.** Don't use `unwrap`/`expect`/`panic!`. Map every failure to a `TraverserError` variant.
+2. **Keep DSL parity.** Any change to a Rust step also updates its Rhai binding.
+3. **Evaluate lazily; don't allocate per item.** Steps must not allocate `HashMap` keys for each traverser.
+9. **Library code logs through `tracing` macros.** Never `println!`/`eprintln!`/`dbg!`.
+12. **English** in every on-disk artifact: code, comments, and docs. Chat may be in any language.
+17. **One integration-test binary.** Every integration test lives in `tests/all/<name>.rs`.
+"#;
+
+    #[test]
+    fn a_real_claude_md_keeps_its_rules_and_skips_its_descriptions() {
+        let rules: Vec<(usize, String)> = rules_in(REAL_CLAUDE_MD);
+        let texts: Vec<&str> = rules.iter().map(|(_, t)| t.as_str()).collect();
+        let starts = |prefix: &str| texts.iter().any(|t| t.starts_with(prefix));
+        // Every numbered item of "## Rules" is kept, with or without a marker word.
+        for rule in [
+            "**No panics in step or script paths.**",
+            "**Keep DSL parity.**",
+            "**Evaluate lazily; don't allocate per item.**",
+            "**Library code logs through `tracing` macros.**",
+            "**English** in every on-disk artifact",
+            "**One integration-test binary.**",
+        ] {
+            assert!(starts(rule), "{rule} missing: {texts:#?}");
+        }
+        // Directive lines elsewhere are kept.
+        assert!(
+            starts("`display`: tables via `tabled`. Never pull"),
+            "{texts:#?}"
+        );
+        assert!(starts("Use `web_time::Instant`, never"), "{texts:#?}");
+        assert!(
+            starts("`graphersal` feature flags. All are off by default and must"),
+            "{texts:#?}"
+        );
+        // Descriptions are skipped.
+        for description in [
+            "This file provides guidance",
+            "`crates/graphersal`: the core library.",
+            "`crates/graphersal-cli`:",
+            "`crates/graphersal-session`:",
+            "`io`: GraphSON 3.0",
+            "`script`: the Rhai DSL.",
+            "`serde`:",
+            "The workspace is on Rust edition 2024",
+            "`book/`",
+        ] {
+            assert!(!starts(description), "{description} kept: {texts:#?}");
+        }
+        assert_eq!(texts.len(), 9, "{texts:#?}");
+    }
+
+    #[test]
+    fn directive_markers_are_whole_words_and_other_languages_need_a_rules_heading() {
+        for text in [
+            "Never push to the main branch without asking.",
+            "You MUST run the tests before every commit.",
+            "Don\u{2019}t commit generated files to the repository.",
+            "Do not edit the vendored files by hand.",
+            "Prefer small pull requests over big ones.",
+            "Avoid global state in the test binaries.",
+            "Use pnpm instead of npm for the web packages.",
+            "No public glob re-exports in the crate root.",
+            "Grep the files only when the graph does not hold it.",
+            "Signed commits are required on the release branch.",
+        ] {
+            assert!(is_directive(text, false), "{text}");
+        }
+        for text in [
+            "Nevertheless the cache is rebuilt every night.",
+            "The hallways of the build system are long and winding.",
+            "The playground is a static page, native only.",
+            "The server keeps no state between two requests.",
+            "Использовать только pnpm для всех пакетов, никогда npm.",
+            "[The book](book/README.md) and [the API](docs/api.md)",
+        ] {
+            assert!(!is_directive(text, false), "{text}");
+        }
+        // Under a rules heading every unit is a rule, in any language; a link list never.
+        assert!(is_directive(
+            "Использовать только pnpm для всех пакетов.",
+            true
+        ));
+        assert!(is_directive(
+            "Write commit messages in the imperative mood.",
+            true
+        ));
+        assert!(!is_directive(
+            "[The book](book/README.md) - [API](docs/api.md)",
+            true
+        ));
+        let text = "# Notes\n\nКоммиты пишутся на английском языке всегда.\n\n## Правила и Rules\n\n\
+                    - Коммиты пишутся на английском языке всегда.\n\n### Details\n\n\
+                    - Write commit messages in the imperative mood.\n\n# Overview\n\n\
+                    - Write commit messages in the imperative mood here.\n";
+        let rules: Vec<usize> = rules_in(text).into_iter().map(|(line, _)| line).collect();
+        assert_eq!(
+            rules,
+            vec![7, 11],
+            "a subheading stays under its rules heading"
+        );
+        for heading in [
+            " Rules",
+            "## MAIN RULE: graph first",
+            " Do and Don't",
+            " Conventions",
+        ] {
+            assert!(is_rules_heading(heading), "{heading}");
+        }
+        for heading in [
+            " Workspace",
+            " Commands",
+            " Local instructions",
+            " Ruler sizes",
+        ] {
+            assert!(!is_rules_heading(heading), "{heading}");
+        }
+    }
+
+    #[test]
+    fn every_unit_of_a_rules_file_is_a_rule() {
+        let text = "Write commit messages in the imperative mood.\n";
+        assert!(rules_in(text).is_empty());
+        assert_eq!(rules_in_file(text, true).len(), 1);
+        assert!(is_rules_file(Path::new("/w/.claude/rules/style.md")));
+        assert!(is_rules_file(Path::new("/w/.cursor/rules/go.mdc")));
+        assert!(is_rules_file(Path::new("/w/.cursorrules")));
+        assert!(!is_rules_file(Path::new("/w/CLAUDE.md")));
+        let home = TempDir::new("ic-rules-file");
+        let dir = home.path().join("rules");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("style.md"), text).unwrap();
+        std::fs::write(home.path().join("CLAUDE.md"), text).unwrap();
+        let spec = |path: PathBuf| json!({"path": path.display().to_string(), "global": true, "loaded_by": ["claude-code"]});
+        let (rules, _) = read_rules(
+            &[
+                spec(dir.join("style.md")),
+                spec(home.path().join("CLAUDE.md")),
+            ],
+            "",
+            "",
+        );
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        assert!(rules[0]["file"].as_str().unwrap().ends_with("style.md"));
+    }
+
+    #[test]
+    fn a_sync_record_of_the_old_version_is_synced_again() {
+        let home = TempDir::new("ic-v1-home");
+        let data = TempDir::new("ic-v1-data");
+        let file = home.path().join("CLAUDE.md");
+        std::fs::write(&file, "Always use npm for every package.\n").unwrap();
+        let files = vec![FileSpec {
+            path: file,
+            global: false,
+            loaded_by: vec![Kind::ClaudeCode],
+        }];
+        let mut send = |_: &Value| Ok(json!({"ok": true, "rules": 1, "pending": 0}));
+        assert!(
+            sync(data.path(), "/w", &files, false, &mut send)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            sync(data.path(), "/w", &files, false, &mut send)
+                .unwrap()
+                .is_none()
+        );
+        // The same record written by a binary before only directives were rules (version 1).
+        let path = State::path(data.path());
+        let old = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"version\": 2", "\"version\": 1");
+        std::fs::write(&path, old).unwrap();
+        assert!(
+            sync(data.path(), "/w", &files, false, &mut send)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            sync(data.path(), "/w", &files, false, &mut send)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_rescan_runs_once_per_store() {
+        let data = TempDir::new("ic-rescan");
+        let calls = std::cell::RefCell::new(Vec::new());
+        let call = |name: &str, _: Value| {
+            calls.borrow_mut().push(name.to_string());
+            Ok(json!({"dropped": 4, "lines": 9}))
+        };
+        assert_eq!(rescan_once(data.path(), "default", &call).unwrap(), 4);
+        assert_eq!(rescan_once(data.path(), "default", &call).unwrap(), 0);
+        assert_eq!(rescan_once(data.path(), "work", &call).unwrap(), 4);
+        assert_eq!(
+            *calls.borrow(),
+            ["rescan_instructions", "rescan_instructions"]
+        );
+        // A failure leaves no marker: it runs again next time.
+        let fail = |_: &str, _: Value| Err("the store failed".to_string());
+        assert!(rescan_once(data.path(), "other", &fail).is_err());
+        assert_eq!(rescan_once(data.path(), "other", &call).unwrap(), 4);
+    }
+
     #[test]
     fn code_blocks_comments_front_matter_and_the_managed_block_are_left_out() {
         let text = format!(
@@ -568,7 +1029,7 @@ mod tests {
 
     #[test]
     fn a_long_paragraph_is_cut() {
-        let long = "word ".repeat(200);
+        let long = format!("Always {}", "word ".repeat(200));
         let rules = rules_in(&long);
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].1.chars().count(), MAX_RULE_CHARS);

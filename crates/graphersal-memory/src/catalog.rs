@@ -43,7 +43,7 @@ pub const UI_FUNCTIONS: [&str; 6] = [
 ];
 
 /// The internal functions, in the order of `catalog/internal.json`.
-pub const INTERNAL_FUNCTIONS: [&str; 12] = [
+pub const INTERNAL_FUNCTIONS: [&str; 13] = [
     "indexed_sessions",
     "index_session",
     "index_turns",
@@ -56,6 +56,7 @@ pub const INTERNAL_FUNCTIONS: [&str; 12] = [
     "link_memories",
     "sync_instructions",
     "scan_instructions",
+    "rescan_instructions",
 ];
 
 /// The folder of the product's saved queries.
@@ -130,6 +131,7 @@ fn body(name: &str) -> Option<&'static str> {
         "link_memories" => include_str!("catalog/link_memories.rhai"),
         "sync_instructions" => include_str!("catalog/sync_instructions.rhai"),
         "scan_instructions" => include_str!("catalog/scan_instructions.rhai"),
+        "rescan_instructions" => include_str!("catalog/rescan_instructions.rhai"),
         _ => return None,
     })
 }
@@ -1621,7 +1623,9 @@ mod tests {
         synced
     }
 
-    const NPM: &str = "Always use npm for installing packages, never another package manager.";
+    // Close enough in wording for the candidate bar (semantic similarity 0.6) of the built-in
+    // hash-ngram embedder the tests run with.
+    const NPM: &str = "Always use npm to install dependencies, never pnpm.";
 
     #[test]
     fn the_schema_declares_instruction_lines_and_their_comparisons() {
@@ -1790,6 +1794,87 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_only_on_the_same_topic_is_no_candidate_and_the_rescan_keeps_decisions() {
+        let mut session = conflict_store(&[
+            (
+                "use-pnpm",
+                "project",
+                "Install dependencies with pnpm, not npm",
+            ),
+            ("small-commits", "project", "Keep commits small and focused"),
+        ]);
+        sync_rules(
+            &mut session,
+            vec![
+                // Close in meaning and wording: a candidate.
+                rule("00000000000000e1", NPM, "/p/CLAUDE.md", 3, false),
+                // The same topic (packages), one shared word at most: none.
+                rule(
+                    "00000000000000e2",
+                    "Always use npm for installing packages, never another package manager.",
+                    "/p/CLAUDE.md",
+                    5,
+                    false,
+                ),
+                rule(
+                    "00000000000000e3",
+                    "Write commit messages in the imperative mood.",
+                    "/p/CLAUDE.md",
+                    7,
+                    false,
+                ),
+            ],
+        );
+        let listed = call_in(&mut session, "conflicts", json!({"k": 10}));
+        let pairs: Vec<(String, String)> = listed["rules_unchecked"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                (
+                    p["rule"]["rule"].as_str().unwrap().to_string(),
+                    p["memory"]["slug"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            [("00000000000000e1".to_string(), "use-pnpm".to_string())],
+            "{listed}"
+        );
+        // A settled pair stays through the rescan, a waiting one goes and every line is
+        // scanned again.
+        call_in(
+            &mut session,
+            "settle",
+            json!({"slug": "use-pnpm", "decision": "conflict", "rule": "00000000000000e1"}),
+        );
+        remember_in(
+            &mut session,
+            json!({"slug": "npm-only", "summary": "Install dependencies with npm only, never pnpm"}),
+        );
+        let before = call_in(&mut session, "open_conflicts", json!({}));
+        assert!(before["rules_unchecked"].as_u64().unwrap() > 0, "{before}");
+        let rescanned = call(&mut session, "rescan_instructions", &json!({})).unwrap();
+        assert_eq!(
+            rescanned["dropped"], before["rules_unchecked"],
+            "{rescanned}"
+        );
+        assert_eq!(rescanned["lines"], 3);
+        let after = call_in(&mut session, "open_conflicts", json!({}));
+        assert_eq!(after["rules_unchecked"], 0, "{after}");
+        assert_eq!(
+            after["rules_open"][0]["memory"]["slug"], "use-pnpm",
+            "{after}"
+        );
+        let scan = call_in(&mut session, "scan_instructions", json!({"limit": 10}));
+        assert_eq!(scan["scanned"], 3, "{scan}");
+        let again = call_in(&mut session, "open_conflicts", json!({}));
+        assert!(again["rules_unchecked"].as_u64().unwrap() > 0, "{again}");
+        assert_eq!(again["rules_open"].as_array().unwrap().len(), 1, "{again}");
+    }
+
+    #[test]
     fn a_moved_line_keeps_its_decision_and_a_changed_or_removed_one_drops_it() {
         let mut session = conflict_store(&[
             (
@@ -1827,7 +1912,7 @@ mod tests {
             &mut session,
             vec![rule(
                 "00000000000000b2",
-                "Always use pnpm for installing packages.",
+                "Always use pnpm to install dependencies.",
                 "/p/CLAUDE.md",
                 9,
                 false,

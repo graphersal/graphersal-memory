@@ -1345,7 +1345,7 @@ fn memories_against_instruction_files_reach_conflicts_settle_and_the_start_conte
     let claude = files.path().join("CLAUDE.md");
     std::fs::write(
         &claude,
-        "# Rules\n\n- Always use npm for installing packages, never another package manager.\n\
+        "# Rules\n\n- Always use npm to install dependencies, never pnpm.\n\
          - Write commit messages in the imperative mood.\n",
     )
     .unwrap();
@@ -1418,7 +1418,7 @@ fn memories_against_instruction_files_reach_conflicts_settle_and_the_start_conte
     // status and doctor print these lines (from the daemon's answer).
     let round = crate::start_context::StartContext::from_json(&context.to_json()).unwrap();
     assert!(
-        round.conflict_lines()[0].contains("contradicts a line of your instruction files"),
+        round.conflict_lines()[0].contains("memory vs instruction files: 1 conflict"),
         "{:?}",
         round.conflict_lines()
     );

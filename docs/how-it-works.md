@@ -396,9 +396,17 @@ those files; it finds the pairs worth a look, and the agent or you decide.
 - **Which files**: those of the harnesses graphersal-memory is installed in (else the harness
   that started it), the user-level ones and the session project's; never graphersal-memory's own
   rules files, the exported global memories, or its managed block inside a shared file.
-- **A rule** is one list item, paragraph or block quote (a wrapped line belongs to its item);
-  headings, tables, code blocks, HTML comments, a front matter and units under 20 characters or
-  4 words are left out, a long paragraph is cut at 400 characters. It is kept as an
+- **A rule** is one list item, paragraph or block quote (a wrapped line belongs to its item)
+  that is a directive: it has an English directive word (never, always, must, should, don't /
+  do not, prefer, avoid, instead, required, forbidden, prohibited, make sure, only when / if /
+  after / through / via, or "No ..." opening a sentence), or it stands under a heading that
+  names rules (Rules, Conventions, Guidelines, Do, Don't, Main rule, Policies, ...), or it is in
+  a rules file (a `rules` directory, a `.mdc` file, `.cursorrules`, a file with a front matter).
+  Descriptions of the project ("`io`: GraphSON 3.0 ...", "the core library") are no rules: a
+  memory on the same topic never contradicts them. The words are English: a line in another
+  language counts only under a rules heading or in a rules file. Headings, tables, code blocks,
+  HTML comments, a front matter, link lists and units under 20 characters or 4 words are left
+  out, a long paragraph is cut at 400 characters. It is kept as an
   `instruction` vertex with its file, line, text and harnesses, global for a user-level file,
   else of the project, known by a fingerprint of the project, the file (a project's file by its
   path inside the project, so two checkouts share it) and the text: a moved line keeps its
@@ -415,17 +423,20 @@ those files; it finds the pairs worth a look, and the agent or you decide.
   the start context shows the candidates found so far), and
   `remember` does the same the other way for a memory whose text changed (a project memory
   against its project's lines, a global one against every line it sees). A pair is a candidate
-  when the memory is among the rule's three nearest, scores at least 0.15 and 1.5 times the 12th
-  best, shares a subject word with the rule or has a semantic similarity of 0.45, and is not
-  superseded; no new candidates while 50 wait for their check. These limits were chosen on a
-  handful of examples, not measured on real instruction files: every candidate is only a
-  question, and most are merely on a similar topic.
+  when the memory is among the rule's three nearest, has a semantic similarity of at least 0.6
+  AND shares at least 2 content words with the rule (words of 3 letters or more, stop words and
+  directive words left out, the first 6 letters compared), and is not superseded; no new
+  candidates while 20 wait for their check. The bar was raised on 2026-11-14 after all 50
+  candidates found on real instruction files were merely on the same topic; the candidates
+  then waiting were dropped once and every line scanned again (settled decisions stay).
+  Candidates are the agent's work: you see only the pairs it confirmed as a conflict.
 - **Deciding**: `conflicts()` lists the candidates (`rules_unchecked`, both texts, the file and
   line) and the open ones (`rules_open`); `remember` names the lines near a new memory
   (`instruction_lines`). `settle(slug, "compatible", rule: <id>)` dismisses a pair until the
   memory's text or the line changes; `settle(slug, "conflict", rule: <id>)` records an open
-  conflict, which the start context (at most five, then "N more"; a line counts the candidates
-  still to check), Claude Code's start line, `status`, `doctor` and the UI show until it is
+  conflict, which the start context (at most five, then "N more"; one line asks the agent to
+  check the waiting pairs), Claude Code's start line, `status`, `doctor` and the UI show until
+  it is
   resolved: the memory is outdated (forget it, or remember the new rule with `supersedes`; an
   imported memory's file is edited instead), or the file is outdated (you edit that line; the
   conflict closes by itself at the next sync, when the line changes or goes).
@@ -471,8 +482,9 @@ conflict checks, the history and the start context work exactly as for the agent
   memory in an open conflict or replaced.
 - **Conflicts**: open conflicts side by side (which one replaces the other, both hold, forget
   one, later), and imported memories still to check, one by one; then "Memory vs instruction
-  files": a memory beside the line of an instruction file it may contradict (file and line),
-  with "Both hold", "Memory is outdated" (forget it; not for an imported memory, whose file is
+  files": a memory beside the line of an instruction file your agent found it to contradict
+  (file and line; the pairs still waiting for the agent's check are one quiet line, "N pairs
+  waiting for the agent's check", with a collapsed list), with "Both hold", "Memory is outdated" (forget it; not for an imported memory, whose file is
   the one to edit) and "File is outdated: edit <file> line N" (recorded as a conflict; nothing
   here writes the file, and the pair closes by itself when that line changes).
 - **Sessions** (read-only): the newest sessions by day, search of their decisions and other
