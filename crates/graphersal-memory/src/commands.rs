@@ -160,7 +160,7 @@ pub fn run_cli(
                 if *harness == Some(Harness::All) {
                     let found = setup.detected();
                     options.harnesses = Some(if found.is_empty() {
-                        vec![crate::agents::Kind::ClaudeCode]
+                        vec![crate::agents::Kind::default()]
                     } else {
                         found
                     });

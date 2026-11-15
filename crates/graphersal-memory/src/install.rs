@@ -794,7 +794,7 @@ pub(crate) struct State {
 
 impl State {
     fn path(setup: &Setup) -> PathBuf {
-        Self::path_of(setup, Kind::ClaudeCode)
+        Self::path_of(setup, Kind::default())
     }
 
     pub(crate) fn path_of(setup: &Setup, kind: Kind) -> PathBuf {
@@ -802,7 +802,7 @@ impl State {
     }
 
     pub(crate) fn load(setup: &Setup) -> Result<Self, String> {
-        Self::load_of(setup, Kind::ClaudeCode)
+        Self::load_of(setup, Kind::default())
     }
 
     /// The state of `kind`'s installation (empty when install never ran for it).
@@ -1070,6 +1070,8 @@ struct Current {
     config: Config,
     /// The own memory of each harness that has one, as it is now (wizard order).
     own_memories: Vec<(Kind, crate::agents::OwnMemoryNow)>,
+    /// The harnesses with a file memory of their own, which install imports (Claude Code).
+    file_memory: Vec<Kind>,
     /// Whether our develop server is registered.
     develop_registered: bool,
     /// The file-memory import still to do: (directories, new + changed files).
@@ -1154,8 +1156,12 @@ impl Current {
         let user_config = read_json(agent.mcp_config_file(), &mut errors);
         let mut own_memories = Vec::new();
         let mut natives = Vec::new();
+        let mut file_memory = Vec::new();
         for kind in Kind::ALL {
             let harness = setup.agent_of(kind);
+            if harness.has_file_memory() {
+                file_memory.push(kind);
+            }
             if let Some(own) = harness.own_memory() {
                 own_memories.push((kind, own.now(setup)?));
             }
@@ -1189,6 +1195,7 @@ impl Current {
             not_importable,
             installed: State::exists(setup),
             own_memories,
+            file_memory,
             develop_registered: setup
                 .ours()
                 .entry(&user_config["mcpServers"][DEVELOP_SERVER]),
@@ -1196,7 +1203,7 @@ impl Current {
             detected: {
                 let found = setup.detected();
                 if found.is_empty() {
-                    vec![Kind::ClaudeCode]
+                    vec![Kind::default()]
                 } else {
                     found
                 }
@@ -1232,6 +1239,11 @@ impl Current {
     /// Whether the user switched a harness's own memory off themselves (not install).
     fn own_memory_off_by_user(&self) -> bool {
         self.own_memories.iter().any(|(_, now)| now.off_by_user)
+    }
+
+    /// Whether a harness among `kinds` has a file memory install imports.
+    fn file_memory_in(&self, kinds: &[Kind]) -> bool {
+        kinds.iter().any(|kind| self.file_memory.contains(kind))
     }
 
     /// The own memory of `kind` as it is now.
@@ -1421,7 +1433,7 @@ fn ask(
     let defaults = default_answers(options, current);
     let ask_harnesses = options.harnesses.is_none() && current.detected.len() > 1;
     // The Claude Code questions are asked when Claude Code may be chosen.
-    let claude_possible = defaults.harnesses.contains(&Kind::ClaudeCode) || ask_harnesses;
+    let claude_possible = current.file_memory_in(&defaults.harnesses) || ask_harnesses;
     let codex_possible: Vec<Kind> = if ask_harnesses {
         current.detected.clone()
     } else {
@@ -1458,7 +1470,7 @@ fn ask(
     } else {
         defaults.harnesses.clone()
     };
-    let claude = harnesses.contains(&Kind::ClaudeCode);
+    let claude = current.file_memory_in(&harnesses);
     // Steps counted while another harness could be chosen but not asked for this choice.
     let total = total
         - skipped_steps(
@@ -1622,12 +1634,13 @@ fn ask(
         },
         summaries_estimate(setup, &current.config, &harnesses),
     ];
-    if harnesses == [Kind::Cursor] {
-        summary_lines.push(
-            "Cursor's own CLI is not used for summaries (it reports no cost); say yes only if"
-                .to_string(),
-        );
-        summary_lines.push("the command above is installed and logged in.".to_string());
+    // A single harness whose own CLI the summaries do not use says so.
+    if let [only] = harnesses.as_slice()
+        && let Some(note) = crate::harnesses::driver(*only)
+            .headless
+            .and_then(|headless| headless.wizard_summaries_note())
+    {
+        summary_lines.extend(note.iter().map(|line| line.to_string()));
     }
     let summary_lines: Vec<&str> = summary_lines.iter().map(String::as_str).collect();
     console.step(next(), total, "Session summaries", &summary_lines);
@@ -1866,7 +1879,7 @@ fn skipped_steps(
 ) -> usize {
     let others_counted = current.other_step(&possible_harnesses(options, current));
     let others_skipped = usize::from(others_counted && !current.other_step(chosen));
-    let claude = chosen.contains(&Kind::ClaudeCode);
+    let claude = current.file_memory_in(chosen);
     let import_counted = claude_possible && current.import_pending.1 > 0;
     let auto_counted = current.ask_auto_memory(codex_possible);
     let auto_asked = current.own_memory_on(chosen);
@@ -1985,7 +1998,7 @@ fn plan_install(
     current: &Current,
 ) -> Result<InstallPlan, String> {
     let mut conflicts = Vec::new();
-    let claude = answers.harnesses.contains(&Kind::ClaudeCode);
+    let claude = current.file_memory_in(&answers.harnesses);
     let mut shared = vec![Step {
         title: "Agents".to_string(),
         lines: vec![format!(
@@ -2291,7 +2304,7 @@ fn plan_other_memory(
             lines: mentions,
         });
     }
-    if answers.harnesses.contains(&Kind::ClaudeCode) && !current.others.writers.is_empty() {
+    if current.file_memory_in(&answers.harnesses) && !current.others.writers.is_empty() {
         let mut lines: Vec<String> = current
             .others
             .writers
@@ -2771,7 +2784,7 @@ pub fn install(
             .clone()
             .unwrap_or_else(|| current.detected.clone());
         let ask_harnesses = options.harnesses.is_none() && current.detected.len() > 1;
-        let claude_possible = ask_harnesses || offered.contains(&Kind::ClaudeCode);
+        let claude_possible = ask_harnesses || current.file_memory_in(&offered);
         let total = wizard_steps(options, &current, claude_possible, &offered)
             - skipped_steps(
                 options,
@@ -2865,7 +2878,7 @@ pub fn install(
     // Nothing is written while another install or uninstall runs.
     let _lock = InstallLock::take(setup, true)?;
     let mut report = Vec::new();
-    let claude = answers.harnesses.contains(&Kind::ClaudeCode);
+    let claude = current.file_memory_in(&answers.harnesses);
     let (plan, agent_report, backups) =
         apply_with_retries(setup, options, &answers, &current, plan)?;
     // The settings file: the defaults when there is none, then the answers.
@@ -3612,7 +3625,7 @@ fn recap(
         }
     };
     lines.push(("Embedding model", model));
-    if answers.harnesses.contains(&Kind::ClaudeCode) {
+    if current.file_memory_in(&answers.harnesses) {
         let (_, _, new, changed, _) = import::totals(&plan.imports);
         lines.push((
             "File memory",
@@ -4070,7 +4083,7 @@ pub fn uninstall_with(
     let kinds = options.harnesses.clone().unwrap_or_else(|| {
         let installed = setup.installed();
         if installed.is_empty() {
-            vec![Kind::ClaudeCode]
+            vec![Kind::default()]
         } else {
             installed
         }

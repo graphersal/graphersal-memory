@@ -52,6 +52,11 @@ pub trait Headless: Sync {
     fn free_note(&self, _command: &[String]) -> Option<String> {
         None
     }
+    /// The wizard's note under the summaries question when it is the only harness chosen and
+    /// the summaries do not use its own CLI (lines of the wizard's width).
+    fn wizard_summaries_note(&self) -> Option<&'static [&'static str]> {
+        None
+    }
     /// Why the summaries do not run through it (Cursor's CLI); `None` when they do.
     fn summaries_refusal(&self) -> Option<&'static str> {
         None

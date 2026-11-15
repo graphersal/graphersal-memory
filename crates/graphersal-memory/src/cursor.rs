@@ -371,6 +371,13 @@ impl crate::harness::Headless for HeadlessRun {
         Some(NO_HEADLESS)
     }
 
+    fn wizard_summaries_note(&self) -> Option<&'static [&'static str]> {
+        Some(&[
+            "Cursor's own CLI is not used for summaries (it reports no cost); say yes only if",
+            "the command above is installed and logged in.",
+        ])
+    }
+
     fn bench_refusal(&self, _command: &[String]) -> Option<(&'static str, &'static str)> {
         Some((
             "the bench does not run through Cursor's CLI.",
