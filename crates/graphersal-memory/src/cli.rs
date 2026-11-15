@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (engine: graphersal ",
-    crate::engine::engine_version!(),
+    crate::runtime::engine::engine_version!(),
     ")"
 );
 
@@ -303,7 +303,7 @@ pub enum Command {
     Hook {
         /// The hook event.
         #[arg(value_enum)]
-        event: crate::hook::HookEvent,
+        event: crate::memory::hook::HookEvent,
         /// The harness that runs the hook (Claude Code's, Codex's or Cursor's hooks, opencode's
         /// plugin).
         #[arg(long, value_enum, default_value_t = Harness::DEFAULT)]
@@ -352,19 +352,19 @@ pub enum LanguageArg {
 
 impl LanguageArg {
     /// The language.
-    pub fn language(self) -> crate::language::Language {
+    pub fn language(self) -> crate::install::language::Language {
         match self {
-            LanguageArg::English => crate::language::Language::English,
-            LanguageArg::Any => crate::language::Language::Any,
+            LanguageArg::English => crate::install::language::Language::English,
+            LanguageArg::Any => crate::install::language::Language::Any,
         }
     }
 }
 
 /// Parses `--model`: a repository name, or `builtin` (stored as `hash-ngram/1`).
 fn parse_model(text: &str) -> Result<String, String> {
-    if text == "builtin" || text == crate::models::BUILTIN {
-        Ok(crate::models::BUILTIN.to_string())
-    } else if crate::download::is_repo_name(text) && text.contains('/') {
+    if text == "builtin" || text == crate::install::models::BUILTIN {
+        Ok(crate::install::models::BUILTIN.to_string())
+    } else if crate::install::download::is_repo_name(text) && text.contains('/') {
         Ok(text.to_string())
     } else {
         Err(format!(
@@ -573,7 +573,7 @@ fn parse_budget(text: &str) -> Result<f64, String> {
 
 /// Parses `--idle`.
 fn parse_idle(text: &str) -> Result<std::time::Duration, String> {
-    crate::daemon::parse_duration(text)
+    crate::runtime::daemon::parse_duration(text)
 }
 
 /// An AI agent harness graphersal-memory can be installed into, or every one: the values are
@@ -581,7 +581,7 @@ fn parse_idle(text: &str) -> Result<std::time::Duration, String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
     /// One harness.
-    One(crate::agents::Kind),
+    One(crate::harnesses::agent::Kind),
     /// Every supported harness.
     All,
 }
@@ -590,7 +590,7 @@ impl ValueEnum for Harness {
     fn value_variants<'a>() -> &'a [Self] {
         static VARIANTS: std::sync::OnceLock<Vec<Harness>> = std::sync::OnceLock::new();
         VARIANTS.get_or_init(|| {
-            crate::agents::Kind::ALL
+            crate::harnesses::agent::Kind::ALL
                 .into_iter()
                 .map(Harness::One)
                 .chain([Harness::All])
@@ -613,13 +613,13 @@ impl ValueEnum for Harness {
 
 impl Harness {
     /// The default harness.
-    pub const DEFAULT: Harness = Harness::One(crate::agents::Kind::DEFAULT);
+    pub const DEFAULT: Harness = Harness::One(crate::harnesses::agent::Kind::DEFAULT);
 
     /// The supported harnesses this choice names.
-    pub fn kinds(self) -> Option<Vec<crate::agents::Kind>> {
+    pub fn kinds(self) -> Option<Vec<crate::harnesses::agent::Kind>> {
         Some(match self {
             Harness::One(kind) => vec![kind],
-            Harness::All => crate::agents::Kind::ALL.to_vec(),
+            Harness::All => crate::harnesses::agent::Kind::ALL.to_vec(),
         })
     }
 
@@ -719,7 +719,7 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Uninstall {
-                harness: Some(Harness::One(crate::agents::Kind::Cursor)),
+                harness: Some(Harness::One(crate::harnesses::agent::Kind::Cursor)),
                 dry_run: true,
                 yes: false,
                 purge: false,
@@ -796,7 +796,10 @@ mod tests {
         let err = parse(&["--version"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
         assert!(LONG_VERSION.starts_with(env!("CARGO_PKG_VERSION")));
-        assert!(LONG_VERSION.contains(concat!("graphersal ", crate::engine::engine_version!())));
+        assert!(LONG_VERSION.contains(concat!(
+            "graphersal ",
+            crate::runtime::engine::engine_version!()
+        )));
     }
 
     #[test]
@@ -830,7 +833,7 @@ mod tests {
                 dry_run: false,
                 yes: true,
                 language: None,
-                model: Some(crate::models::BUILTIN.to_string()),
+                model: Some(crate::install::models::BUILTIN.to_string()),
                 no_import: false,
                 keep_auto_memory: false,
                 enable_develop: true,
@@ -859,7 +862,7 @@ mod tests {
         assert_eq!(
             parse(&["hook", "session-start"]).unwrap().command,
             Command::Hook {
-                event: crate::hook::HookEvent::SessionStart,
+                event: crate::memory::hook::HookEvent::SessionStart,
                 harness: Harness::DEFAULT
             }
         );
@@ -1219,7 +1222,7 @@ mod tests {
 
     #[test]
     fn harness_choices_parse() {
-        use crate::agents::Kind;
+        use crate::harnesses::agent::Kind;
         for (arg, kinds) in [
             ("claude-code", vec![Kind::ClaudeCode]),
             ("opencode", vec![Kind::OpenCode]),
@@ -1249,8 +1252,8 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Hook {
-                event: crate::hook::HookEvent::SessionEnd,
-                harness: Harness::One(crate::agents::Kind::OpenCode)
+                event: crate::memory::hook::HookEvent::SessionEnd,
+                harness: Harness::One(crate::harnesses::agent::Kind::OpenCode)
             }
         );
         let help = Cli::command()

@@ -7,14 +7,14 @@
 //! ```
 //!
 //! `memory.language` (`english`, the default, or `any`) is the memory language rule of the MCP
-//! instructions and the managed rule block (`crate::language`). `memory.start_context_chars`
+//! instructions and the managed rule block (`crate::install::language`). `memory.start_context_chars`
 //! (default 8000, `0` = off) is the budget of the start context, the always-loaded memories put
-//! into the start of every session (`crate::start_context`). `embedding.model` is the
+//! into the start of every session (`crate::memory::start_context`). `embedding.model` is the
 //! embedding model the daemon makes every store's vector rules use: a Hugging Face repository
-//! downloaded into `<data dir>/models/` (`crate::models`), or `hash-ngram/1` (the built-in
+//! downloaded into `<data dir>/models/` (`crate::install::models`), or `hash-ngram/1` (the built-in
 //! embedder); without the key the stores keep the embedder they have. `install` writes both.
 //!
-//! `summaries` is the opt-in of session summaries (`crate::summaries`): off unless `enabled` is
+//! `summaries` is the opt-in of session summaries (`crate::memory::summaries`): off unless `enabled` is
 //! `true`; `harness_command` is the user's own harness run once per session; the budget caps the
 //! spend per calendar month (UTC); `since` (optional, a date such as `2026-11-01`) leaves older
 //! sessions without a summary.
@@ -23,10 +23,10 @@
 //! `0` = only by hand) is the WAL volume after which the engine writes a checkpoint, so a daemon
 //! start never replays more than about that; `store.keep_history` (days as a number, a duration
 //! such as `"30d"`, or `"forever"`; default 30 days, `0` = forever) is how far back the daemon
-//! keeps the store's history (older snapshots and WAL are pruned, `crate::maintenance`).
+//! keeps the store's history (older snapshots and WAL are pruned, `crate::runtime::maintenance`).
 //!
 //! `updates.check` (default `true`) lets `graphersal-memory ui` ask GitHub for the latest release
-//! at most once a day (`crate::update`); `false`, or `GRAPHERSAL_MEMORY_UPDATE_CHECK=off`, never.
+//! at most once a day (`crate::install::update`); `false`, or `GRAPHERSAL_MEMORY_UPDATE_CHECK=off`, never.
 //!
 //! A missing file means the defaults; `install` writes one with the defaults when there is none,
 //! so its shape is visible. Precedence for every setting: the command-line flag, then the
@@ -149,7 +149,7 @@ pub struct Config {
     /// The daemon's idle time, when the file sets it.
     pub idle: Option<Duration>,
     /// The memory language, when the file sets it (`None`: the default, English).
-    pub language: Option<crate::language::Language>,
+    pub language: Option<crate::install::language::Language>,
     /// The embedding model, when the file sets it: a repository or `hash-ngram/1`.
     pub model: Option<String>,
     /// `memory.start_context_chars`, when the file sets it (`0`: no start context).
@@ -161,7 +161,7 @@ pub struct Config {
     /// `store.keep_history`, when the file sets it: `Some(None)` keeps everything.
     pub keep_history: Option<Option<Duration>>,
     /// `updates.check`, when the file sets it (`false`: the UI never asks for the latest
-    /// release; `crate::update`).
+    /// release; `crate::install::update`).
     pub update_check: Option<bool>,
     /// Keys this version does not know (dotted paths).
     pub unknown: Vec<String>,
@@ -209,7 +209,7 @@ impl Config {
                     .as_str()
                     .ok_or("'daemon.idle' must be a string such as \"2h\"")?;
                 config.idle = Some(
-                    crate::daemon::parse_duration(text)
+                    crate::runtime::daemon::parse_duration(text)
                         .map_err(|err| format!("daemon.idle: {err}"))?,
                 );
             }
@@ -224,7 +224,7 @@ impl Config {
                     .as_str()
                     .ok_or("'memory.language' must be \"english\" or \"any\"")?;
                 config.language = Some(
-                    crate::language::Language::parse(text)
+                    crate::install::language::Language::parse(text)
                         .ok_or("'memory.language' must be \"english\" or \"any\"")?,
                 );
             }
@@ -242,7 +242,8 @@ impl Config {
                 .ok_or("'embedding' must be an object")?;
             if let Some(model) = embedding.get("model") {
                 let text = model.as_str().filter(|text| {
-                    *text == crate::models::BUILTIN || crate::download::is_repo_name(text)
+                    *text == crate::install::models::BUILTIN
+                        || crate::install::download::is_repo_name(text)
                 });
                 config.model = Some(
                     text.ok_or(
@@ -283,15 +284,15 @@ impl Config {
     }
 
     /// The memory language (the file's, else English).
-    pub fn language(&self) -> crate::language::Language {
+    pub fn language(&self) -> crate::install::language::Language {
         self.language.unwrap_or_default()
     }
 
     /// The start context's budget in characters (the file's, else
-    /// [`crate::start_context::DEFAULT_CHARS`]; `0`: none).
+    /// [`crate::memory::start_context::DEFAULT_CHARS`]; `0`: none).
     pub fn start_context_chars(&self) -> usize {
         self.start_context_chars
-            .unwrap_or(crate::start_context::DEFAULT_CHARS)
+            .unwrap_or(crate::memory::start_context::DEFAULT_CHARS)
     }
 
     /// The default settings file's text.
@@ -302,7 +303,10 @@ impl Config {
             "summaries": {"enabled": false, "harness_command": DEFAULT_HARNESS_COMMAND,
                           "monthly_budget_usd": DEFAULT_MONTHLY_BUDGET_USD},
         });
-        format!("{}\n", crate::jsonedit::render(&value, Some("  "), 0))
+        format!(
+            "{}\n",
+            crate::install::jsonedit::render(&value, Some("  "), 0)
+        )
     }
 }
 
@@ -357,7 +361,7 @@ pub fn parse_keep(value: &Value) -> Result<Option<Duration>, String> {
     if let Ok(days) = text.parse::<u64>() {
         return parse_keep(&Value::from(days));
     }
-    let keep = crate::daemon::parse_duration(text)?;
+    let keep = crate::runtime::daemon::parse_duration(text)?;
     Ok((!keep.is_zero()).then_some(keep))
 }
 
@@ -417,7 +421,9 @@ pub fn with_summaries(
     };
     Config::parse(text.as_bytes())?;
     let mut set = |key: &str, value: &Value| -> Result<(), String> {
-        if let Some((new, _)) = crate::jsonedit::set_member(&text, &["summaries"], key, value)? {
+        if let Some((new, _)) =
+            crate::install::jsonedit::set_member(&text, &["summaries"], key, value)?
+        {
             text = new;
         }
         Ok(())
@@ -441,7 +447,8 @@ pub fn with_values(
     };
     Config::parse(text.as_bytes())?;
     for (section, key, value) in values {
-        if let Some((new, _)) = crate::jsonedit::set_member(&text, &[section], key, value)? {
+        if let Some((new, _)) = crate::install::jsonedit::set_member(&text, &[section], key, value)?
+        {
             text = new;
         }
     }
@@ -478,10 +485,10 @@ pub fn idle(
         return Ok(idle);
     }
     if let Some(text) = env.filter(|text| !text.is_empty()) {
-        return crate::daemon::parse_duration(&text)
-            .map_err(|err| format!("{}: {err}", crate::daemon::IDLE_ENV));
+        return crate::runtime::daemon::parse_duration(&text)
+            .map_err(|err| format!("{}: {err}", crate::runtime::daemon::IDLE_ENV));
     }
-    Ok(config.idle.unwrap_or(crate::daemon::DEFAULT_IDLE))
+    Ok(config.idle.unwrap_or(crate::runtime::daemon::DEFAULT_IDLE))
 }
 
 #[cfg(test)]
@@ -505,7 +512,7 @@ mod tests {
         assert_eq!(idle(None, Some(String::new()), &file).unwrap(), s(1800));
         assert_eq!(
             idle(None, None, &none).unwrap(),
-            crate::daemon::DEFAULT_IDLE
+            crate::runtime::daemon::DEFAULT_IDLE
         );
         assert!(idle(None, Some("soon".into()), &file).is_err());
     }
@@ -583,7 +590,7 @@ mod tests {
         let config = Config::parse(Config::default_text().as_bytes()).unwrap();
         assert_eq!(
             config.start_context_chars(),
-            crate::start_context::DEFAULT_CHARS
+            crate::memory::start_context::DEFAULT_CHARS
         );
         let set =
             Config::parse(br#"{"version": 1, "memory": {"start_context_chars": 0}}"#).unwrap();
@@ -601,7 +608,10 @@ mod tests {
     fn language_and_model_parse_and_are_set_in_place() {
         let config = Config::parse(Config::default_text().as_bytes()).unwrap();
         assert_eq!(config.language, None);
-        assert_eq!(config.language(), crate::language::Language::English);
+        assert_eq!(
+            config.language(),
+            crate::install::language::Language::English
+        );
         assert_eq!(config.model, None);
         let text = with_values(
             Some("{\"version\": 1, \"x\": 1}\n"),
@@ -617,7 +627,10 @@ mod tests {
         .unwrap();
         assert!(text.contains("\"x\": 1"), "{text}");
         let config = Config::parse(text.as_bytes()).unwrap();
-        assert_eq!(config.language, Some(crate::language::Language::Any));
+        assert_eq!(
+            config.language,
+            Some(crate::install::language::Language::Any)
+        );
         assert_eq!(
             config.model.as_deref(),
             Some("minishlab/potion-multilingual-128M")
@@ -697,7 +710,7 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_the_defaults() {
-        let dir = crate::mcp_tests::TempDir::new("cfg");
+        let dir = crate::runtime::mcp_tests::TempDir::new("cfg");
         assert_eq!(Config::load(dir.path()).unwrap(), Config::default());
         std::fs::write(path(dir.path()), "{").unwrap();
         let err = Config::load(dir.path()).unwrap_err();

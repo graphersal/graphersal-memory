@@ -18,14 +18,14 @@
 //! `GRAPHERSAL_MEMORY_HOOK=off`.
 //!
 //! opencode ([`build_opencode`]): the sandbox is a configuration and a data directory of the
-//! arm's own (`XDG_CONFIG_HOME`/`XDG_DATA_HOME`, `crate::opencode::build_sandbox`), so none of
+//! arm's own (`XDG_CONFIG_HOME`/`XDG_DATA_HOME`, `crate::harnesses::opencode::build_sandbox`), so none of
 //! the user's configuration, plugins, rules, MCP servers or sessions are loaded and its runs are
 //! not stored in the user's session database; `config/opencode/opencode.json` holds the arm's
 //! MCP servers, its permissions (everything denied but the arm's tools) and `instructions`
 //! naming `system.md`; the user's logins (`auth.json`) are copied, never changed.
 //!
 //! Codex ([`build_codex`]): the sandbox is a `CODEX_HOME` of the arm's own
-//! (`crate::codex::build_sandbox`): its `config.toml` holds the user's model settings, no hooks,
+//! (`crate::harnesses::codex::build_sandbox`): its `config.toml` holds the user's model settings, no hooks,
 //! no Codex memories, no history, and every built-in tool switched off (shell, unified exec,
 //! image viewing, web search, sub-agents, apps, plugins), so an arm sees nothing but its context
 //! and, for the graph arm, the read-only memory functions of a server over a FORK of the store
@@ -93,12 +93,12 @@ impl Sources {
     /// `CLAUDE.md`; 2.x has no such fallback), those that exist, each without
     /// graphersal-memory's managed block.
     pub fn opencode_instructions_of(
-        paths: &crate::opencode::OpenCodePaths,
+        paths: &crate::harnesses::opencode::OpenCodePaths,
         project: &str,
     ) -> Vec<(String, String)> {
         let root = Path::new(project);
         let mut out = Vec::new();
-        let fallback = paths.major() == crate::opencode::Major::V1;
+        let fallback = paths.major() == crate::harnesses::opencode::Major::V1;
         let mut global = vec![paths.config_dir.join("AGENTS.md")];
         let mut local = vec![root.join("AGENTS.md")];
         if fallback {
@@ -126,18 +126,18 @@ impl Sources {
     /// holds text, else `AGENTS.md`, in the Codex home) and the project's (the same two names
     /// in its root), those that exist, each without graphersal-memory's managed block.
     pub fn codex_instructions_of(
-        paths: &crate::codex::CodexPaths,
+        paths: &crate::harnesses::codex::CodexPaths,
         project: &str,
     ) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for (label, path) in [
             (
                 "global AGENTS.md",
-                crate::codex::instruction_file(&paths.codex_home),
+                crate::harnesses::codex::instruction_file(&paths.codex_home),
             ),
             (
                 "project AGENTS.md",
-                crate::codex::instruction_file(Path::new(project)),
+                crate::harnesses::codex::instruction_file(Path::new(project)),
             ),
         ] {
             let Ok(text) = std::fs::read_to_string(&path) else {
@@ -215,7 +215,10 @@ fn write(path: &Path, text: &str) -> Result<(), String> {
 }
 
 fn pretty(value: &Value) -> String {
-    format!("{}\n", crate::jsonedit::render(value, Some("  "), 0))
+    format!(
+        "{}\n",
+        crate::install::jsonedit::render(value, Some("  "), 0)
+    )
 }
 
 /// The instruction files as one section of the system prompt.
@@ -290,7 +293,7 @@ pub fn build(arm: BenchArm, arms_dir: &Path, sources: &Sources) -> Result<Sandbo
         }
         BenchArm::Graph => {
             let data = dir.join("data");
-            let fork = crate::store::default_store_dir(&data);
+            let fork = crate::runtime::store::default_store_dir(&data);
             fork_store(&sources.store_dir, &fork)?;
             scratch = Some(data.clone());
             args.extend([
@@ -309,7 +312,7 @@ pub fn build(arm: BenchArm, arms_dir: &Path, sources: &Sources) -> Result<Sandbo
                     "command": sources.exe.display().to_string(),
                     "args": ["mcp", "--no-daemon", "--data-dir", data.display().to_string(),
                              "--project", sources.project],
-                    "env": {crate::summaries::HOOK_ENV: "off"},
+                    "env": {crate::memory::summaries::HOOK_ENV: "off"},
                 }}),
                 format!(
                     "{}# Memory\n\nYour memory of this developer and every past session of this \
@@ -387,7 +390,7 @@ pub fn build_opencode(
         ),
         BenchArm::Graph => {
             let data = dir.join("data-store");
-            let fork = crate::store::default_store_dir(&data);
+            let fork = crate::runtime::store::default_store_dir(&data);
             fork_store(&sources.store_dir, &fork)?;
             scratch = Some(data.clone());
             (
@@ -396,7 +399,7 @@ pub fn build_opencode(
                     "command": [sources.exe.display().to_string(), "mcp", "--no-daemon",
                                 "--data-dir", data.display().to_string(),
                                 "--project", sources.project],
-                    "environment": {crate::summaries::HOOK_ENV: "off"},
+                    "environment": {crate::memory::summaries::HOOK_ENV: "off"},
                     "enabled": true,
                 }}),
                 READ_FUNCTIONS
@@ -428,9 +431,9 @@ pub fn build_opencode(
     };
     write(&system_file, &system)?;
     let allow: Vec<&str> = allow.iter().map(String::as_str).collect();
-    let env = crate::opencode::build_sandbox(
+    let env = crate::harnesses::opencode::build_sandbox(
         &dir.join("opencode"),
-        &json!({"mcp": mcp, "permission": crate::opencode::permissions(&allow),
+        &json!({"mcp": mcp, "permission": crate::harnesses::opencode::permissions(&allow),
                 "instructions": [system_file.display().to_string()]}),
         Some(user_db),
     )?;
@@ -453,9 +456,9 @@ pub fn tool_free_opencode(
     let cwd = dir.join("cwd");
     std::fs::create_dir_all(&cwd)
         .map_err(|err| format!("cannot create {}: {err}", cwd.display()))?;
-    let env = crate::opencode::build_sandbox(
+    let env = crate::harnesses::opencode::build_sandbox(
         &dir.join("opencode"),
-        &json!({"mcp": {}, "permission": crate::opencode::permissions(&[])}),
+        &json!({"mcp": {}, "permission": crate::harnesses::opencode::permissions(&[])}),
         Some(user_db),
     )?;
     Ok((cwd, env))
@@ -463,7 +466,7 @@ pub fn tool_free_opencode(
 
 /// The `config.toml` of a Codex sandbox with `tables` (the graph arm's server).
 fn codex_config(user_config: &Path, tables: &str) -> String {
-    crate::codex::sandbox_config(Some(user_config), tables)
+    crate::harnesses::codex::sandbox_config(Some(user_config), tables)
 }
 
 /// The sandbox of `arm` for Codex in `<arms_dir>/<arm>/`: `codex exec --json` with a
@@ -473,7 +476,7 @@ pub fn build_codex(
     arm: BenchArm,
     arms_dir: &Path,
     sources: &Sources,
-    paths: &crate::codex::CodexPaths,
+    paths: &crate::harnesses::codex::CodexPaths,
 ) -> Result<Sandbox, String> {
     let dir = arms_dir.join(arm.name());
     let cwd = dir.join("cwd");
@@ -500,7 +503,7 @@ pub fn build_codex(
         ),
         BenchArm::Graph => {
             let data = dir.join("data-store");
-            let fork = crate::store::default_store_dir(&data);
+            let fork = crate::runtime::store::default_store_dir(&data);
             fork_store(&sources.store_dir, &fork)?;
             scratch = Some(data.clone());
             let args = [
@@ -517,11 +520,11 @@ pub fn build_codex(
                     "[mcp_servers.{SERVER}]\ncommand = {}\nargs = {}\nstartup_timeout_sec = {}\n\
                      enabled_tools = {}\ndefault_tools_approval_mode = \"approve\"\n\
                      env = {{ {} = \"off\" }}\n",
-                    crate::tomledit::string(&sources.exe.display().to_string()),
-                    crate::tomledit::strings(&args),
-                    crate::codex::STARTUP_TIMEOUT_SECS,
-                    crate::tomledit::strings(&tools),
-                    crate::summaries::HOOK_ENV
+                    crate::install::tomledit::string(&sources.exe.display().to_string()),
+                    crate::install::tomledit::strings(&args),
+                    crate::harnesses::codex::STARTUP_TIMEOUT_SECS,
+                    crate::install::tomledit::strings(&tools),
+                    crate::memory::summaries::HOOK_ENV
                 ),
                 format!(
                     "{}# Memory\n\nYour memory of this developer and every past session of this \
@@ -546,7 +549,7 @@ pub fn build_codex(
             );
         }
     };
-    let env = crate::codex::build_sandbox(
+    let env = crate::harnesses::codex::build_sandbox(
         &dir.join("codex"),
         &codex_config(&paths.config_file, &tables),
         Some(&system),
@@ -566,12 +569,12 @@ pub fn build_codex(
 /// `<dir>/`. Returns the working directory and the environment.
 pub fn tool_free_codex(
     dir: &Path,
-    paths: &crate::codex::CodexPaths,
+    paths: &crate::harnesses::codex::CodexPaths,
 ) -> Result<(PathBuf, Vec<(String, String)>), String> {
     let cwd = dir.join("cwd");
     std::fs::create_dir_all(&cwd)
         .map_err(|err| format!("cannot create {}: {err}", cwd.display()))?;
-    let env = crate::codex::build_sandbox(
+    let env = crate::harnesses::codex::build_sandbox(
         &dir.join("codex"),
         &codex_config(&paths.config_file, ""),
         None,
@@ -597,9 +600,9 @@ pub fn tool_free(dir: &Path) -> Result<(PathBuf, Vec<String>), String> {
 
 /// Copies the live store in `store_dir` into `fork` (`Store::fork_dir`, read without the
 /// store's lock while the daemon serves it), holding the store's copy lock so the daemon does
-/// not prune files the copy still reads (`crate::maintenance::hold_for_copy`).
+/// not prune files the copy still reads (`crate::runtime::maintenance::hold_for_copy`).
 pub(crate) fn fork_store(store_dir: &Path, fork: &Path) -> Result<(), String> {
-    crate::maintenance::hold_for_copy(store_dir, || {
+    crate::runtime::maintenance::hold_for_copy(store_dir, || {
         graphersal::persist::Store::fork_dir(
             store_dir,
             graphersal::persist::RecoveryTarget::Latest,
@@ -634,8 +637,8 @@ mod tests {
 
     #[test]
     fn only_opencode_1x_falls_back_to_claude_md() {
-        use crate::opencode::{Major, OpenCodePaths};
-        let home = crate::mcp_tests::TempDir::new("arms-oc");
+        use crate::harnesses::opencode::{Major, OpenCodePaths};
+        let home = crate::runtime::mcp_tests::TempDir::new("arms-oc");
         let project = home.path().join("work");
         std::fs::create_dir_all(home.path().join(".claude")).unwrap();
         std::fs::create_dir_all(&project).unwrap();

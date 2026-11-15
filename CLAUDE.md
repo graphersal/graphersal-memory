@@ -9,6 +9,26 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
 
 ## Layout
 
+`crates/graphersal-memory/src/` is grouped by meaning; the root holds only `main.rs`, `cli.rs`,
+`commands.rs`, `config.rs` and `fsutil.rs`:
+
+- `harnesses/`: the `Harness` trait and its capabilities (`agent.rs`), the registry (`mod.rs`),
+  headless runs (`headless.rs`), one module per harness (`claude_code`, `codex`, `codewhale`,
+  `cursor`, `opencode`) and the conformance suite;
+- `install/`: install, uninstall, status and doctor (`mod.rs`, the shared wizard and loops),
+  the wizard's console, the memory language, Windows shells, the JSON and TOML editors, other
+  memory (`coexist`), the embedding models and their download, `upgrade`;
+- `runtime/`: the daemon, the shim, their transport and protocol, the MCP client, the stores,
+  their registry and maintenance, the engine pin, the MCP profiles and the product catalog;
+- `memory/`: the file-memory import and the export, project identity, the start context,
+  instruction files, past sessions (indexing, the shim's start and end, transcripts,
+  summaries) and the hooks;
+- `ui/`: the browser UI's server, its assets and the relay;
+- `bench/`: the built-in A/B.
+
+Unit tests that need more than one module's helpers sit beside their module as
+`<name>_tests.rs` (`install/install_tests.rs`, `runtime/mcp_tests.rs`, ...).
+
 - `install.sh`, `install.ps1`: the one-line installers attached to every release (see Releases).
 - `crates/graphersal-memory/`: the single binary crate (`graphersal-memory`). There is one crate
   until a second binary or a library user appears, with modules per area:
@@ -21,11 +41,11 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects`, `start-context` and the
     hidden `hook` work on Claude Code, opencode, Codex, Cursor and CodeWhale (no hooks: `hook --harness codewhale` does nothing) (`Setup` from the environment, with the model download
     `Source`; `bench_options` for `bench`; `DaemonSource` reads the memories for the export);
-    `ui` runs the browser UI (`crate::ui`); `upgrade` runs `crate::update::run`; `export` without `--to-files` says it is planned and exits with code 2
+    `ui` runs the browser UI (`crate::ui`); `upgrade` runs `crate::install::update::run`; `export` without `--to-files` says it is planned and exits with code 2
     (`--harness codex` and `--harness cursor` work wherever `claude-code` and `opencode` do;
     a Claude Code hook whose input is Cursor's, `cursor_version`, does nothing); the
     wizard is interactive when stdin and stdout are terminals;
-  - `src/agents.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex | cursor | codewhale, with
+  - `src/harnesses/agent.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex | cursor | codewhale, with
     its id, display and program names, `dir_names` and `cli_help` (its hand-written line of
     `--harness`'s possible values; `cli::Harness` = `One(Kind) | All`, its values from
     `Kind::ALL`); the `Harness` trait: its program
@@ -42,22 +62,22 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `PATH` plus known install locations), `leftovers` (configuration without the program:
     reported, never offered) and `installed` (what status, doctor and uninstall work on). The
     harness refactor (moving every per-harness branch behind the trait) is under way;
-  - `src/claude_code.rs` + `src/claude_code/`: Claude Code, a harness module like the others:
+  - `src/harnesses/claude_code.rs` + `src/harnesses/claude_code/`: Claude Code, a harness module like the others:
     `ClaudeCode` (its `Harness`, `HookHandler` and `OwnMemory` parts, `GLOBAL_RULES_FILE`),
     `ClaudeHeadless`; `claude_code/install.rs` its install parts (the rule block texts and
     `PREVIOUS_BLOCK_FINGERPRINTS`, `ClaudePaths`, the block helpers, `claude_plan`, the
     structural `claude_removal`, `inspect`, `status_lines`, `claude_doctor`, the Git Bash checks;
     `crate::install` re-exports them under their old paths), `claude_code/other.rs` its
     `OtherMemory`, `claude_code/sessions.rs` its `SessionSource`, `claude_code/import.rs` its
-    file-memory import (`crate::import` keeps `Caller`/`Connect`/`slugify` and the memory-file
-    format, and re-exports it), `claude_code/transcript.rs` its JSONL parser (`crate::transcript`
+    file-memory import (`crate::memory::import` keeps `Caller`/`Connect`/`slugify` and the memory-file
+    format, and re-exports it), `claude_code/transcript.rs` its JSONL parser (`crate::memory::transcript`
     keeps the shared `Transcript`, memory writes and path helpers), `claude_code/hook.rs` its
-    hook (`crate::hook` keeps the shared events, input and queueing);
-  - `src/harnesses.rs`: the registry, the one place that names every harness (`of`: the
+    hook (`crate::memory::hook` keeps the shared events, input and queueing);
+  - `src/harnesses/mod.rs`: the registry, the one place that names every harness (`of`: the
     `Harness` of a `Kind`, which `Setup::agent_of` returns; `driver`: the setup-free parts of a
     `Kind`, its `sessions::SessionSource` for the daemon's indexing and its
     `harness::Headless`, `sessions` its shortcut);
-  - `src/opencode.rs` + `src/opencode/`: opencode 1.x and 2.x, one `OpenCode` agent with the
+  - `src/harnesses/opencode.rs` + `src/harnesses/opencode/`: opencode 1.x and 2.x, one `OpenCode` agent with the
     line as data (`Major`, `Detected`, `detect`: `opencode --version` in a scratch home, else the
     database's tables, else 2.x; the hooks never ask the binary). Paths `OpenCodePaths`: XDG
     config/data, the JSONC config file install edits (2.x: no `config.json`, which becomes a
@@ -72,7 +92,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `opencode/sessions.rs` the read-only SQLite reader of both lines' tables (`units`, `read`;
     a session in both is read from 2.x only when 2.x changed it after the copy; a unit path is
     `<db>#<session id>`) with both fixture schemas in its tests;
-  - `src/codex.rs` + `src/codex/`: OpenAI Codex CLI (verified against `rust-v0.167.0`; the
+  - `src/harnesses/codex.rs` + `src/harnesses/codex/`: OpenAI Codex CLI (verified against `rust-v0.167.0`; the
     module docs cite the source files): `CodexPaths` (`$CODEX_HOME` else `~/.codex`:
     `config.toml`, `hooks.json`, the global instruction file = the first non-empty of
     `AGENTS.override.md`/`AGENTS.md`, `sessions/`, the export directory), `Codex` (the `Agent`),
@@ -86,7 +106,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `hooks.state`, which install never writes); `codex/sessions.rs` the rollout reader
     (`sessions/YYYY/MM/DD/rollout-*.jsonl`; `user_message`/`agent_message` events, both history
     modes; sub-agent sessions left out; a unit is the rollout file, id `session:<thread id>`);
-  - `src/cursor.rs` + `src/cursor/`: Cursor (verified against its documentation of 2026-11-10;
+  - `src/harnesses/cursor.rs` + `src/harnesses/cursor/`: Cursor (verified against its documentation of 2026-11-10;
     the module docs cite the pages; no live run yet, `docs/cursor-live-check.md` is the
     checklist): `CursorPaths` (`~/.cursor`; `windows_locations` of `Cursor.exe` off `PATH`: `mcp.json`, `hooks.json`, our user rule file
     `rules/graphersal-memory.mdc`, the export directory, and the registry of transcripts
@@ -99,7 +119,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     JSONL reader of the transcripts they name (the format is undocumented: role/type
     user|assistant, text parts, `<user_query>`, `tool_use` names; the rest skipped; sub-agent
     transcripts left out); Cursor's chat database is never read;
-  - `src/codewhale.rs` + `src/codewhale/`: CodeWhale (preview; verified against the source of
+  - `src/harnesses/codewhale.rs` + `src/harnesses/codewhale/`: CodeWhale (preview; verified against the source of
     `v0.10.2`, the module docs cite the files; no live run yet, `docs/codewhale-live-check.md`
     is the checklist): `CodeWhalePaths` (`$CODEWHALE_HOME` else `~/.codewhale`, the legacy
     `~/.deepseek` file when only it exists; `config.toml`, `mcp.json` and their overrides, the
@@ -119,24 +139,24 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     read-only import of the native memory's reviewed entries (`active`, not suppressed; a
     workspace = SHA-256 of its origin URL, mapped to known projects; state
     `<data dir>/import/codewhale-memory.json`);
-  - `src/tomledit.rs`: minimal-change TOML edits (parse with the `toml` crate, write as text: a
+  - `src/install/tomledit.rs`: minimal-change TOML edits (parse with the `toml` crate, write as text: a
     fingerprinted managed block inserted before the first table, `remove_table` for our tables
     whose markers were lost, `set_bool` in place, `set_table_bool`/`remove_table_key` for another
     tool's `[mcp_servers.<name>] enabled`, `set_string_array`/`remove_array_key` for CodeWhale's
     `[tools] always_load`; every edit re-parsed and checked);
-  - `src/prompt.rs`: the wizard's console (`Console`: "Step N of M", numbered choices, the
+  - `src/install/prompt.rs`: the wizard's console (`Console`: "Step N of M", numbered choices, the
     default on Enter, re-ask, `confirm_install` with `d` for every change; colour only on a
     terminal without `NO_COLOR`), `paint`, `action_needed` and the `SEPARATOR` the other
     commands' output shares (one style: a headline, sections after a blank line, indented
     `key: value`, `~` for the home directory through `install::tilde`/`Setup::show`);
-  - `src/language.rs`: the memory language (`english` | `any`) and its rule text, filled into
+  - `src/install/language.rs`: the memory language (`english` | `any`) and its rule text, filled into
     `mcp/use.md`'s `{language_rule}` and into the rule block;
-  - `src/models.rs`: the offered embedding models (sizes and licences from the Hugging Face
+  - `src/install/models.rs`: the offered embedding models (sizes and licences from the Hugging Face
     metadata, approximate), the model cache `<data dir>/models/<repo>`, `describe`/`check` for
     `status`/`doctor`;
-  - `src/download.rs`: the Model2Vec download, COPIED from graphersal-cli's `embed_model.rs`
+  - `src/install/download.rs`: the Model2Vec download, COPIED from graphersal-cli's `embed_model.rs`
     (marker at its top: change both); `GRAPHERSAL_MEMORY_HF_ENDPOINT`, `HF_TOKEN`;
-  - `src/export.rs`: memories back into the harness's file memory (per project `MEMORY.md` +
+  - `src/memory/export.rs`: memories back into the harness's file memory (per project `MEMORY.md` +
     `<slug>.md` as the import reads them (pinned ones under `## Pinned`), global ones into the agent's global memory file;
     identical files (or the same meaning, `import::meaning`) skipped, a file unchanged since its
     import (the import state's fingerprint) rewritten with the graph's version keeping others'
@@ -145,7 +165,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `MEMORY.md`, open conflicts with a `CONFLICT with` line, a differing `MEMORY.md` kept with the missing index lines appended; opencode, Codex
     and Cursor: the same files as Markdown under `~/graphersal-memory-export/<harness>/`; global
     memories imported from another memory tool left out, `from_other_tools`);
-  - `src/install.rs`: the wizard (`Current` = the current answers, `default_answers` for
+  - `src/install/mod.rs`: the wizard (`Current` = the current answers, `default_answers` for
     `--yes`/no terminal, `ask` for the interactive steps, `plan_install`, `install`), the
     auto-memory switch (`autoMemoryEnabled`, its previous value recorded in the settings file's
     state entry, restored by uninstall), the rule block per language (`RULE_BLOCK`,
@@ -178,7 +198,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     form (`command` + `args`, no shell), the other harnesses' commands the `plain` words when
     there are; `is_our_hook` recognises every form (quoted, plain, bare, PowerShell, exec);
     `git_bash_findings`/`git_bash_status` for `doctor`/`status` on Windows;
-  - `src/update.rs`: the latest release (`latest`: the redirect of `<releases>/latest`,
+  - `src/install/update.rs`: the latest release (`latest`: the redirect of `<releases>/latest`,
     `GRAPHERSAL_MEMORY_BASE_URL` else GitHub; `version_from_location`), the UI's daily check
     (`check_cached`, state `<data dir>/update-check.json`; `check_enabled`: `updates.check`,
     `GRAPHERSAL_MEMORY_UPDATE_CHECK`), how the binary was installed (`Method`, `method_of`: the
@@ -187,19 +207,20 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `install.ps1` with `--version`/`--dir`, or `cargo install --version`; then `daemon restart`,
     `install --refresh --yes` and `--version` through the new binary; plan first, `--check`,
     `--dry-run`, `--yes`; `manual_commands` end with the same two);
-  - `src/winshell.rs`: Windows shells: `all_shell_words` (the bare name when `PATH` resolves
+  - `src/install/winshell.rs`: Windows shells: `all_shell_words` (the bare name when `PATH` resolves
     it to this binary, else the forward-slash path, else the directory's 8.3 short path, for each
     argument too; lookups injected), `short_path` (`GetShortPathNameW`, the crate's second
     `unsafe`), `find_git_bash` (as Claude Code finds it: `CLAUDE_CODE_GIT_BASH_PATH`, the default
     Git locations, the `git` on `PATH`; never WSL's bash), `needs_git_bash`;
-  - `src/session_sync.rs`: what the shim does at a session's start and end so that hooks are
+  - `src/memory/session_sync.rs`: what the shim does at a session's start and end so that hooks are
     optional (`plan`: the installed harnesses, else the one from the environment; `start`: the
     Claude Code memory-file import of the session's project through `hook::import_project`, then
     one indexing request per harness; `end`: the requests again, only to a running daemon);
-  - `src/jsonedit.rs`: minimal-change JSON text edits (insert/remove one member or element, keep
+  - `src/install/jsonedit.rs`: minimal-change JSON text edits (insert/remove one member or element, keep
     every other byte), used for the harness's files; `claude mcp add` is not used because it
     rewrites the whole file;
-  - `src/import.rs`: the Claude Code file-memory import (parse `MEMORY.md` + memory files, resolve
+  - `src/memory/import.rs` (shared: `Caller`, `Connect`, `slugify`, the memory-file format) +
+    `src/harnesses/claude_code/import.rs`: the Claude Code file-memory import (parse `MEMORY.md` + memory files, resolve
     the project from transcripts or by decoding the directory name, plan new/changed by
     fingerprint in `<data dir>/import/claude-code.json`, write through `remember`, the import lock;
     `<slug>.graphersal.md` files skipped, the export's first-line notes taken off, folded YAML
@@ -211,7 +232,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     forgotten in the graph (or changed there by an agent without `edited_from`, before it
     existed) is still written and gets `returned` in its record, `returning_line` in the report;
     one whose memory has `edited_from` is kept, `kept_edited`/`kept_edited_line`);
-  - `src/instructions.rs`: memories against the instruction files the harnesses load (the
+  - `src/memory/instructions.rs`: memories against the instruction files the harnesses load (the
     conflict check, `docs/how-it-works.md#memories-against-instruction-files`): `files` (the
     installed harnesses' user-level and project files from `coexist::instruction_files`),
     `rules_in`/`rules_in_file` (list items, paragraphs, quotes that are directives,
@@ -222,7 +243,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `read_rules` (the daemon's side of the control request `sync_instructions`), `sync` (skips
     files unchanged since the last finished sync, `<data dir>/import/instructions.json`); called
     by the shim's session start, the Claude Code / Cursor start-context fetch and `import`;
-  - `src/coexist.rs` + `src/coexist/other_import.rs`: other memory beside ours (M15; files only,
+  - `src/install/coexist.rs` + `src/install/coexist/other_import.rs`: other memory beside ours (M15; files only,
     no other server started): `detect` (`BuiltIn` per harness, `Server` = another memory tool's
     MCP entry by the known `TOOLS`, a name saying memory or `MEMORY_TOOL_NAMES` from the entry or
     Claude Code's `permissions` rules; `Plugin`; `Mention` = an instruction-file line about memory
@@ -241,9 +262,9 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `other_import`: the reference memory server's JSONL and Basic Memory's notes as global
     memories `kg-*`/`basic-*` through a connection without a project, item fingerprints in
     `<data dir>/import/other-memory.json`;
-  - `src/client.rs`: a small MCP client; `connect` opens a `use` connection to the daemon (the
+  - `src/runtime/client.rs`: a small MCP client; `connect` opens a `use` connection to the daemon (the
     product's own calls go through the daemon, the single writer);
-  - `src/hook.rs`: `hook session-start|session-end`: time-boxed import of the session project's
+  - `src/memory/hook.rs`: `hook session-start|session-end`: time-boxed import of the session project's
     changed memory files, then one `index_sessions` control line to the daemon (`run_with`'s
     `Enqueue`; start: its transcript is `active`, end: `ended`), at session start one status line
     plus the start context (`run_with_context`, `StartFetch` from the daemon's `start_context`
@@ -258,7 +279,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     transcript active/ended, the start answer `{"additional_context": ...}` with the start
     context of the workspace, `run_cursor_with_context`); `read_input` and
     `is_cursor_input` (a Claude Code hook run by Cursor's third-party hooks does nothing);
-  - `src/start_context.rs`: the start context (D7): the always-loaded memories (pinned, feedback,
+  - `src/memory/start_context.rs`: the start context (D7): the always-loaded memories (pinned, feedback,
     user) of a project and the global ones, `sort` (pinned, feedback, user; `order`, newest),
     `render` within the budget (groups like `MEMORY.md`, "N more not shown"), `StartContext`
     (`status_line`, the control-line JSON), `request`/`request_running` (the daemon's
@@ -269,12 +290,13 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `embedding.model`, `summaries.enabled|harness_command|monthly_budget_usd|since`,
     `store.checkpoint_after|keep_history`;
     `with_summaries` and `with_values` edit in place); flag > env > file > default;
-  - `src/transcript.rs`: the Claude Code transcript parser (turns, title, times, branches, edited
+  - `src/memory/transcript.rs` (shared: `Transcript`, memory writes, path helpers) +
+    `src/harnesses/claude_code/transcript.rs`: the Claude Code transcript parser (turns, title, times, branches, edited
     files, compaction summaries, `memory_writes`: `memory_tool`/`memory_writes` recognise our
     memory tools in every harness's spelling (also bare names with a `slug`, Cursor) and are
     called by every harness's reader; sidechains and generated records left out; unknown records,
     bad lines and a partial last line skipped; fingerprint of the complete lines);
-  - `src/sessions.rs`: the session indexing per harness (`Request.harness`; the daemon keeps one
+  - `src/memory/sessions.rs`: the session indexing per harness (`Request.harness`; the daemon keeps one
     pending request per harness): `units` (Claude Code: `scan`, top-level `*.jsonl` only;
     opencode: its database; Codex: its rollouts; Cursor: the transcripts in its registry),
     finished = unchanged for `IDLE` (30 min) or `ended`, state
@@ -287,20 +309,20 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     transcript's `memory_writes` become `wrote` edges through the internal `link_memories`, only
     when there are writes; `backfill_links` once per state entry without `memory_links` =
     `LINKS_VERSION`);
-  - `src/summaries.rs`: the opt-in summaries: the prompt and JSON schema (ported from the
+  - `src/memory/summaries.rs`: the opt-in summaries: the prompt and JSON schema (ported from the
     prototype), `harness_args` (`claude` gets `--output-format json --json-schema ... --tools ""
     --strict-mcp-config --no-session-persistence`), `run_harness_with` (prompt on stdin, timeout; an `opencode` command in its sandbox with
     `--format json`,
     `GRAPHERSAL_MEMORY_HOOK=off`), `parse_answer`, `Spend` (`<data dir>/sessions/spend.json`),
     `Summarizer` (exists only when enabled; budget check before each call), `facts`, `render`;
-  - `src/harness.rs`: running the user's harness: the `Headless` trait (a harness command
+  - `src/harnesses/headless.rs`: running the user's harness: the `Headless` trait (a harness command
     recognised, its default, free note, summaries sandbox `summaries_run` (`Homes`,
     `Prepared`), answer, bench arguments, answer and refusal; `ClaudeHeadless`, the others'
     `HeadlessRun` in their modules), `headless_of(command)`, `costs_nothing`, `program_path` (Windows: a bare name such as
     `claude` resolved through `PATH`/`PATHEXT`, so npm's `claude.cmd` is found; std runs a
     `.cmd` through `cmd.exe` with safe quoting, so keep line breaks out of arguments) and `run`
     (stdin prompt, timeout, output);
-  - `src/bench.rs` + `src/bench/`: the built-in A/B (`bench`, `bench questions`): `Options`, the
+  - `src/bench/mod.rs` + `src/bench/`: the built-in A/B (`bench`, `bench questions`): `Options`, the
     `Harness` trait (`Process`: the real `claude -p` through `harness::run`; `DryRun`: canned,
     no cost), the estimate and the cost guard (refuse above the budget, `--max-budget-usd` per
     call, stop at the budget), the run (warm-up per arm, run id at the start of every prompt,
@@ -318,33 +340,33 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `report.md`/`report.json` in `bench/<timestamp>/`; `bench/rule_changes.rs` `bench
     rule-changes` (built-in rule changes, arms plain/marked/file, each a store of its own in the
     run directory, verdict by the answer's words, no judge call; Claude Code only);
-  - `src/bench_tests.rs`: `bench` in-process with a scripted harness on a temporary home and data
+  - `src/bench/bench_tests.rs`: `bench` in-process with a scripted harness on a temporary home and data
     directory (the live files unchanged, the sandboxes never naming them, report numbers, budget
     refusal and stop, confirmation, dry run, the user's own questions);
-  - `src/projects.rs`: project identity, `<data dir>/projects.json`: a stable id per project
+  - `src/memory/projects.rs`: project identity, `<data dir>/projects.json`: a stable id per project
     (its path at first sight; legacy entries keep their path), looked up at every connection and
     indexed session by git remote (normalized, origin first), then path; a root commit shared
     with an older project is only a hint (`look_alike_lines`, `projects merge` through the
     daemon's `merge_projects` control line and the internal function `merge_project`);
-  - `src/maintenance.rs`: store maintenance (`Settings`: the checkpoint threshold the stores
+  - `src/runtime/maintenance.rs`: store maintenance (`Settings`: the checkpoint threshold the stores
     open with, default 16 MiB, and the history kept, default 30 days; `prune_bound` and
     `prune_old_history` through the engine's `Store::prune`, which the daemon's maintenance
     thread runs daily and after each new snapshot; the copy lock `stores/<name>.copy.lock` the
     bench's fork holds (`hold_for_copy`) and a prune takes without waiting; the state file
     `stores/<name>.maintenance.json`; the `status` lines and the `doctor` WAL finding);
-  - `src/maintenance_tests.rs`: the automatic checkpoint at a small threshold, the prune with an
+  - `src/runtime/maintenance_tests.rs`: the automatic checkpoint at a small threshold, the prune with an
     injected clock, the copy lock, a bench fork that opens after a prune;
   - `src/fsutil.rs`: atomic writes (through a symbolic link to its final target, the link kept:
     `write_target`; unique temporary names; a read-only file refused: `not_writable`;
     `write_atomic_checked` stops when the file changed meanwhile, `CHANGED_MEANWHILE`) and the
     FNV-1a fingerprint;
-  - `src/ipc.rs`: the run directory (`--run-dir`, `GRAPHERSAL_MEMORY_RUN_DIR`, `<data dir>/run`
+  - `src/runtime/ipc.rs`: the run directory (`--run-dir`, `GRAPHERSAL_MEMORY_RUN_DIR`, `<data dir>/run`
     for an explicit data directory, the platform's default), its files (`daemon.sock`,
     `daemon.pid`, `daemon.start.lock`, `daemon.log`, `daemon.stopped` (`STOPPED_FILE`: written by a `stop`
     control request (never by `restart`), removed by the next daemon's start; `stopped_on_purpose`); a default whose socket path is too long
     becomes `short_run_dir`, `/tmp/graphersal-memory-<fingerprint of the data dir>`), the socket types per platform (std on
     Unix, `uds_windows` on Windows), `LockFile` (`fd-lock`);
-  - `src/ui.rs`: `graphersal-memory ui` (stage UI): the loopback HTTP server (`tiny_http`, port 0 or
+  - `src/ui/mod.rs`: `graphersal-memory ui` (stage UI): the loopback HTTP server (`tiny_http`, port 0 or
     `--port`), the per-run token (256 bits, `ring`, header only, constant-time compare), the
     Host/Origin check (`graphersal_serve::HostCheck`, loopback, this port), the launch file
     `ui-<pid>.html` in the run directory (0600; removed at the first heartbeat and on exit; older
@@ -353,16 +375,16 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     held open so the daemon stays (reconnects, starting a daemon unless `shim::may_start` says no), `/api/ui/*` answered itself (`status` with the
     `status`/`doctor` lines from `commands::ui_report`, `projects`, `start-context` (the control
     line with `project_id` + `entries`), `settings` GET/POST of `memory.start_context_chars`
-    only, `update` (`crate::update::check_cached`: the top bar's "Version X available" and the
-    Overview's upgrade commands), `heartbeat`), every other `/api/` relayed (`crate::relay`), static files: the
-    profile's (`crate::ui_assets`) first, then the embedded playground (`Ui::embedded`, its
+    only, `update` (`crate::install::update::check_cached`: the top bar's "Version X available" and the
+    Overview's upgrade commands), `heartbeat`), every other `/api/` relayed (`crate::ui::relay`), static files: the
+    profile's (`crate::ui::ui_assets`) first, then the embedded playground (`Ui::embedded`, its
     `index.html` with `/memory-ui/boot.js` added);
-  - `src/relay.rs`: the relay frame (opening `{"protocol", "relay": "http", "port", "method",
+  - `src/ui/relay.rs`: the relay frame (opening `{"protocol", "relay": "http", "port", "method",
     "target", "headers", "body_length"}` + body; answer line + body; only `FORWARDED_HEADERS`,
     never the token; bodies up to serve's `MAX_BODY_BYTES`), `send` (the `ui` side, through
     `shim::connect_again`: a daemon that went away is started again) and
     `selection` (the memory functions + `catalog::UI_FUNCTIONS`, never an internal one);
-  - `src/ui_assets.rs` + `ui/`: the `memory` profile built into the binary (`profile.json`: tabs
+  - `src/ui/ui_assets.rs` + `ui/`: the `memory` profile built into the binary (`profile.json`: tabs
     Overview, Memory, Graph, Always loaded, Conflicts, Sessions as modules, cards `memory`, `session`,
     `fact` and the Graph tab's edge cards, the `graph` key (styles per label, classes per kind /
     always loaded / imported / superseded, legend: the engine's `api.graph`, EXPERIMENTAL);
@@ -378,13 +400,13 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     warning; `ui/tests/topbar.test.mjs`); `shared.js` the shared selection, a tab's note header,
     calls per selection ("All projects" = once per project + global once), the memory form with
     the "changed meanwhile" check and the nearest check; one module per tab);
-  - `src/protocol.rs`: the shim <-> daemon handshake and control lines, refusal codes, version
+  - `src/runtime/protocol.rs`: the shim <-> daemon handshake and control lines, refusal codes, version
     order, `StartContextMode` (the handshake's optional `start_context`: `full` | `short` (Claude
     Code without our hook: within `CLAUDE_CODE_INSTRUCTIONS_CHARS`) | `none` (Claude Code with
     our SessionStart hook, `commands::start_context_mode`; the product's own connections)); an
     empty `project.root` is no project (global memories only; the import from another memory
     tool) (the protocol is internal; bump `PROTOCOL` on an incompatible change);
-  - `src/shim.rs`: `connect_or_start` (start lock, stale socket only after a failed connect AND a
+  - `src/runtime/shim.rs`: `connect_or_start` (start lock, stale socket only after a failed connect AND a
     free `daemon.pid`, detached spawn, timeout naming the log; on Windows the spawning process's
     standard handles are made non-inheritable first, `keep_std_handles_from_children`, one of the
     two `unsafe` blocks of the crate), the handshake with retries on
@@ -398,7 +420,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `ipc::STOPPED_FILE`); `control` (status/stop); `exchange` reads a one-line answer of up to
     `MAX_ANSWER_BYTES` (an export carries every memory) and reports a missing, cut or non-JSON
     answer as "the daemon failed ...; see <daemon.log>";
-  - `src/daemon.rs`: the daemon: pid lock, socket, one thread per connection, routing by the
+  - `src/runtime/daemon.rs`: the daemon: pid lock, socket, one thread per connection, routing by the
     handshake to a `StoreRuntime` (the default store opened at the start, beside the first
     handshake; others on first use) and its profile, the maintenance thread, idle exit (no exit while
     the indexer or a store's scheduled-job runs work), drain/restart for a newer shim, clean
@@ -410,17 +432,17 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     panic is caught by the engine, and a store whose session thread ended makes the daemon exit
     cleanly (`check_alive`); debug builds only: `GRAPHERSAL_MEMORY_TEST_PANIC=<site>:<name>`
     (`injected_panic`, sites `control`, `job`, `index`) for the tests;
-  - `src/registry.rs`: `registry.json` (project -> store; everything goes to `default` until
+  - `src/runtime/registry.rs`: `registry.json` (project -> store; everything goes to `default` until
     isolation, M7);
-  - `src/engine.rs`: the pinned engine version (`engine_version!`, shown by `--version`), and
+  - `src/runtime/engine.rs`: the pinned engine version (`engine_version!`, shown by `--version`), and
     tests that exercise the engine crates and check the pin;
-  - `src/store.rs`: the data directory (`--data-dir`, `GRAPHERSAL_MEMORY_DIR`, the platform's
+  - `src/runtime/store.rs`: the data directory (`--data-dir`, `GRAPHERSAL_MEMORY_DIR`, the platform's
     per-user directory; `OUR_ENTRIES`, the only entries purge deletes; `foreign_data_dir`, which
     install refuses; `create_private_dir`: the data directory 0700 on Unix, an existing one
     tightened, called by the daemon's start and install) and the default store
     `<data dir>/stores/default`, created on first use; `commands::dirs` makes the data and run
     directories absolute for every command;
-  - `src/catalog.rs` + `src/catalog/`: the product catalog built into the binary: `schema.json`,
+  - `src/runtime/catalog.rs` + `src/runtime/catalog/`: the product catalog built into the binary: `schema.json`,
     `queries.json` (name, description, parameters of each memory function) and one
     `<name>.rhai` body per function (`pin` sets `pinned`/`order`), `ui.json` the browser UI's
     functions (`UI_FUNCTIONS`: `overview`, `memory_list`, `set_order`, `session_list`,
@@ -428,7 +450,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     any MCP server, `ui_policy` adds their effects) (folder `memory`, `meta` `{"origin": "product", "catalog":
     <fingerprint>}`); `apply` writes it to a store whose product queries carry another
     fingerprint; `use_policy` builds the `use` access policy from the functions' inferred effects;
-  - `src/mcp.rs` + `src/mcp/{use,develop}.md`: the two profiles (configuration, instructions,
+  - `src/runtime/mcp.rs` + `src/runtime/mcp/{use,develop}.md`: the two profiles (configuration, instructions,
     tool lists), the project of a session (`--project`, else the git root of the cwd),
     `StoreRuntime` (one open store; `relay`: the UI's relay context per `ui` port, allow-list
     mode with `relay::selection` and `ui_policy`, the profile from `ui_assets`, at most
@@ -445,16 +467,16 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     never writes as the UI) are hidden in `tools/list`, set on every
     call of a saved query that declares it, left out of the answer's `call:` line), `close`),
     and `serve` (`--no-daemon`);
-  - `src/mcp_tests.rs`: MCP round trips over in-memory pipes with temporary data directories
+  - `src/runtime/mcp_tests.rs`: MCP round trips over in-memory pipes with temporary data directories
     (also the memory language in the instructions and project identity across moves/clones).
-  - `src/model_tests.rs`: the model download from a local fake Hugging Face server (tiny
+  - `src/install/model_tests.rs`: the model download from a local fake Hugging Face server (tiny
     synthetic Model2Vec model), install's model step, the store switching its vector rules to the
     model and back (`StoreRuntime::switch_embedder`).
-  - `src/coexist_tests.rs`: other memory on temporary homes with realistic configurations of
+  - `src/install/coexist_tests.rs`: other memory on temporary homes with realistic configurations of
     other tools (detection per harness, defaults, switch-off and the byte-identical give-back,
     symlinked/read-only/rollback, the wizard step, imports, instruction lines, writers, returning
     facts and `import --ignore`, the rule block with a read-only line, the export leaving them out);
-  - `src/install_tests.rs`: install/uninstall/import/status/doctor/hooks on temporary homes with
+  - `src/install/install_tests.rs`: install/uninstall/import/status/doctor/hooks on temporary homes with
     the store served in the test process (byte-identical round trips, idempotence, dry run,
     conflicts, structural uninstall, develop on/off, import of a fixture memory directory).
   - `tests/support/mod.rs`: what the end-to-end tests share across platforms (the socket type,
@@ -475,7 +497,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
   - `tests/sessions_tests.rs`: the real binary's hooks, `import --sessions` and `summaries` on a
     temporary home with fixture transcripts (their time set a day back) and a fake `claude`
     shell script that records its calls; asserts zero calls without consent (Unix only: the
-    fake harnesses are shell scripts, as in the summaries tests of `src/sessions.rs`).
+    fake harnesses are shell scripts, as in the summaries tests of `src/memory/sessions.rs`).
   - `tests/ui_tests.rs`: the real binary's `ui --no-browser --port 0` and its daemon on temporary
     directories over plain HTTP (std `TcpStream`): token 401, Host/Origin 403, no CORS headers,
     GETs leave the commit position unchanged, the relay refuses internal functions, a round trip
@@ -500,14 +522,14 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
   `conflicts_with`, `narrows`, `about`, `contains`, `edited`, `wrote`, `compared_with`
   (instruction -> memory, `decision` unchecked|compatible|conflict; written by the internal
   `sync_instructions`/`scan_instructions`, by `remember` for a memory whose text changed, and by
-  `settle(slug, compatible|conflict, rule: <id>)`) (`src/catalog/schema.json`, mode `open`; `emb` is a vector rule over
+  `settle(slug, compatible|conflict, rule: <id>)`) (`src/runtime/catalog/schema.json`, mode `open`; `emb` is a vector rule over
   `embed_text`; the schema file names the built-in `hash-ngram/1`, `catalog::apply` keeps the
   embedder the store has, and the daemon switches it to `embedding.model` of `config.json`).
-- Project scoping: a vertex with a `project` property (the project's stable id, `crate::projects`)
+- Project scoping: a vertex with a `project` property (the project's stable id, `crate::memory::projects`)
   is visible only from that project; one without it is global. Memory ids are
   `memory:<slug>@<project>` (project) and `memory:<slug>` (global); `memory`, `forget` and
   `links` look in the project first, then in the global memory. `pinned` (bool) and `order`
-  (int) select and order the start context (`crate::start_context`); `remember`'s `pinned`
+  (int) select and order the start context (`crate::memory::start_context`); `remember`'s `pinned`
   default `null` keeps the memory's pin; `pin` is a `use` tool. `remember`/`forget` take `source`
   (`remember` | `ui`; bound to `remember` on MCP connections): the UI's memories are stored with
   `source` "ui" and reported as "ui" (never as a file); `source` "ui" refuses to forget an
@@ -529,7 +551,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
   the fingerprint its summary came from, `harness`), `turn:<session>:<n>`, `fact:<session>:<kind>:<i>`
   (`fact_kind` decision | correction | outcome | open_thread), all with the session's `project`;
   `session -contains-> turn|fact`. They are written only by the internal catalog functions
-  (`src/catalog/internal.json`: `indexed_sessions`, `index_session`, `index_turns`,
+  (`src/runtime/catalog/internal.json`: `indexed_sessions`, `index_session`, `index_turns`,
   `set_summary`; plus `merge_project`, `export_memories`, `start_context`, `open_conflicts`,
   `migrate_import_sources`, `link_memories`, `sync_instructions` and `scan_instructions`), which the daemon runs on the
   store's session thread (`catalog::call`); they are never tools of the `use` server (its tool
@@ -539,7 +561,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
   assert zero calls when disabled.
 - A change to a body, a description, a parameter or the schema changes the fingerprint, so every
   store gets the new catalog at its next start. Test a body change with the round trips in
-  `src/mcp_tests.rs`; descriptions stay short (they are paid on every agent turn).
+  `src/runtime/mcp_tests.rs`; descriptions stay short (they are paid on every agent turn).
 - `docs/`: the user-facing documentation (why, how it works, A/B method, privacy, harnesses,
   install, roadmap, the Cursor live check); `docs/images/`: the README's screenshots (a demo
   project with invented memories, light and dark).
@@ -582,7 +604,7 @@ started by hand (`workflow_dispatch`).
 - The engine crates (`graphersal`, `graphersal-mcp`, `graphersal-serve`, `graphersal-session`)
   are exact crates.io pins (`=<version>`) in the root `Cargo.toml`, all the same version (the MCP and
   serving crates make no stability promise during 0.x). When you move the pin, update
-  `engine_version!` in `src/engine.rs` (a test checks it against `Cargo.toml` and `Cargo.lock`).
+  `engine_version!` in `src/runtime/engine.rs` (a test checks it against `Cargo.toml` and `Cargo.lock`).
 - **Every engine gap goes to the graphersal repository**, as an issue or a branch there. Never
   work around it by copying engine code into this repository. graphersal-memory uses only the
   engine's public API, and it is the first external judge of that API.

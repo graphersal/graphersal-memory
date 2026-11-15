@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn atomic_writes_replace_and_leave_no_temporary_file() {
-        let dir = crate::mcp_tests::TempDir::new("atomic");
+        let dir = crate::runtime::mcp_tests::TempDir::new("atomic");
         let file = dir.path().join("x.json");
         write_atomic(&file, b"one").unwrap();
         write_atomic(&file, b"two").unwrap();
@@ -153,7 +153,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_write_through_a_link_keeps_the_link_and_changes_its_target() {
-        let dir = crate::mcp_tests::TempDir::new("atomic-link");
+        let dir = crate::runtime::mcp_tests::TempDir::new("atomic-link");
         let repo = dir.path().join("dotfiles");
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(repo.join("s.json"), "{}").unwrap();
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn a_read_only_file_is_refused_and_unchanged() {
-        let dir = crate::mcp_tests::TempDir::new("atomic-ro");
+        let dir = crate::runtime::mcp_tests::TempDir::new("atomic-ro");
         let file = dir.path().join("config.toml");
         std::fs::write(&file, "x = 1\n").unwrap();
         let mut perms = std::fs::metadata(&file).unwrap().permissions();
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn a_change_meanwhile_stops_the_replace() {
-        let dir = crate::mcp_tests::TempDir::new("atomic-race");
+        let dir = crate::runtime::mcp_tests::TempDir::new("atomic-race");
         let file = dir.path().join("x.json");
         std::fs::write(&file, "one").unwrap();
         let err = write_atomic_checked(&file, b"two", &mut |_| false).unwrap_err();

@@ -466,7 +466,7 @@ pub fn markdown(meta: &Meta, rows: &[Row], spent: &Spent) -> String {
                         .clone()
                         .map_or_else(|| "(no answer)".to_string(), |e| format!("(failed: {e})"))
                 } else {
-                    crate::transcript::clip(&r.answer.replace('\n', " "), 600)
+                    crate::memory::transcript::clip(&r.answer.replace('\n', " "), 600)
                 };
                 out.push(format!("- {} r{}: {answer}", r.arm, r.repeat));
             }

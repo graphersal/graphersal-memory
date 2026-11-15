@@ -263,19 +263,19 @@ fn project_dir(arm_dir: &Path, scenario: &Scenario) -> PathBuf {
 /// rule, then the newer one (with `supersedes` in the marked and file arms).
 pub fn seed(arm_dir: &Path, arm: Arm) -> Result<(), String> {
     let data = arm_dir.join("data");
-    let runtime = crate::mcp::StoreRuntime::open_with(
-        crate::registry::DEFAULT_STORE,
-        &crate::store::default_store_dir(&data),
-        Arc::new(crate::mcp::endpoint()),
-        &crate::maintenance::Settings::default(),
+    let runtime = crate::runtime::mcp::StoreRuntime::open_with(
+        crate::runtime::registry::DEFAULT_STORE,
+        &crate::runtime::store::default_store_dir(&data),
+        Arc::new(crate::runtime::mcp::endpoint()),
+        &crate::runtime::maintenance::Settings::default(),
     )?;
     let result = (|| {
         for scenario in &SCENARIOS {
             let dir = project_dir(arm_dir, scenario);
             std::fs::create_dir_all(&dir)
                 .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
-            let key = crate::mcp::project_key(Some(&dir), &dir);
-            let project = crate::projects::resolve(&data, &key)?.id;
+            let key = crate::runtime::mcp::project_key(Some(&dir), &dir);
+            let project = crate::memory::projects::resolve(&data, &key)?.id;
             let remember = |rule: &Rule, supersedes: Vec<&str>| {
                 runtime.call(
                     "remember",
@@ -314,7 +314,12 @@ fn call_args(
     let mcp = files.join("mcp.json");
     let system = files.join("system.md");
     let server = super::arms::SERVER;
-    let pretty = |value: &Value| format!("{}\n", crate::jsonedit::render(value, Some("  "), 0));
+    let pretty = |value: &Value| {
+        format!(
+            "{}\n",
+            crate::install::jsonedit::render(value, Some("  "), 0)
+        )
+    };
     crate::fsutil::write_atomic(&settings, pretty(&super::arms::settings()).as_bytes())?;
     let data = arm_dir.join("data");
     let project = project_dir(arm_dir, scenario);
@@ -325,7 +330,7 @@ fn call_args(
             "command": options.exe.display().to_string(),
             "args": ["mcp", "--no-daemon", "--data-dir", data.display().to_string(),
                      "--project", project.display().to_string()],
-            "env": {crate::summaries::HOOK_ENV: "off"},
+            "env": {crate::memory::summaries::HOOK_ENV: "off"},
         }}}))
         .as_bytes(),
     )?;
@@ -439,7 +444,7 @@ pub fn run(
         let _ = writeln!(out, "Nothing was run.");
         return Ok(EXIT_FAILED);
     }
-    let started_at = crate::daemon::now_utc();
+    let started_at = crate::runtime::daemon::now_utc();
     let run_dir = new_run_dir(&options.data_dir, &started_at)?;
     for arm in Arm::ALL {
         seed(&run_dir.join("arms").join(arm.name()), arm)?;
@@ -496,7 +501,11 @@ pub fn run(
     let report = report_json(&rows, spent, stopped.as_deref(), options);
     crate::fsutil::write_atomic(
         &run_dir.join("report.json"),
-        format!("{}\n", crate::jsonedit::render(&report, Some("  "), 0)).as_bytes(),
+        format!(
+            "{}\n",
+            crate::install::jsonedit::render(&report, Some("  "), 0)
+        )
+        .as_bytes(),
     )?;
     let markdown = report_markdown(&report);
     crate::fsutil::write_atomic(&run_dir.join("report.md"), markdown.as_bytes())?;
@@ -573,7 +582,7 @@ fn report_markdown(report: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp_tests::TempDir;
+    use crate::runtime::mcp_tests::TempDir;
 
     #[test]
     fn the_answer_words_give_the_verdict() {
@@ -640,18 +649,18 @@ mod tests {
         for arm in Arm::ALL {
             let arm_dir = dir.path().join(arm.name());
             let data = arm_dir.join("data");
-            let runtime = crate::mcp::StoreRuntime::open(
-                crate::registry::DEFAULT_STORE,
-                &crate::store::default_store_dir(&data),
-                Arc::new(crate::mcp::endpoint()),
+            let runtime = crate::runtime::mcp::StoreRuntime::open(
+                crate::runtime::registry::DEFAULT_STORE,
+                &crate::runtime::store::default_store_dir(&data),
+                Arc::new(crate::runtime::mcp::endpoint()),
             )
             .unwrap();
             let scenario = &SCENARIOS[0];
-            let key = crate::mcp::project_key(
+            let key = crate::runtime::mcp::project_key(
                 Some(&project_dir(&arm_dir, scenario)),
                 &project_dir(&arm_dir, scenario),
             );
-            let project = crate::projects::resolve(&data, &key).unwrap().id;
+            let project = crate::memory::projects::resolve(&data, &key).unwrap().id;
             let old = runtime
                 .call(
                     "memory",

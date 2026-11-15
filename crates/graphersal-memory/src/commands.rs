@@ -11,11 +11,14 @@ use crate::cli::{
     QuestionsEdit, SummariesAction,
 };
 use crate::config::{self, Config};
-use crate::daemon::{self, DaemonOptions};
-use crate::import::{self, Caller, ImportState};
 use crate::install::{self, ClaudePaths, InstallOptions, Setup, UninstallOptions};
-use crate::shim::{self, DaemonLocation, ShimOptions};
-use crate::{bench, client, hook, ipc, mcp, protocol, session_sync, sessions, store, summaries};
+use crate::memory::import::{self, Caller, ImportState};
+use crate::runtime::daemon::{self, DaemonOptions};
+use crate::runtime::shim::{self, DaemonLocation, ShimOptions};
+use crate::{
+    bench, memory::hook, memory::session_sync, memory::sessions, memory::summaries,
+    runtime::client, runtime::ipc, runtime::mcp, runtime::protocol, runtime::store,
+};
 
 /// How long the product's own memory calls (import) wait for one answer.
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -83,7 +86,7 @@ pub fn not_implemented_message(command: &Command) -> String {
 
 /// The message for a harness choice a command does not take.
 fn harness_not_implemented(command: &str, harness: Harness) -> String {
-    let ids: Vec<&str> = crate::agents::Kind::ALL
+    let ids: Vec<&str> = crate::harnesses::agent::Kind::ALL
         .iter()
         .map(|kind| kind.id())
         .collect();
@@ -151,7 +154,7 @@ pub fn run_cli(
                 enable_other: other.enable_other.clone(),
                 project_dir: current_project(),
                 interactive: terminal,
-                color: terminal && crate::prompt::color_allowed(&|name| std::env::var(name).ok()),
+                color: terminal && crate::install::prompt::color_allowed(&|name| std::env::var(name).ok()),
                 refresh: *refresh,
             };
             setup(cli).and_then(|setup| {
@@ -160,7 +163,7 @@ pub fn run_cli(
                 if *harness == Some(Harness::All) {
                     let found = setup.detected();
                     options.harnesses = Some(if found.is_empty() {
-                        vec![crate::agents::Kind::default()]
+                        vec![crate::harnesses::agent::Kind::default()]
                     } else {
                         found
                     });
@@ -202,7 +205,7 @@ pub fn run_cli(
                 disable_develop_only: *disable_develop,
                 no_export: *no_export,
                 interactive: terminal(),
-                color: terminal() && crate::prompt::color_allowed(&|name| std::env::var(name).ok()),
+                color: terminal() && crate::install::prompt::color_allowed(&|name| std::env::var(name).ok()),
             };
             setup(cli).and_then(|setup| {
                 // A daemon the export starts is stopped again afterwards (one that ran before
@@ -258,7 +261,7 @@ pub fn run_cli(
                     .map_err(|err| format!("cannot read the current directory: {err}"))?,
             };
             let project = mcp::project_key(None, &dir);
-            let context = crate::start_context::request(&location, &project, None)?;
+            let context = crate::memory::start_context::request(&location, &project, None)?;
             if context.text.is_empty() {
                 let _ = writeln!(
                     stderr,
@@ -291,7 +294,7 @@ pub fn run_cli(
             let code = run_import(&setup, *dry_run, &mut connect, &mut stdout)?;
             if !*dry_run {
                 // The instruction files of the current directory's project, for the conflict
-                // check (`crate::instructions`), compared again even when unchanged.
+                // check (`crate::memory::instructions`), compared again even when unchanged.
                 let root = current_project()
                     .map(|root| root.display().to_string())
                     .unwrap_or_default();
@@ -540,11 +543,11 @@ fn setup_with(cli: &Cli, probe: bool) -> Result<Setup, String> {
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let (data_dir, run_dir) = dirs(cli)?;
     let paths = ClaudePaths::resolve(&env)?;
-    let detected = crate::opencode::detect(&env, None, probe)?;
-    let opencode = crate::opencode::OpenCodePaths::resolve_for(&env, detected)?;
-    let codex = crate::codex::CodexPaths::resolve(&env)?;
-    let cursor = crate::cursor::CursorPaths::resolve(&env, &data_dir)?;
-    let codewhale = crate::codewhale::CodeWhalePaths::resolve(&env)?;
+    let detected = crate::harnesses::opencode::detect(&env, None, probe)?;
+    let opencode = crate::harnesses::opencode::OpenCodePaths::resolve_for(&env, detected)?;
+    let codex = crate::harnesses::codex::CodexPaths::resolve(&env)?;
+    let cursor = crate::harnesses::cursor::CursorPaths::resolve(&env, &data_dir)?;
+    let codewhale = crate::harnesses::codewhale::CodeWhalePaths::resolve(&env)?;
     let exe =
         std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
     let mut dir_args = Vec::new();
@@ -568,7 +571,7 @@ fn setup_with(cli: &Cli, probe: bool) -> Result<Setup, String> {
         hooks: install::HookForm::here(&mcp::canonical(&exe), &dir_args),
         exe: mcp::canonical(&exe),
         dir_args,
-        source: crate::download::Source::from_env(&env),
+        source: crate::install::download::Source::from_env(&env),
     })
 }
 
@@ -581,8 +584,8 @@ fn terminal() -> bool {
 /// The memories of the daemon's store (`export_memories` control line).
 pub struct DaemonSource(pub DaemonLocation);
 
-impl crate::export::Source for DaemonSource {
-    fn memories(&mut self, project: &str) -> Result<Vec<crate::export::Row>, String> {
+impl crate::memory::export::Source for DaemonSource {
+    fn memories(&mut self, project: &str) -> Result<Vec<crate::memory::export::Row>, String> {
         let answer = shim::request(
             &self.0,
             &serde_json::json!({"protocol": protocol::PROTOCOL, "control": "export_memories",
@@ -594,23 +597,23 @@ impl crate::export::Source for DaemonSource {
                 .unwrap_or("the daemon refused the export")
                 .to_string());
         }
-        Ok(crate::export::rows(&answer["memories"]))
+        Ok(crate::memory::export::rows(&answer["memories"]))
     }
 }
 
 /// `export --to-files [--project ROOT]`.
 pub fn export_files(
     setup: &Setup,
-    kind: crate::agents::Kind,
+    kind: crate::harnesses::agent::Kind,
     project: Option<&Path>,
     dry_run: bool,
-    source: &mut dyn crate::export::Source,
+    source: &mut dyn crate::memory::export::Source,
     out: &mut dyn Write,
 ) -> Result<u8, String> {
     let id = match project {
         Some(root) => {
             let key = mcp::project_key(Some(root), &absolute(root));
-            let projects = crate::projects::Projects::load(&setup.data_dir)?;
+            let projects = crate::memory::projects::Projects::load(&setup.data_dir)?;
             match projects.find(&key) {
                 Some(found) => found.id,
                 None => {
@@ -647,7 +650,7 @@ pub fn export_files(
         let _ = writeln!(out, "Nothing to export: the graph holds no memories.");
         return Ok(0);
     }
-    let report = crate::export::write(agent, &setup.data_dir, &rows)?;
+    let report = crate::memory::export::write(agent, &setup.data_dir, &rows)?;
     for line in report.lines() {
         let _ = writeln!(out, "{line}");
     }
@@ -662,7 +665,7 @@ pub fn export_files(
 }
 
 /// Where the export of `agent` goes, for messages.
-pub fn export_target(agent: &dyn crate::agents::Harness) -> String {
+pub fn export_target(agent: &dyn crate::harnesses::agent::Harness) -> String {
     if agent.has_file_memory() {
         format!("{}'s file memory", agent.display_name())
     } else {
@@ -678,7 +681,7 @@ pub fn export_target(agent: &dyn crate::agents::Harness) -> String {
 }
 
 /// What to do with an export for a harness without file memory.
-pub fn export_note(agent: &dyn crate::agents::Harness) -> String {
+pub fn export_note(agent: &dyn crate::harnesses::agent::Harness) -> String {
     let how = agent.export_hint();
     format!(
         "{} has no file memory: the export is plain Markdown (per project MEMORY.md and one file \
@@ -697,7 +700,7 @@ fn run_projects(
     input: &mut dyn std::io::BufRead,
     out: &mut dyn Write,
 ) -> Result<u8, String> {
-    let projects = crate::projects::Projects::load(&setup.data_dir)?;
+    let projects = crate::memory::projects::Projects::load(&setup.data_dir)?;
     match action {
         ProjectsAction::List => {
             let list = projects.list();
@@ -717,7 +720,7 @@ fn run_projects(
                     let _ = writeln!(out, "  first commit: {root}");
                 }
             }
-            for (what, how) in crate::projects::look_alike_lines(&setup.data_dir) {
+            for (what, how) in crate::memory::projects::look_alike_lines(&setup.data_dir) {
                 let _ = writeln!(out, "\nnote: {what}\n      {how}");
             }
             Ok(0)
@@ -1027,7 +1030,7 @@ pub fn import_sessions(setup: &Setup, dry_run: bool, out: &mut dyn Write) -> Res
 
 /// The harnesses whose sessions are indexed: those graphersal-memory is installed in, else
 /// those found on this machine, else Claude Code.
-pub fn session_harnesses(setup: &Setup) -> Vec<crate::agents::Kind> {
+pub fn session_harnesses(setup: &Setup) -> Vec<crate::harnesses::agent::Kind> {
     let installed = setup.installed();
     if !installed.is_empty() {
         return installed;
@@ -1037,11 +1040,12 @@ pub fn session_harnesses(setup: &Setup) -> Vec<crate::agents::Kind> {
         .detected()
         .into_iter()
         .filter(|kind| {
-            *kind == crate::agents::Kind::default() || setup.agent_of(*kind).has_sessions()
+            *kind == crate::harnesses::agent::Kind::default()
+                || setup.agent_of(*kind).has_sessions()
         })
         .collect();
     if detected.is_empty() {
-        vec![crate::agents::Kind::default()]
+        vec![crate::harnesses::agent::Kind::default()]
     } else {
         detected
     }
@@ -1050,7 +1054,7 @@ pub fn session_harnesses(setup: &Setup) -> Vec<crate::agents::Kind> {
 /// The estimate of summarizing the sessions of `kinds`.
 pub fn estimate_all(
     setup: &Setup,
-    kinds: &[crate::agents::Kind],
+    kinds: &[crate::harnesses::agent::Kind],
     since: Option<&str>,
 ) -> Result<sessions::Estimate, String> {
     let mut total = sessions::Estimate::default();
@@ -1068,7 +1072,7 @@ pub fn estimate_all(
 /// Indexed and summarized sessions over every harness's state.
 fn session_counts(data_dir: &Path) -> Result<(usize, usize, usize), String> {
     let mut counts = (0, 0, 0);
-    for kind in crate::agents::Kind::ALL {
+    for kind in crate::harnesses::agent::Kind::ALL {
         let state = sessions::State::load_for(data_dir, kind)?;
         counts.0 += state.indexed();
         counts.1 += state.summarized();
@@ -1080,8 +1084,8 @@ fn session_counts(data_dir: &Path) -> Result<(usize, usize, usize), String> {
 /// One estimate line for summaries through `command`: $0 for a free model of opencode Zen or a
 /// local model of Codex, else [`estimate_line`].
 pub fn estimate_line_for(estimate: &sessions::Estimate, command: &[String]) -> String {
-    let note =
-        crate::harness::headless_of(command).and_then(|(_, headless)| headless.free_note(command));
+    let note = crate::harnesses::headless::headless_of(command)
+        .and_then(|(_, headless)| headless.free_note(command));
     match note {
         Some(note) => format!(
             "{} finished session{}, {} without a summary: $0.00 ({note})",
@@ -1190,18 +1194,18 @@ pub fn write_summaries(setup: &Setup, enabled: bool, budget: Option<f64>) -> Res
     let current = crate::fsutil::read_optional(&path)?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     let text = config::with_summaries(current.as_deref(), enabled, budget)?;
-    crate::store::create_private_dir(&setup.data_dir)?;
+    crate::runtime::store::create_private_dir(&setup.data_dir)?;
     crate::fsutil::write_atomic(&path, text.as_bytes())
 }
 
 /// `doctor`: every check with its fix; exit code 1 when a problem was found.
 fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
-    use crate::agents::Kind;
+    use crate::harnesses::agent::Kind;
     let kinds = session_harnesses(setup);
     let color = {
         use std::io::IsTerminal;
         std::io::stdout().is_terminal()
-            && crate::prompt::color_allowed(&|name| std::env::var(name).ok())
+            && crate::install::prompt::color_allowed(&|name| std::env::var(name).ok())
     };
     // One section per harness, in wizard order, then the checks every harness shares.
     let mut sections: Vec<(String, Vec<install::Finding>)> = Vec::new();
@@ -1214,11 +1218,11 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
             .doctor(setup, current_project().as_deref());
         sections.push((kind.display_name().to_string(), findings));
     }
-    let others = crate::coexist::detect(setup, current_project().as_deref());
+    let others = crate::install::coexist::detect(setup, current_project().as_deref());
     if others.anything() {
         sections.push((
             "Other memory".to_string(),
-            crate::coexist::doctor_findings(setup, &others),
+            crate::install::coexist::doctor_findings(setup, &others),
         ));
     }
     let mut shared = install::shared_doctor(setup);
@@ -1231,7 +1235,7 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
     let _ = writeln!(
         out,
         "{}",
-        crate::prompt::paint(
+        crate::install::prompt::paint(
             color,
             "1",
             &format!("graphersal-memory doctor ({})", install::names_of(&kinds))
@@ -1245,14 +1249,18 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
         for finding in findings {
             let text = setup.show(finding.text.strip_prefix(&prefix).unwrap_or(&finding.text));
             if text.starts_with("ACTION NEEDED") {
-                let _ = writeln!(out, "  {}", crate::prompt::action_needed(color, &text));
+                let _ = writeln!(
+                    out,
+                    "  {}",
+                    crate::install::prompt::action_needed(color, &text)
+                );
                 actions.push(text);
             } else if finding.problem {
                 problems += 1;
                 let _ = writeln!(
                     out,
                     "  {} {text}",
-                    crate::prompt::paint(color, "1;33", "PROBLEM")
+                    crate::install::prompt::paint(color, "1;33", "PROBLEM")
                 );
                 if let Some(fix) = &finding.fix {
                     let _ = writeln!(out, "          fix: {}", setup.show(fix));
@@ -1281,7 +1289,11 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
     );
     // What only the user can do comes last, as in `status`.
     for action in &actions {
-        let _ = writeln!(out, "\n{}", crate::prompt::action_needed(color, action));
+        let _ = writeln!(
+            out,
+            "\n{}",
+            crate::install::prompt::action_needed(color, action)
+        );
     }
     if problems == 0 { 0 } else { EXIT_FAILED }
 }
@@ -1330,9 +1342,12 @@ fn run_hook(
 /// The hooks' start context: asked from the daemon for the project of the session's directory
 /// (its git root; the daemon resolves its stable id), after the instruction files of the
 /// harnesses (installed, else the hook's `harness`) were synced for the conflict check
-/// (`crate::instructions`; nothing is sent when they are unchanged, a failure only leaves the
+/// (`crate::memory::instructions`; nothing is sent when they are unchanged, a failure only leaves the
 /// counts as they were).
-pub(crate) fn start_fetch(setup: &Setup, harness: crate::agents::Kind) -> hook::StartFetch {
+pub(crate) fn start_fetch(
+    setup: &Setup,
+    harness: crate::harnesses::agent::Kind,
+) -> hook::StartFetch {
     let location = setup_location(setup);
     let setup = setup.clone();
     Box::new(move |dir: Option<&Path>, max: usize| {
@@ -1340,12 +1355,12 @@ pub(crate) fn start_fetch(setup: &Setup, harness: crate::agents::Kind) -> hook::
             .map(|dir| mcp::project_key(None, dir))
             .unwrap_or_default();
         let _ = sync_instructions(&setup, &location, harness.id(), &project, false);
-        crate::start_context::request(&location, &project, Some(max))
+        crate::memory::start_context::request(&location, &project, Some(max))
     })
 }
 
 /// Syncs the instruction files of the project at `root` (`""`: none, the user-level files
-/// only) with the daemon for the conflict check (`crate::instructions::sync`; `force`: even
+/// only) with the daemon for the conflict check (`crate::memory::instructions::sync`; `force`: even
 /// when unchanged since the last complete sync).
 fn sync_instructions(
     setup: &Setup,
@@ -1353,11 +1368,11 @@ fn sync_instructions(
     harness: &str,
     root: &str,
     force: bool,
-) -> Result<Option<crate::instructions::Synced>, String> {
-    let kinds = crate::instructions::kinds(setup, harness);
+) -> Result<Option<crate::memory::instructions::Synced>, String> {
+    let kinds = crate::memory::instructions::kinds(setup, harness);
     let project = (!root.is_empty()).then(|| Path::new(root));
-    let files = crate::instructions::files(setup, &kinds, project);
-    crate::instructions::sync(&setup.data_dir, root, &files, force, &mut |line| {
+    let files = crate::memory::instructions::files(setup, &kinds, project);
+    crate::memory::instructions::sync(&setup.data_dir, root, &files, force, &mut |line| {
         shim::request(location, line)
     })
 }
@@ -1397,8 +1412,8 @@ pub struct BenchRequest {
 pub fn bench_options(
     data_dir: &Path,
     claude: ClaudePaths,
-    opencode: crate::opencode::OpenCodePaths,
-    codex: crate::codex::CodexPaths,
+    opencode: crate::harnesses::opencode::OpenCodePaths,
+    codex: crate::harnesses::codex::CodexPaths,
     exe: PathBuf,
     project: String,
     request: &BenchRequest,
@@ -1413,7 +1428,7 @@ pub fn bench_options(
         dry_run: request.dry_run,
         yes: request.yes,
         interactive: terminal && !request.yes && !request.dry_run && !request.review,
-        color: terminal && crate::prompt::color_allowed(&|name| std::env::var(name).ok()),
+        color: terminal && crate::install::prompt::color_allowed(&|name| std::env::var(name).ok()),
         project,
         claude,
         opencode,
@@ -1451,8 +1466,8 @@ fn run_bench(
     let options = bench_options(
         &data_dir,
         claude,
-        crate::opencode::OpenCodePaths::resolve(&env)?,
-        crate::codex::CodexPaths::resolve(&env)?,
+        crate::harnesses::opencode::OpenCodePaths::resolve(&env)?,
+        crate::harnesses::codex::CodexPaths::resolve(&env)?,
         mcp::canonical(&exe),
         project(request.project.as_deref())?,
         request,
@@ -1597,7 +1612,7 @@ pub fn start_context_mode(
     }
 }
 
-/// What the shim does at the session's start and end (`crate::session_sync`): `None` inside
+/// What the shim does at the session's start and end (`crate::memory::session_sync`): `None` inside
 /// the summaries' own harness runs (`GRAPHERSAL_MEMORY_HOOK=off`), or when there is nothing to
 /// do.
 fn session_events(
@@ -1885,7 +1900,7 @@ fn status(cli: &Cli, mut stdout: impl Write) -> Result<(), String> {
     let color = {
         use std::io::IsTerminal;
         std::io::stdout().is_terminal()
-            && crate::prompt::color_allowed(&|name| std::env::var(name).ok())
+            && crate::install::prompt::color_allowed(&|name| std::env::var(name).ok())
     };
     let text = status_text_for(
         &data_dir,
@@ -1916,7 +1931,7 @@ fn start_context_answer(run_dir: &Path) -> Option<Vec<String>> {
     let project = std::env::current_dir()
         .map(|dir| mcp::project_key(None, &dir))
         .unwrap_or_default();
-    match crate::start_context::request_running(run_dir, &project) {
+    match crate::memory::start_context::request_running(run_dir, &project) {
         Ok(Some(context)) => {
             let mut lines = vec![context.status_line()];
             lines.extend(context.conflict_lines());
@@ -2036,7 +2051,7 @@ pub fn status_text_for(
             let kinds = setup.installed();
             // Nothing installed: the default harness's section (what install sets up first).
             let listed = if kinds.is_empty() {
-                vec![crate::agents::Kind::default()]
+                vec![crate::harnesses::agent::Kind::default()]
             } else {
                 kinds.clone()
             };
@@ -2045,7 +2060,7 @@ pub fn status_text_for(
                 lines.extend(setup.agent_of(*kind).status_lines(setup));
             }
             // A harness with its own section is not listed again.
-            let shown = |kind: &crate::agents::Kind| listed.contains(kind);
+            let shown = |kind: &crate::harnesses::agent::Kind| listed.contains(kind);
             let found: Vec<_> = setup
                 .detected()
                 .into_iter()
@@ -2056,9 +2071,9 @@ pub fn status_text_for(
                 .into_iter()
                 .filter(|(kind, _)| !shown(kind))
                 .collect();
-            lines.extend(crate::coexist::status_lines(
+            lines.extend(crate::install::coexist::status_lines(
                 setup,
-                &crate::coexist::detect(setup, project),
+                &crate::install::coexist::detect(setup, project),
             ));
             if !found.is_empty() || !leftovers.is_empty() {
                 lines.push("Other agents:".to_string());
@@ -2098,7 +2113,7 @@ pub fn status_text_for(
     }
     let mut text = format!(
         "{}\n",
-        crate::prompt::paint(color, "1", "graphersal-memory status")
+        crate::install::prompt::paint(color, "1", "graphersal-memory status")
     );
     for line in &general {
         // A store's own lines are indented under it.
@@ -2113,7 +2128,7 @@ pub fn status_text_for(
                 actions.push(line.trim_start().to_string());
                 text.push_str(&format!(
                     "{indent}{}\n",
-                    crate::prompt::action_needed(color, line.trim_start())
+                    crate::install::prompt::action_needed(color, line.trim_start())
                 ));
             } else {
                 text.push_str(line);
@@ -2126,7 +2141,7 @@ pub fn status_text_for(
         for action in actions {
             text.push_str(&format!(
                 "{}\n",
-                crate::prompt::action_needed(color, &action)
+                crate::install::prompt::action_needed(color, &action)
             ));
         }
     }
@@ -2143,16 +2158,16 @@ fn store_lines(data_dir: &Path, daemon: Option<&serde_json::Value>) -> Vec<Strin
     match open {
         Some(stores) => {
             for (name, status) in stores {
-                lines.extend(crate::maintenance::status_lines(name, status));
+                lines.extend(crate::runtime::maintenance::status_lines(name, status));
             }
         }
         None => {
-            let dir = crate::store::default_store_dir(data_dir);
+            let dir = crate::runtime::store::default_store_dir(data_dir);
             if dir.join("GRAPH").exists() {
-                let settings = crate::maintenance::Settings::load(data_dir);
-                let status = crate::maintenance::files_status(&dir, &settings);
-                lines.extend(crate::maintenance::status_lines(
-                    crate::registry::DEFAULT_STORE,
+                let settings = crate::runtime::maintenance::Settings::load(data_dir);
+                let status = crate::runtime::maintenance::files_status(&dir, &settings);
+                lines.extend(crate::runtime::maintenance::status_lines(
+                    crate::runtime::registry::DEFAULT_STORE,
                     &status,
                 ));
             }
@@ -2172,7 +2187,7 @@ pub fn store_findings(run_dir: &Path) -> Vec<install::Finding> {
         .map(|stores| {
             stores
                 .iter()
-                .filter_map(|(name, status)| crate::maintenance::wal_finding(name, status))
+                .filter_map(|(name, status)| crate::runtime::maintenance::wal_finding(name, status))
                 .collect()
         })
         .unwrap_or_default()
@@ -2186,7 +2201,7 @@ pub fn run(command: &Command, stderr: &mut dyn std::io::Write) -> u8 {
     EXIT_NOT_IMPLEMENTED
 }
 
-/// `upgrade`: the latest release through what installed this binary (`crate::update`).
+/// `upgrade`: the latest release through what installed this binary (`crate::install::update`).
 fn run_upgrade(
     cli: &Cli,
     check: bool,
@@ -2197,16 +2212,16 @@ fn run_upgrade(
 ) -> Result<u8, String> {
     let (data_dir, _) = dirs(cli)?;
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-    let home = crate::store::home_dir(&env)?;
+    let home = crate::runtime::store::home_dir(&env)?;
     let exe =
         std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
-    let releases = crate::update::releases_url(&env);
-    let options = crate::update::Options {
+    let releases = crate::install::update::releases_url(&env);
+    let options = crate::install::update::Options {
         check_only: check,
         yes,
         dry_run,
         interactive: terminal(),
-        method: crate::update::method_of(&exe, &home, &env, cfg!(windows)),
+        method: crate::install::update::method_of(&exe, &home, &env, cfg!(windows)),
         exe,
         releases: releases.clone(),
         data_dir,
@@ -2214,10 +2229,10 @@ fn run_upgrade(
             .join(format!("graphersal-memory-upgrade-{}", std::process::id())),
         windows: cfg!(windows),
     };
-    crate::update::run(
+    crate::install::update::run(
         &options,
-        &|| crate::update::latest(&releases),
-        &mut crate::update::RealMachine,
+        &|| crate::install::update::latest(&releases),
+        &mut crate::install::update::RealMachine,
         input,
         out,
     )
@@ -2246,10 +2261,10 @@ mod tests {
 
     #[test]
     fn status_on_a_fresh_machine_names_claude_code_once() {
-        let data = crate::mcp_tests::TempDir::new("st-n6");
-        let home = crate::mcp_tests::TempDir::new("st-n6home");
+        let data = crate::runtime::mcp_tests::TempDir::new("st-n6");
+        let home = crate::runtime::mcp_tests::TempDir::new("st-n6home");
         std::fs::create_dir_all(home.path().join(".claude")).unwrap();
-        let setup = crate::install_tests::setup_in(home.path(), data.path());
+        let setup = crate::install::install_tests::setup_in(home.path(), data.path());
         let text = status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
         assert!(!text.contains("Claude Code: found, not set up"), "{text}");
         assert!(!text.contains("Other agents:"), "{text}");
@@ -2257,9 +2272,9 @@ mod tests {
 
     #[test]
     fn status_without_a_daemon_says_so_and_shows_the_installation() {
-        let data = crate::mcp_tests::TempDir::new("st");
-        let home = crate::mcp_tests::TempDir::new("sthome");
-        let setup = crate::install_tests::setup_in(home.path(), data.path());
+        let data = crate::runtime::mcp_tests::TempDir::new("st");
+        let home = crate::runtime::mcp_tests::TempDir::new("sthome");
+        let setup = crate::install::install_tests::setup_in(home.path(), data.path());
         let text = status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
         assert!(text.contains("daemon: not running"), "{text}");
         assert!(text.contains(&data.path().display().to_string()), "{text}");
