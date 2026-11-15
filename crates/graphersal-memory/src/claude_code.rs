@@ -5,6 +5,7 @@
 //! import in `crate::import`, its transcript parser in `crate::transcript` and its hook in
 //! `crate::hook`.
 
+pub mod install;
 pub mod other;
 pub mod sessions;
 
