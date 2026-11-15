@@ -3,8 +3,9 @@
 
 use std::path::Path;
 
+use crate::claude_code::transcript;
 use crate::sessions::{SessionSource, Unit, scan, source_label, stamp};
-use crate::transcript::{self, Transcript};
+use crate::transcript::Transcript;
 
 /// Claude Code's sessions: the top-level transcripts of its projects directory.
 pub struct ClaudeSessions;
