@@ -4,7 +4,7 @@
 graph on your machine, searched through MCP instead of loaded on every turn.**
 
 Works with Claude Code, opencode, OpenAI Codex CLI, Cursor and CodeWhale (preview). One binary,
-no account, no telemetry. Version 0.2.0 is an early release, and honest about its limits
+no account, no telemetry. Version 0.2.1 is an early release, and honest about its limits
 ([status](#status)).
 
 <picture>
@@ -96,7 +96,7 @@ and restart running agent sessions.
 graphersal-memory upgrade
 ```
 
-(New after 0.2.0: with 0.2.0, upgrade by hand, below.)
+(New in 0.2.1: from 0.2.0, upgrade by hand, below.)
 
 It asks GitHub for the latest release, shows what it will do and asks before doing it. It upgrades
 the way the binary was installed: through the release's own installer into the same directory
@@ -272,12 +272,12 @@ another harness? A harness is one module behind one interface:
 
 ## Status
 
-graphersal-memory 0.2.0 is an early release. Prebuilt binaries are published for **Linux**
+graphersal-memory 0.2.1 is an early release. Prebuilt binaries are published for **Linux**
 (x86_64 and arm64, static), **macOS** (arm64 and x86_64) and **Windows** (x86_64). It has been
 used most on macOS. The test suite runs on Linux, macOS and Windows, and the release workflow
 smoke-tests every binary on its platform.
 
-Known limits of 0.2.0:
+Known limits of 0.2.1:
 
 - **Cursor** support is built from Cursor's documentation and tested against fixtures; it has not
   been run with a live Cursor yet. You can help: [docs/cursor-live-check.md](docs/cursor-live-check.md).

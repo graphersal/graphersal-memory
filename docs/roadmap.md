@@ -1,10 +1,10 @@
 # Roadmap
 
-What graphersal-memory 0.2.0 does today, and what we plan next. Planned work is tracked in
+What graphersal-memory 0.2.1 does today, and what we plan next. Planned work is tracked in
 [GitHub issues](https://github.com/graphersal/graphersal-memory/issues); a use case we have not
 thought of is welcome there.
 
-## In 0.2.0
+## In 0.2.1
 
 | Area | What you get |
 |---|---|
@@ -18,13 +18,12 @@ thought of is welcome there.
 | Past sessions | Finished sessions of every supported harness indexed in the background (raw turns), with opt-in summaries (decisions, corrections, outcomes, open threads) through your own harness, a cost estimate and a monthly budget cap. |
 | Built-in A/B | `bench`: no memory, your file memory and graphersal-memory on questions generated from your own raw sessions, sandboxed and judged, with a cost estimate, a budget and a dry run; `bench rule-changes` for rules that change. |
 | Browser UI | `graphersal-memory ui`: overview, memories, a graph of the memories and their decisions, the start context with its order and budget, conflicts and past sessions, on loopback with a token per run. |
+| Upgrades | `graphersal-memory upgrade` through the release's installer or cargo, then `install --refresh` brings the rule block, the MCP entries and the hooks to the new version, every choice kept; "Version X available" in the browser UI (one check a day, off by a setting). |
 | Store maintenance | Automatic checkpoints, history older than 30 days pruned, store sizes in `status` and `doctor`. |
 | Releases | Binaries for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows (x86_64), smoke-tested on each platform, with `SHA256SUMS`, build provenance and one-line installers; `cargo install`. |
 
 ## Next
 
-- **`upgrade` and the update notice** (built, in the next release): `graphersal-memory upgrade`
-  through the installer or cargo, and "Version X available" in the browser UI.
 - **CodeWhale beyond the preview**: a memory written through it, Linux and Windows
   ([codewhale-live-check.md](codewhale-live-check.md)), and `bench` through `codewhale exec`.
 - **Verify what is built but not yet run live**: Cursor with a live login

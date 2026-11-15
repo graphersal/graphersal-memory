@@ -1,6 +1,6 @@
 # Privacy
 
-> What graphersal-memory 0.2.0 keeps, where, and what (if anything) leaves your machine.
+> What graphersal-memory 0.2.1 keeps, where, and what (if anything) leaves your machine.
 
 Agent transcripts can contain anything: code, credentials pasted by mistake, customer names.
 graphersal-memory is designed so that nothing leaves your machine unless you ask for it.

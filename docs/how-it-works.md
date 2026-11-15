@@ -1,6 +1,6 @@
 # How it works
 
-> How graphersal-memory 0.2.0 works inside: its processes, stores, past sessions, the start
+> How graphersal-memory 0.2.1 works inside: its processes, stores, past sessions, the start
 > context, conflicts, the browser UI and the installation into a harness. Parts that are planned
 > and not built yet (isolated project stores) say so; see also the [roadmap](roadmap.md).
 

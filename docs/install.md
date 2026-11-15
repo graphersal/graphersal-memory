@@ -18,13 +18,13 @@ checksum does not match, and put the binary into `~/.local/bin` (Windows:
 ```sh
 curl -fsSL https://github.com/graphersal/graphersal-memory/releases/latest/download/install.sh | sh
 # a given version or directory
-curl -fsSL https://github.com/graphersal/graphersal-memory/releases/latest/download/install.sh | sh -s -- --version v0.2.0 --dir /usr/local/bin
+curl -fsSL https://github.com/graphersal/graphersal-memory/releases/latest/download/install.sh | sh -s -- --version v0.2.1 --dir /usr/local/bin
 ```
 
 ```powershell
 irm https://github.com/graphersal/graphersal-memory/releases/latest/download/install.ps1 | iex
 # a given version or directory
-& ([scriptblock]::Create((irm https://github.com/graphersal/graphersal-memory/releases/latest/download/install.ps1))) -Version v0.2.0 -Dir C:\Tools
+& ([scriptblock]::Create((irm https://github.com/graphersal/graphersal-memory/releases/latest/download/install.ps1))) -Version v0.2.1 -Dir C:\Tools
 ```
 
 The same options can be set as environment variables (`GRAPHERSAL_MEMORY_VERSION`,
