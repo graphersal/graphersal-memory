@@ -266,7 +266,9 @@ Details, including exactly what summaries and `bench` send: [docs/privacy.md](do
 
 Any combination can be installed at once; they share one store and one daemon. An MCP client
 without hooks can still use the server: it imports the project's memory files and queues the
-session indexing itself. Details per harness: [docs/harnesses.md](docs/harnesses.md).
+session indexing itself. Details per harness: [docs/harnesses.md](docs/harnesses.md). Want
+another harness? A harness is one module behind one interface:
+[docs/adding-a-harness.md](docs/adding-a-harness.md).
 
 ## Status
 
