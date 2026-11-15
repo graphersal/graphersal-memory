@@ -89,6 +89,73 @@ impl Kind {
     }
 }
 
+/// A harness's own memory as it is now ([`OwnMemory::now`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnMemoryNow {
+    /// It is on.
+    pub on: bool,
+    /// The wizard asks about it.
+    pub askable: bool,
+    /// The user switched it off themselves (not install).
+    pub off_by_user: bool,
+    /// An earlier install recorded an answer for it (its state's `auto_memory_off`).
+    pub answered: bool,
+}
+
+/// The wizard's question about a harness's own memory.
+pub struct OwnMemoryQuestion {
+    /// The step's title.
+    pub title: String,
+    /// What the step explains.
+    pub lines: Vec<String>,
+    /// The answer that switches it off.
+    pub yes: String,
+    /// The answer that keeps it on.
+    pub no: String,
+}
+
+/// A memory of the harness's own that install can switch off (and uninstall on again): Claude
+/// Code's auto-memory, Codex's memories, CodeWhale's memory. One wizard question answers for
+/// every chosen harness: the first asks it, the others add [`OwnMemory::also`].
+pub trait OwnMemory {
+    /// How it is now.
+    fn now(&self, setup: &Setup) -> Result<OwnMemoryNow, String>;
+    /// The question when this harness asks it (`start_sentence`: how the always-loaded
+    /// memories reach a session).
+    fn question(&self, setup: &Setup, start_sentence: &str) -> OwnMemoryQuestion;
+    /// The lines another harness's question adds: the same answer switches this one too.
+    fn also(&self, setup: &Setup) -> Vec<String>;
+    /// The title of its line in the wizard's recap, when it has one.
+    fn recap_title(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+/// A store of the harness's own memory whose entries install imports, reading it only
+/// (CodeWhale's).
+pub trait NativeMemory {
+    /// Its name in the wizard and the report (`CodeWhale's memory`).
+    fn name(&self) -> &'static str;
+    /// How many entries are new or changed since their import.
+    fn pending(&self, data_dir: &Path) -> usize;
+    /// What it holds and what of it was imported.
+    fn describe(&self, data_dir: &Path) -> String;
+    /// Whether the store could not be read.
+    fn failed(&self) -> bool;
+    /// Imports its new and changed entries.
+    fn import(&self, connect: &mut crate::import::Connect<'_>, data_dir: &Path) -> NativeImport;
+}
+
+/// What an import of a native memory did.
+pub struct NativeImport {
+    /// The report line.
+    pub line: String,
+    /// Changed entries whose memory was edited in graphersal-memory (kept), one line each.
+    pub kept_edited: Vec<String>,
+    /// Failures.
+    pub problems: Vec<String>,
+}
+
 /// One harness, as the installation sees it.
 pub trait Harness {
     /// Which harness this is.
@@ -119,6 +186,18 @@ pub trait Harness {
     /// What the user still has to do in the harness for the install to work fully (Codex:
     /// trust the hooks), as one line; `None` when nothing.
     fn action_needed(&self, _setup: &Setup) -> Option<String> {
+        None
+    }
+    /// Its own memory, when it has one install can switch off.
+    fn own_memory(&self) -> Option<&dyn OwnMemory> {
+        None
+    }
+    /// Its own memory's store, when install imports it (`project`: the current directory's).
+    fn native_memory(
+        &self,
+        _setup: &Setup,
+        _project: Option<&Path>,
+    ) -> Option<Box<dyn NativeMemory>> {
         None
     }
     /// Whether it gets a session plugin rather than hooks (opencode).
@@ -279,6 +358,10 @@ impl Harness for ClaudeCode {
         crate::install::claude_develop_on(setup)
     }
 
+    fn own_memory(&self) -> Option<&dyn OwnMemory> {
+        Some(self)
+    }
+
     fn status_lines(&self, setup: &Setup) -> Vec<String> {
         crate::install::status_lines(setup)
     }
@@ -344,6 +427,48 @@ impl Harness for ClaudeCode {
 
     fn headless_command(&self) -> Option<&'static str> {
         Some(crate::config::DEFAULT_HARNESS_COMMAND)
+    }
+}
+
+impl OwnMemory for ClaudeCode {
+    /// The auto-memory: off when `autoMemoryEnabled` is false; asked about unless the user
+    /// switched it off themselves.
+    fn now(&self, setup: &Setup) -> Result<OwnMemoryNow, String> {
+        crate::install::claude_own_memory_now(setup)
+    }
+
+    fn question(&self, setup: &Setup, start_sentence: &str) -> OwnMemoryQuestion {
+        let name = self.display_name();
+        OwnMemoryQuestion {
+            title: format!("{name}'s auto-memory"),
+            lines: vec![
+                format!(
+                    "{name} also writes its own memory files and loads them into every session;"
+                ),
+                "with graphersal-memory both would keep the same facts twice.".to_string(),
+                start_sentence.to_string(),
+                crate::install::NOTHING_IS_LOST.to_string(),
+            ],
+            yes: format!(
+                "switch it off ({} false in {})",
+                self.auto_memory_key().unwrap_or_default(),
+                setup.show(&self.settings_file().display().to_string())
+            ),
+            no: "keep it on (the files it writes are imported at each session start)".to_string(),
+        }
+    }
+
+    fn also(&self, setup: &Setup) -> Vec<String> {
+        vec![format!(
+            "The same answer switches {}'s auto-memory off ({} in {}).",
+            self.display_name(),
+            self.auto_memory_key().unwrap_or_default(),
+            setup.show(&self.settings_file().display().to_string())
+        )]
+    }
+
+    fn recap_title(&self) -> Option<&'static str> {
+        Some("Auto-memory")
     }
 }
 

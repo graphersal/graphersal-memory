@@ -365,6 +365,33 @@ impl Report {
     }
 }
 
+impl crate::agents::NativeMemory for Native {
+    fn name(&self) -> &'static str {
+        "CodeWhale's memory"
+    }
+
+    fn pending(&self, data_dir: &Path) -> usize {
+        Native::pending(self, data_dir)
+    }
+
+    fn describe(&self, data_dir: &Path) -> String {
+        Native::describe(self, data_dir)
+    }
+
+    fn failed(&self) -> bool {
+        self.error.is_some()
+    }
+
+    fn import(&self, connect: &mut Connect<'_>, data_dir: &Path) -> crate::agents::NativeImport {
+        let report = apply(self, connect, data_dir);
+        crate::agents::NativeImport {
+            line: report.line(self),
+            kept_edited: report.kept_edited,
+            problems: report.problems,
+        }
+    }
+}
+
 /// Imports the new and changed entries of `native` (one connection per project, one without a
 /// project for the global ones), recording each in the state of `data_dir`.
 pub fn apply(native: &Native, connect: &mut Connect<'_>, data_dir: &Path) -> Report {

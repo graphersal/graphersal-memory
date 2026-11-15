@@ -1122,6 +1122,26 @@ impl HarnessPlan {
     }
 }
 
+/// Claude Code's auto-memory as it is now: off when `autoMemoryEnabled` is false; switched off
+/// by the user when install did not record it; asked about unless the user switched it off.
+pub(crate) fn claude_own_memory_now(setup: &Setup) -> Result<crate::agents::OwnMemoryNow, String> {
+    let state = State::load(setup)?;
+    let agent = setup.agent();
+    let settings = read_json(agent.settings_file(), &mut Vec::new());
+    let off = agent
+        .auto_memory_key()
+        .is_some_and(|key| settings[key] == Value::Bool(false));
+    let recorded = state
+        .file(agent.settings_file())
+        .is_some_and(|entry| entry.contains_key(AUTO_MEMORY_RECORD));
+    Ok(crate::agents::OwnMemoryNow {
+        on: !off,
+        askable: !(off && !recorded),
+        off_by_user: off && !recorded,
+        answered: state.meta.contains_key("auto_memory_off"),
+    })
+}
+
 /// Whether Claude Code's develop server is registered (an entry of ours).
 pub(crate) fn claude_develop_on(setup: &Setup) -> bool {
     let user_config = read_json(&setup.paths.user_config, &mut Vec::new());
@@ -1600,25 +1620,16 @@ struct Current {
     installed: bool,
     /// The settings file.
     config: Config,
-    /// The current answer to the auto-memory question on an installed system (whether the
-    /// harness's memory is off now), `None` before the first install.
-    auto_memory_answer: Option<bool>,
-    /// Whether the harness's own memory is off (by anyone).
-    auto_memory_off: bool,
-    /// Whether the user switched it off themselves (not install).
-    auto_memory_off_by_user: bool,
+    /// The own memory of each harness that has one, as it is now (wizard order).
+    own_memories: Vec<(Kind, crate::agents::OwnMemoryNow)>,
     /// Whether our develop server is registered.
     develop_registered: bool,
     /// The file-memory import still to do: (directories, new + changed files).
     import_pending: (usize, usize),
     /// The harnesses found on this machine (Claude Code when none is found).
     detected: Vec<Kind>,
-    /// Whether Codex's own memories are on (`[features] memories = true`).
-    codex_memories_on: bool,
-    /// Whether CodeWhale's native memory is on.
-    codewhale_memory_on: bool,
-    /// CodeWhale's native memory to import (its reviewed entries), when it has a store.
-    codewhale_native: Option<crate::codewhale::memory::Native>,
+    /// The harnesses' own memory stores to import (CodeWhale's reviewed entries).
+    natives: Vec<Box<dyn crate::agents::NativeMemory>>,
     /// The start context the memory files give (the project with the most always-loaded
     /// memories), within the budget of the settings.
     start_preview: crate::start_context::StartContext,
@@ -1689,54 +1700,19 @@ pub fn start_context_blocked(config: &Config) -> Option<String> {
 
 impl Current {
     fn read(setup: &Setup, project: Option<&Path>) -> Result<Self, String> {
-        let state = State::load(setup)?;
-        let codex_state = State::load_of(setup, Kind::Codex)?;
         let config = Config::load(&setup.data_dir)?;
         let agent = setup.agent();
         let mut errors = Vec::new();
-        let settings = read_json(agent.settings_file(), &mut errors);
         let user_config = read_json(agent.mcp_config_file(), &mut errors);
-        let off = agent
-            .auto_memory_key()
-            .is_some_and(|key| settings[key] == Value::Bool(false));
-        let recorded = state
-            .file(agent.settings_file())
-            .is_some_and(|entry| entry.contains_key(AUTO_MEMORY_RECORD));
-        let codex_memories_on = read_text(&setup.codex.config_file)
-            .ok()
-            .flatten()
-            .and_then(|text| crate::tomledit::parse(&text).ok())
-            .is_some_and(|doc| crate::codex::install::memories_on(&doc));
-        let codewhale_state = State::load_of(setup, Kind::CodeWhale)?;
-        let codewhale_memory_on = crate::codewhale::memory_on(
-            &read_text(&setup.codewhale.config_file)
-                .ok()
-                .flatten()
-                .and_then(|text| crate::tomledit::parse(&text).ok())
-                .unwrap_or(Value::Null),
-            setup.codewhale.memory_env_on,
-        );
-        let codewhale_native = (setup.program(Kind::CodeWhale).is_some()
-            || State::exists_of(setup, Kind::CodeWhale))
-        .then(|| {
-            crate::codewhale::memory::Native::load(
-                &setup.codewhale.memory_store,
-                &setup.data_dir,
-                project,
-            )
-        })
-        .flatten();
-        // On an installed system the current answer is what is true now: a user who switched
-        // the harness's memory back on after install keeps it on (unless they answer otherwise).
-        let auto_memory_answer = if state.meta.contains_key("auto_memory_off") {
-            Some(off)
-        } else if codex_state.meta.contains_key("auto_memory_off") {
-            Some(!codex_memories_on)
-        } else if codewhale_state.meta.contains_key("auto_memory_off") {
-            Some(!codewhale_memory_on)
-        } else {
-            None
-        };
+        let mut own_memories = Vec::new();
+        let mut natives = Vec::new();
+        for kind in Kind::ALL {
+            let harness = setup.agent_of(kind);
+            if let Some(own) = harness.own_memory() {
+                own_memories.push((kind, own.now(setup)?));
+            }
+            natives.extend(harness.native_memory(setup, project));
+        }
         let imports = import::plan(
             import::scan(agent.projects_dir())?,
             &ImportState::load(&setup.data_dir)?,
@@ -1751,9 +1727,10 @@ impl Current {
             .iter()
             .map(|source| other_state.pending_count(source))
             .sum::<usize>()
-            + codewhale_native
-                .as_ref()
-                .map_or(0, |native| native.pending(&setup.data_dir));
+            + natives
+                .iter()
+                .map(|native| native.pending(&setup.data_dir))
+                .sum::<usize>();
         Ok(Self {
             other_pending,
             start_preview,
@@ -1763,9 +1740,7 @@ impl Current {
             other_sources,
             not_importable,
             installed: State::exists(setup),
-            auto_memory_answer,
-            auto_memory_off: off,
-            auto_memory_off_by_user: off && !recorded,
+            own_memories,
             develop_registered: setup
                 .ours()
                 .entry(&user_config["mcpServers"][DEVELOP_SERVER]),
@@ -1779,23 +1754,44 @@ impl Current {
                 }
             },
             config,
-            codex_memories_on,
-            codewhale_memory_on,
-            codewhale_native,
+            natives,
         })
     }
 
-    /// Whether the auto-memory question applies: Claude Code may be chosen and its auto-memory
-    /// was not switched off by the user, or Codex (CodeWhale) is among `possible` and its own
-    /// memory is on.
-    fn ask_auto_memory(&self, claude_possible: bool, possible: &[Kind]) -> bool {
-        (claude_possible && !self.auto_memory_off_by_user) || self.own_memory_on(possible)
+    /// Whether the own-memory question applies: a harness among `possible` has an own memory
+    /// the wizard asks about (on, or switched off by install).
+    fn ask_auto_memory(&self, possible: &[Kind]) -> bool {
+        self.own_memory_on(possible)
     }
 
     /// Whether Codex or CodeWhale is among `kinds` with its own memory on.
     fn own_memory_on(&self, kinds: &[Kind]) -> bool {
-        (kinds.contains(&Kind::Codex) && self.codex_memories_on)
-            || (kinds.contains(&Kind::CodeWhale) && self.codewhale_memory_on)
+        self.own_memories
+            .iter()
+            .any(|(kind, now)| now.askable && kinds.contains(kind))
+    }
+
+    /// The current answer to the own-memory question on an installed system (whether the
+    /// first harness with a recorded answer has its memory off now), `None` before the first
+    /// install: a user who switched it back on after install keeps it on.
+    fn auto_memory_answer(&self) -> Option<bool> {
+        self.own_memories
+            .iter()
+            .find(|(_, now)| now.answered)
+            .map(|(_, now)| !now.on)
+    }
+
+    /// Whether the user switched a harness's own memory off themselves (not install).
+    fn own_memory_off_by_user(&self) -> bool {
+        self.own_memories.iter().any(|(_, now)| now.off_by_user)
+    }
+
+    /// The own memory of `kind` as it is now.
+    fn own_memory(&self, kind: Kind) -> Option<crate::agents::OwnMemoryNow> {
+        self.own_memories
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, now)| *now)
     }
 
     /// Whether the wizard's "Other memory" step applies for the harnesses `kinds`: another
@@ -1893,8 +1889,8 @@ fn default_answers(options: &InstallOptions, current: &Current) -> Answers {
         auto_memory_off: !options.keep_auto_memory
             && current.start_blocked.is_none()
             && current
-                .auto_memory_answer
-                .unwrap_or(!current.auto_memory_off_by_user),
+                .auto_memory_answer()
+                .unwrap_or(!current.own_memory_off_by_user()),
         summaries: options.summaries || current.config.summaries.enabled,
         develop: options.enable_develop || current.develop_registered,
         own_memory_as_is: Vec::new(),
@@ -1984,7 +1980,7 @@ fn ask(
         defaults.harnesses.clone()
     };
     let ask_import = claude_possible && current.import_pending.1 > 0;
-    let ask_auto_memory = current.ask_auto_memory(claude_possible, &codex_possible);
+    let ask_auto_memory = current.ask_auto_memory(&codex_possible);
     let total = wizard_steps(options, current, claude_possible, &codex_possible);
     let mut n = 0;
     let mut next = || {
@@ -2125,87 +2121,32 @@ fn ask(
         defaults.import
     };
 
-    let claude_memory = claude && !current.auto_memory_off_by_user;
-    let codex_memory = harnesses.contains(&Kind::Codex) && current.codex_memories_on;
-    let codewhale_memory = harnesses.contains(&Kind::CodeWhale) && current.codewhale_memory_on;
-    let codewhale_config = setup.show(&setup.codewhale.config_file.display().to_string());
-    let auto_memory_off = if ask_auto_memory && claude_memory {
-        let mut lines = vec![
-            format!("{name} also writes its own memory files and loads them into every session;"),
-            "with graphersal-memory both would keep the same facts twice.".to_string(),
-            start_context_sentence(current),
-            NOTHING_IS_LOST.to_string(),
-        ];
-        if codex_memory {
-            lines.push(
-                "The same answer switches Codex's own memories off ([features] memories in"
-                    .to_string(),
-            );
-            lines.push(format!(
-                "{}); uninstall switches them on again.",
-                setup.show(&setup.codex.config_file.display().to_string())
-            ));
+    // One question for every chosen harness with an own memory: the first asks it, the
+    // others say that the same answer switches theirs.
+    let askable: Vec<Kind> = Kind::ALL
+        .into_iter()
+        .filter(|kind| harnesses.contains(kind))
+        .filter(|kind| current.own_memory(*kind).is_some_and(|now| now.askable))
+        .collect();
+    let start_sentence = start_context_sentence(current);
+    let question = askable.first().and_then(|first| {
+        let harness = setup.agent_of(*first);
+        let own = harness.own_memory()?;
+        let mut question = own.question(setup, &start_sentence);
+        for kind in &askable[1..] {
+            if let Some(other) = setup.agent_of(*kind).own_memory() {
+                question.lines.extend(other.also(setup));
+            }
         }
-        if codewhale_memory {
-            lines.push(format!(
-                "The same answer switches CodeWhale's own memory off ([memory] enabled in {}),",
-                codewhale_config
-            ));
-            lines.push(
-                "after importing its reviewed entries; uninstall switches it on again.".to_string(),
-            );
+        Some(question)
+    });
+    let auto_memory_off = match question {
+        Some(question) if ask_auto_memory => {
+            let lines: Vec<&str> = question.lines.iter().map(String::as_str).collect();
+            console.step(next(), total, &question.title, &lines);
+            console.yes_no(&question.yes, &question.no, Some(defaults.auto_memory_off))?
         }
-        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
-        console.step(next(), total, &format!("{name}'s auto-memory"), &lines);
-        console.yes_no(
-            &format!(
-                "switch it off ({} false in {})",
-                agent.auto_memory_key().unwrap_or_default(),
-                setup.show(&agent.settings_file().display().to_string())
-            ),
-            "keep it on (the files it writes are imported at each session start)",
-            Some(defaults.auto_memory_off),
-        )?
-    } else if ask_auto_memory && codex_memory {
-        let mut lines = vec![
-            "Codex's own memory feature is on: it generates memories from your chats and",
-            "loads them into sessions; with graphersal-memory both would keep the same facts",
-            "twice.",
-            crate::codex::install::NOTHING_IS_LOST,
-        ];
-        let codewhale_line = format!(
-            "The same answer switches CodeWhale's own memory off ([memory] enabled in {codewhale_config})."
-        );
-        if codewhale_memory {
-            lines.push(&codewhale_line);
-        }
-        console.step(next(), total, "Codex's memories", &lines);
-        console.yes_no(
-            &format!(
-                "switch it off ([features] memories = false in {})",
-                setup.show(&setup.codex.config_file.display().to_string())
-            ),
-            "keep it on",
-            Some(defaults.auto_memory_off),
-        )?
-    } else if ask_auto_memory && codewhale_memory {
-        console.step(
-            next(),
-            total,
-            "CodeWhale's memory",
-            &[
-                "CodeWhale's own memory is on: it keeps notes in its own store and loads them",
-                "into sessions; with graphersal-memory both would keep the same facts twice.",
-                crate::codewhale::install::NOTHING_IS_LOST,
-            ],
-        );
-        console.yes_no(
-            &format!("switch it off ([memory] enabled = false in {codewhale_config})"),
-            "keep it on",
-            Some(defaults.auto_memory_off),
-        )?
-    } else {
-        defaults.auto_memory_off
+        _ => defaults.auto_memory_off,
     };
 
     let others = ask_other_memory(
@@ -2413,12 +2354,10 @@ fn ask_other_memory(
             .iter()
             .map(|s| s.server.clone())
             .collect();
-        if current
-            .codewhale_native
-            .as_ref()
-            .is_some_and(|native| native.pending(&setup.data_dir) > 0)
-        {
-            names.push("CodeWhale's memory".to_string());
+        for native in &current.natives {
+            if native.pending(&setup.data_dir) > 0 {
+                names.push(native.name().to_string());
+            }
         }
         let _ = writeln!(console.out(), "  Import:");
         import = console.yes_no(
@@ -2450,7 +2389,7 @@ fn wizard_steps(
 ) -> usize {
     let ask_harnesses = options.harnesses.is_none() && current.detected.len() > 1;
     let import = claude_possible && current.import_pending.1 > 0;
-    let auto = current.ask_auto_memory(claude_possible, codex_possible);
+    let auto = current.ask_auto_memory(codex_possible);
     let others = current.other_step(&possible_harnesses(options, current));
     4 + usize::from(ask_harnesses)
         + usize::from(import)
@@ -2481,8 +2420,8 @@ fn skipped_steps(
     let others_skipped = usize::from(others_counted && !current.other_step(chosen));
     let claude = chosen.contains(&Kind::ClaudeCode);
     let import_counted = claude_possible && current.import_pending.1 > 0;
-    let auto_counted = current.ask_auto_memory(claude_possible, codex_possible);
-    let auto_asked = (claude && !current.auto_memory_off_by_user) || current.own_memory_on(chosen);
+    let auto_counted = current.ask_auto_memory(codex_possible);
+    let auto_asked = current.own_memory_on(chosen);
     usize::from(import_counted && !claude)
         + usize::from(auto_counted && !auto_asked)
         + others_skipped
@@ -2861,12 +2800,13 @@ fn plan_other_memory(
             }
         ));
     }
-    if let Some(native) = &current.codewhale_native {
+    for native in &current.natives {
         let pending = native.pending(&setup.data_dir);
         import_lines.push(format!(
-            "CodeWhale's memory: {}{}",
+            "{}: {}{}",
+            native.name(),
             native.describe(&setup.data_dir),
-            if pending == 0 || native.error.is_some() {
+            if pending == 0 || native.failed() {
                 ""
             } else if answers.import_other {
                 ": imported (its store is only read)"
@@ -3626,12 +3566,12 @@ pub fn install(
         }
         failures += done.problems.len();
     }
-    if answers.import_other
-        && let Some(native) = &current.codewhale_native
-        && native.pending(&setup.data_dir) > 0
-    {
-        let done = crate::codewhale::memory::apply(native, connect, &setup.data_dir);
-        report.push(done.line(native));
+    for native in &current.natives {
+        if !answers.import_other || native.pending(&setup.data_dir) == 0 {
+            continue;
+        }
+        let done = native.import(connect, &setup.data_dir);
+        report.push(done.line);
         report.extend(done.kept_edited.iter().map(|line| format!("  {line}")));
         for problem in &done.problems {
             report.push(format!("import failed: {problem}"));
@@ -3873,11 +3813,11 @@ fn refresh_answers(setup: &Setup, current: &Current, harnesses: Vec<Kind>) -> An
             .unwrap_or_else(|| models::BUILTIN.to_string()),
         import: false,
         auto_memory_off: false,
-        own_memory_as_is: vec![
-            (Kind::ClaudeCode, current.auto_memory_off),
-            (Kind::Codex, !current.codex_memories_on),
-            (Kind::CodeWhale, !current.codewhale_memory_on),
-        ],
+        own_memory_as_is: current
+            .own_memories
+            .iter()
+            .map(|(kind, now)| (*kind, !now.on))
+            .collect(),
         summaries: current.config.summaries.enabled,
         develop: false,
         develop_as_is,
@@ -4245,9 +4185,18 @@ fn recap(
             },
         ));
     }
-    if answers.harnesses.contains(&Kind::ClaudeCode) && !current.auto_memory_off_by_user {
+    let recap_title = answers
+        .harnesses
+        .iter()
+        .filter(|kind| {
+            current
+                .own_memory(**kind)
+                .is_some_and(|now| !now.off_by_user)
+        })
+        .find_map(|kind| setup.agent_of(*kind).own_memory()?.recap_title());
+    if let Some(title) = recap_title {
         lines.push((
-            "Auto-memory",
+            title,
             if answers.auto_memory_off {
                 format!("switched off. {}", start_context_sentence(current))
             } else {

@@ -219,6 +219,59 @@ impl Codex {
     }
 }
 
+impl crate::agents::OwnMemory for Codex {
+    /// Its memories: on with `[features] memories = true` in `config.toml`.
+    fn now(&self, setup: &crate::install::Setup) -> Result<crate::agents::OwnMemoryNow, String> {
+        let on = crate::install::read_text(&self.paths.config_file)
+            .ok()
+            .flatten()
+            .and_then(|text| crate::tomledit::parse(&text).ok())
+            .is_some_and(|doc| install::memories_on(&doc));
+        let answered = crate::install::State::load_of(setup, Kind::Codex)?
+            .meta
+            .contains_key("auto_memory_off");
+        Ok(crate::agents::OwnMemoryNow {
+            on,
+            askable: on,
+            off_by_user: false,
+            answered,
+        })
+    }
+
+    fn question(
+        &self,
+        setup: &crate::install::Setup,
+        _start_sentence: &str,
+    ) -> crate::agents::OwnMemoryQuestion {
+        crate::agents::OwnMemoryQuestion {
+            title: "Codex's memories".to_string(),
+            lines: vec![
+                "Codex's own memory feature is on: it generates memories from your chats and"
+                    .to_string(),
+                "loads them into sessions; with graphersal-memory both would keep the same facts"
+                    .to_string(),
+                "twice.".to_string(),
+                install::NOTHING_IS_LOST.to_string(),
+            ],
+            yes: format!(
+                "switch it off ([features] memories = false in {})",
+                setup.show(&self.paths.config_file.display().to_string())
+            ),
+            no: "keep it on".to_string(),
+        }
+    }
+
+    fn also(&self, setup: &crate::install::Setup) -> Vec<String> {
+        vec![
+            "The same answer switches Codex's own memories off ([features] memories in".to_string(),
+            format!(
+                "{}); uninstall switches them on again.",
+                setup.show(&self.paths.config_file.display().to_string())
+            ),
+        ]
+    }
+}
+
 impl Harness for Codex {
     fn kind(&self) -> Kind {
         Kind::Codex
@@ -234,6 +287,10 @@ impl Harness for Codex {
 
     fn has_our_parts(&self, setup: &crate::install::Setup) -> bool {
         !install::inspect(setup).nothing_installed()
+    }
+
+    fn own_memory(&self) -> Option<&dyn crate::agents::OwnMemory> {
+        Some(self)
     }
 
     fn develop_on(&self, setup: &crate::install::Setup) -> bool {
