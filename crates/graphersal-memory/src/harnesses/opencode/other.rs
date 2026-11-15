@@ -106,7 +106,7 @@ impl OtherMemory for OpenCode {
             && std::env::var_os("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT").is_none()
             && !paths.config_dir.join("AGENTS.md").is_file()
         {
-            out.push(setup.paths.instructions.clone());
+            out.push(setup.paths().instructions.clone());
         }
         if let Some(root) = project {
             out.push(root.join("AGENTS.md"));

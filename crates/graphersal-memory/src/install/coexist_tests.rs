@@ -64,7 +64,7 @@ pub(crate) fn named_machine(home: &Path) {
 }
 
 fn config_json(setup: &Setup) -> Value {
-    serde_json::from_str(&read(&setup.paths.user_config)).unwrap()
+    serde_json::from_str(&read(&setup.paths().user_config)).unwrap()
 }
 
 fn doctor_texts(setup: &Setup) -> Vec<String> {
@@ -229,7 +229,7 @@ fn a_default_install_names_the_reference_server_read_only_and_leaves_its_entry()
     // --yes alone never switches another tool off.
     let config = config_json(&setup);
     assert_eq!(config["mcpServers"]["memory"], reference_entry(home.path()));
-    let rules = read(&setup.paths.instructions);
+    let rules = read(&setup.paths().instructions);
     assert!(
         rules.starts_with(&before_rules),
         "the user's text stays: {rules}"
@@ -277,7 +277,7 @@ fn a_default_install_names_the_reference_server_read_only_and_leaves_its_entry()
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 0, "{out}");
     assert_eq!(read(&home.path().join(".claude.json")), before_config);
-    assert_eq!(read(&setup.paths.instructions), before_rules);
+    assert_eq!(read(&setup.paths().instructions), before_rules);
     assert!(coexist::Choices::load(&setup).is_none());
     memory.close();
 }
@@ -301,10 +301,10 @@ fn disable_other_switches_the_entry_off_and_uninstall_puts_it_back_byte_for_byte
     assert!(config["mcpServers"]["memory"].is_null(), "{config}");
     assert_eq!(config["mcpServers"]["github"]["command"], "github-mcp");
     // Not named read-only (it is off), recorded for uninstall, shown by status and doctor.
-    assert!(!read(&setup.paths.instructions).contains("Other memory on this machine"));
+    assert!(!read(&setup.paths().instructions).contains("Other memory on this machine"));
     let state: Value =
         serde_json::from_str(&read(&data.path().join("install").join("claude-code.json"))).unwrap();
-    let record = &state["files"][setup.paths.user_config.display().to_string()]
+    let record = &state["files"][setup.paths().user_config.display().to_string()]
         [coexist::OFF_RECORD]["memory"];
     assert_eq!(record["how"], "removed");
     assert_eq!(record["entry"], reference_entry(home.path()));
@@ -346,8 +346,8 @@ fn a_config_changed_after_install_still_gets_the_entry_back() {
     let (code, out) = run_install(&setup, &memory, options);
     assert_eq!(code, 0, "{out}");
     // Claude Code rewrites its file meanwhile (as it does with ~/.claude.json).
-    let text = read(&setup.paths.user_config).replace("\"numStartups\": 3", "\"numStartups\": 4");
-    std::fs::write(&setup.paths.user_config, &text).unwrap();
+    let text = read(&setup.paths().user_config).replace("\"numStartups\": 3", "\"numStartups\": 4");
+    std::fs::write(&setup.paths().user_config, &text).unwrap();
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 0, "{out}");
     let config = config_json(&setup);
@@ -462,7 +462,7 @@ fn enable_other_switches_it_on_again_without_uninstall() {
     let state = read(&data.path().join("install").join("claude-code.json"));
     assert!(!state.contains(coexist::OFF_RECORD), "{state}");
     // On again, it is named read-only (the default for a known tool).
-    assert!(read(&setup.paths.instructions).contains("the MCP server `memory`"));
+    assert!(read(&setup.paths().instructions).contains("the MCP server `memory`"));
     // An unknown name is a warning, nothing else.
     let (code, out) = run_install(
         &setup,
@@ -615,7 +615,7 @@ fn the_wizard_offers_the_choice_and_its_answers_take_effect() {
         coexist::Choices::load(&setup).unwrap().read_only,
         ["memory"]
     );
-    assert!(read(&setup.paths.instructions).contains("the MCP server `memory`"));
+    assert!(read(&setup.paths().instructions).contains("the MCP server `memory`"));
     memory.close();
 }
 
@@ -921,7 +921,7 @@ fn a_file_that_brings_back_a_forgotten_memory_is_reported_and_can_be_ignored() {
     )
     .unwrap();
     let state = ImportState::load(data.path()).unwrap();
-    let plans = import::plan(import::scan(&setup.paths.projects).unwrap(), &state);
+    let plans = import::plan(import::scan(&setup.paths().projects).unwrap(), &state);
     assert_eq!(plans[0].ignored, 1);
     assert!(plans[0].changed.iter().all(|f| f.path != file));
     let status = crate::commands::status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
@@ -1107,9 +1107,9 @@ fn a_default_install_keeps_every_rule_the_user_had_in_context() {
     assert_eq!(code, 0, "{out}");
     // The default switched auto-memory off: the start context carries every rule and pinned
     // memory MEMORY.md carried, and CLAUDE.md keeps the user's rules (Claude Code loads it).
-    let settings: Value = serde_json::from_str(&read(&setup.paths.settings)).unwrap();
+    let settings: Value = serde_json::from_str(&read(&setup.paths().settings)).unwrap();
     assert_eq!(settings["autoMemoryEnabled"], false);
-    assert!(read(&setup.paths.instructions).starts_with(rules));
+    assert!(read(&setup.paths().instructions).starts_with(rules));
     let context = memory
         .runtime
         .start_context(&project, crate::memory::start_context::DEFAULT_CHARS)
@@ -1320,7 +1320,7 @@ fn the_export_leaves_out_memories_imported_from_another_tool() {
         ..Default::default()
     };
     let rows = vec![row("kg-robin"), row("kg-graphersal"), row("mine")];
-    let report = crate::memory::export::write(&setup.agent(), data.path(), &rows).unwrap();
+    let report = crate::memory::export::write(setup.agent(), data.path(), &rows).unwrap();
     assert_eq!(report.from_other_tools, 2);
     assert!(
         report
@@ -1337,7 +1337,7 @@ fn the_export_leaves_out_memories_imported_from_another_tool() {
     );
     // Only memories of other tools: no global file at all.
     std::fs::remove_file(setup.agent().global_memory_file()).unwrap();
-    let report = crate::memory::export::write(&setup.agent(), data.path(), &rows[..2]).unwrap();
+    let report = crate::memory::export::write(setup.agent(), data.path(), &rows[..2]).unwrap();
     assert_eq!(report.from_other_tools, 2);
     assert!(!setup.agent().global_memory_file().exists());
     memory.close();
@@ -1352,7 +1352,7 @@ fn a_config_rewritten_while_install_waits_keeps_the_agents_write_and_the_switch_
     let memory = Memory::open(data.path());
     let mut connect = memory.connector();
     let mut input = std::io::BufReader::new(crate::install::install_tests::RacingInput {
-        path: setup.paths.user_config.clone(),
+        path: setup.paths().user_config.clone(),
         answered: false,
     });
     let options = InstallOptions {

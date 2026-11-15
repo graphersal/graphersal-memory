@@ -78,7 +78,7 @@ pub fn plan(setup: &Setup, harness: &str, cwd: &Path, project: &Path) -> Plan {
         claude: kinds
             .iter()
             .any(|kind| setup.agent_of(*kind).has_file_memory())
-            .then(|| setup.paths.clone()),
+            .then(|| setup.paths().clone()),
         dirs,
         project_dir: project.to_path_buf(),
         requests,
@@ -187,7 +187,7 @@ mod tests {
         let home = TempDir::new("ss-env-home");
         let data = TempDir::new("ss-env-data");
         let setup = setup_in(home.path(), data.path());
-        std::fs::create_dir_all(&setup.paths.projects).unwrap();
+        std::fs::create_dir_all(&setup.paths().projects).unwrap();
         let work = home.path().join("work");
         let sub = work.join("src");
         let plan = plan(&setup, "claude-code", &sub, &work);
@@ -195,10 +195,10 @@ mod tests {
         assert_eq!(plan.dirs, vec![sub, work]);
         assert_eq!(plan.requests.len(), 1);
         assert_eq!(plan.requests[0].harness, Kind::ClaudeCode);
-        assert_eq!(plan.requests[0].projects_dir, setup.paths.projects);
+        assert_eq!(plan.requests[0].projects_dir, setup.paths().projects);
         assert!(plan.requests[0].active.is_empty() && plan.requests[0].ended.is_empty());
         // Codex's sessions exist but Codex did not start it and is not installed: left out.
-        std::fs::create_dir_all(&setup.codex.sessions).unwrap();
+        std::fs::create_dir_all(&setup.codex().sessions).unwrap();
         let again = super::plan(&setup, "claude-code", home.path(), home.path());
         assert_eq!(again.requests.len(), 1);
         assert_eq!(again.dirs.len(), 1);
@@ -211,7 +211,7 @@ mod tests {
         let setup = setup_in(home.path(), data.path());
         let work = home.path().join("work");
         let session = crate::harnesses::codewhale::sessions::tests::write_fixture(
-            &setup.codewhale.sessions,
+            &setup.codewhale().sessions,
             &work.display().to_string(),
         );
         crate::harnesses::codewhale::sessions::tests::write_fixture(

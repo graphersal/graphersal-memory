@@ -301,7 +301,7 @@ pub fn plan(
     let mut conflicts = Vec::new();
     let mut steps = Vec::new();
     let mut changes = Vec::new();
-    let paths = &setup.codex;
+    let paths = &setup.codex();
 
     // config.toml: the managed block of the two servers, and the memories switch.
     let path = &paths.config_file;
@@ -573,7 +573,7 @@ pub fn removal(
     develop_only: bool,
     conflicts: &mut Vec<String>,
 ) -> Result<Vec<(Change, &'static str)>, String> {
-    let paths = &setup.codex;
+    let paths = &setup.codex();
     let mut out = Vec::new();
     let mut targets = vec![paths.config_file.clone()];
     if !develop_only {
@@ -828,7 +828,7 @@ impl Inspection {
 
 /// Inspects Codex's files.
 pub fn inspect(setup: &Setup) -> Inspection {
-    let paths = &setup.codex;
+    let paths = &setup.codex();
     let mut errors = Vec::new();
     let config = match read_text(&paths.config_file) {
         Ok(Some(text)) => tomledit::parse(&text).unwrap_or_else(|err| {
@@ -949,7 +949,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
 /// The Codex part of `status`.
 pub fn status_lines(setup: &Setup) -> Vec<String> {
     let inspection = inspect(setup);
-    let paths = &setup.codex;
+    let paths = &setup.codex();
     let mut lines = vec![
         "Codex:".to_string(),
         format!("  configuration: {}", paths.config_file.display()),
@@ -1041,7 +1041,7 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
 /// `doctor`'s checks of the Codex installation.
 pub fn doctor(setup: &Setup) -> Vec<Finding> {
     let inspection = inspect(setup);
-    let paths = &setup.codex;
+    let paths = &setup.codex();
     let reinstall = "run `graphersal-memory install --harness codex`";
     let mut findings = vec![ok(format!(
         "Codex: home {}, configuration {}",

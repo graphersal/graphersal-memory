@@ -1055,19 +1055,19 @@ Use `web_time::Instant`, never `std::time::Instant` (it panics on wasm32-unknown
         let project = home.path().join("work");
         std::fs::create_dir_all(project.join(".claude").join("rules")).unwrap();
         std::fs::create_dir_all(project.join(".cursor").join("rules")).unwrap();
-        std::fs::create_dir_all(setup.paths.config_dir.join("rules")).unwrap();
-        std::fs::create_dir_all(&setup.codex.codex_home).unwrap();
+        std::fs::create_dir_all(setup.paths().config_dir.join("rules")).unwrap();
+        std::fs::create_dir_all(&setup.codex().codex_home).unwrap();
         let write = |path: &Path| std::fs::write(path, "Use npm for every package.\n").unwrap();
-        write(&setup.paths.instructions);
-        write(&setup.paths.config_dir.join("rules").join("style.md"));
+        write(&setup.paths().instructions);
+        write(&setup.paths().config_dir.join("rules").join("style.md"));
         write(
             &setup
-                .paths
+                .paths()
                 .config_dir
                 .join("rules")
                 .join(crate::harnesses::claude_code::GLOBAL_RULES_FILE),
         );
-        write(&setup.codex.codex_home.join("AGENTS.md"));
+        write(&setup.codex().codex_home.join("AGENTS.md"));
         write(&project.join("CLAUDE.md"));
         write(&project.join("CLAUDE.local.md"));
         write(&project.join(".claude").join("CLAUDE.md"));
@@ -1080,9 +1080,9 @@ Use `web_time::Instant`, never `std::time::Instant` (it panics on wasm32-unknown
         assert_eq!(
             paths,
             vec![
-                setup.paths.instructions.as_path(),
+                setup.paths().instructions.as_path(),
                 setup
-                    .paths
+                    .paths()
                     .config_dir
                     .join("rules")
                     .join("style.md")
@@ -1105,7 +1105,7 @@ Use `web_time::Instant`, never `std::time::Instant` (it panics on wasm32-unknown
         assert_eq!(
             paths,
             vec![
-                setup.codex.codex_home.join("AGENTS.md").as_path(),
+                setup.codex().codex_home.join("AGENTS.md").as_path(),
                 project.join("AGENTS.md").as_path()
             ]
         );

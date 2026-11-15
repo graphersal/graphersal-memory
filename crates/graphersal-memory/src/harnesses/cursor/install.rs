@@ -223,7 +223,7 @@ pub fn plan(
     let mut conflicts = Vec::new();
     let mut steps = Vec::new();
     let mut changes = Vec::new();
-    let paths = &setup.cursor;
+    let paths = &setup.cursor();
 
     // mcp.json: the servers.
     let path = &paths.mcp_file;
@@ -434,7 +434,7 @@ pub fn removal(
     develop_only: bool,
     conflicts: &mut Vec<String>,
 ) -> Result<Vec<(Change, &'static str)>, String> {
-    let paths = &setup.cursor;
+    let paths = &setup.cursor();
     let mut out = Vec::new();
     let mut targets = vec![paths.mcp_file.clone()];
     if !develop_only {
@@ -672,7 +672,7 @@ impl Inspection {
 
 /// Inspects Cursor's files.
 pub fn inspect(setup: &Setup) -> Inspection {
-    let paths = &setup.cursor;
+    let paths = &setup.cursor();
     let mut errors = Vec::new();
     let config = read_json(&paths.mcp_file, &mut errors);
     let server = |name: &str, profile: &str| -> PartState {
@@ -747,10 +747,10 @@ pub fn inspect(setup: &Setup) -> Inspection {
 
 /// How many transcripts the hooks reported, and how many of them exist.
 fn transcripts(setup: &Setup) -> (usize, usize) {
-    let registered = crate::harnesses::cursor::sessions::load(&setup.cursor.registry)
+    let registered = crate::harnesses::cursor::sessions::load(&setup.cursor().registry)
         .map(|r| r.len())
         .unwrap_or(0);
-    let present = crate::harnesses::cursor::sessions::units(&setup.cursor.registry)
+    let present = crate::harnesses::cursor::sessions::units(&setup.cursor().registry)
         .map(|u| u.len())
         .unwrap_or(0);
     (registered, present)
@@ -759,7 +759,7 @@ fn transcripts(setup: &Setup) -> (usize, usize) {
 /// The Cursor part of `status`.
 pub fn status_lines(setup: &Setup) -> Vec<String> {
     let inspection = inspect(setup);
-    let paths = &setup.cursor;
+    let paths = &setup.cursor();
     let mut lines = vec![
         "Cursor:".to_string(),
         format!("  configuration: {}", paths.cursor_dir.display()),
@@ -818,7 +818,7 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
 /// `doctor`'s checks of the Cursor installation.
 pub fn doctor(setup: &Setup) -> Vec<Finding> {
     let inspection = inspect(setup);
-    let paths = &setup.cursor;
+    let paths = &setup.cursor();
     let reinstall = "run `graphersal-memory install --harness cursor`";
     let mut findings = vec![ok(format!(
         "Cursor: configuration {}",

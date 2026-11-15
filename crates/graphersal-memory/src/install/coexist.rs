@@ -652,7 +652,7 @@ fn entry_off(entry: &Value) -> bool {
 /// The tools Claude Code's permission rules name per server (`mcp__<server>__<tool>`).
 pub(crate) fn claude_permission_tools(setup: &Setup) -> BTreeMap<String, Vec<String>> {
     let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let settings = crate::install::read_json(&setup.paths.settings, &mut Vec::new());
+    let settings = crate::install::read_json(&setup.paths().settings, &mut Vec::new());
     for list in ["allow", "ask", "deny"] {
         for rule in settings["permissions"][list]
             .as_array()
@@ -1178,7 +1178,7 @@ pub fn writers(setup: &Setup) -> Vec<Writer> {
             by_dir.entry(dir.to_path_buf()).or_default().push(path);
         }
     }
-    let Ok(dirs) = crate::memory::import::scan(&setup.paths.projects) else {
+    let Ok(dirs) = crate::memory::import::scan(&setup.paths().projects) else {
         return Vec::new();
     };
     let mut out = Vec::new();

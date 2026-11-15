@@ -187,6 +187,11 @@ impl Cursor {
     pub fn new(paths: CursorPaths) -> Self {
         Self { paths }
     }
+
+    /// Its files.
+    pub fn paths(&self) -> &CursorPaths {
+        &self.paths
+    }
 }
 
 impl crate::harnesses::agent::HookHandler for Cursor {
@@ -480,7 +485,6 @@ mod tests {
             "prompt",
             tmp.path(),
             std::time::Duration::from_secs(1),
-            None,
             None,
         )
         .unwrap_err();

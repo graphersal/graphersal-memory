@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use crate::install::{self, ClaudePaths, InstallOptions, Setup};
+use crate::install::{self, InstallOptions, Setup};
 use crate::runtime::mcp::{self, StoreRuntime};
 use crate::runtime::mcp_tests::TempDir;
 use crate::{install::download, install::models, runtime::registry, runtime::store};
@@ -203,14 +203,9 @@ fn the_download_checks_hashes_records_the_licence_and_leaves_nothing_on_failure(
 }
 
 fn setup_with(home: &Path, data: &Path, endpoint: &str) -> Setup {
-    let paths =
-        ClaudePaths::resolve(&|name| (name == "HOME").then(|| home.display().to_string())).unwrap();
     Setup {
-        paths,
-        opencode: crate::harnesses::opencode::OpenCodePaths::of_home(home),
-        codex: crate::harnesses::codex::CodexPaths::of_home(home),
-        cursor: crate::harnesses::cursor::CursorPaths::of_home(home, data),
-        codewhale: crate::harnesses::codewhale::CodeWhalePaths::of_home(home),
+        home: home.to_path_buf(),
+        harnesses: crate::harnesses::Harnesses::of_home(home, data),
         // A machine with Claude Code's program (install refuses when none is found).
         search_path: Some({
             let bin = std::env::temp_dir().join(format!("gmm{}.bin", std::process::id()));

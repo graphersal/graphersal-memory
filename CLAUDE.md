@@ -73,8 +73,11 @@ Unit tests that need more than one module's helpers sit beside their module as
     format, and re-exports it), `claude_code/transcript.rs` its JSONL parser (`crate::memory::transcript`
     keeps the shared `Transcript`, memory writes and path helpers), `claude_code/hook.rs` its
     hook (`crate::memory::hook` keeps the shared events, input and queueing);
-  - `src/harnesses/mod.rs`: the registry, the one place that names every harness (`of`: the
-    `Harness` of a `Kind`, which `Setup::agent_of` returns; `driver`: the setup-free parts of a
+  - `src/harnesses/mod.rs`: the registry, the one place that names every harness (`Harnesses`:
+    every harness with its paths, built once with the setup by `Harnesses::resolve(env,
+    data_dir, probe)` (tests `of_home`), `get(kind)` behind `Setup::agent_of`, and the
+    per-harness accessors a harness's own module and the tests use, `setup.codex()`,
+    `setup.codex_agent()`, ...; `Setup` itself holds `home` and `harnesses`; `driver`: the setup-free parts of a
     `Kind`, its `sessions::SessionSource` for the daemon's indexing and its
     `harness::Headless`, `sessions` its shortcut);
   - `src/harnesses/opencode.rs` + `src/harnesses/opencode/`: opencode 1.x and 2.x, one `OpenCode` agent with the
@@ -316,8 +319,8 @@ Unit tests that need more than one module's helpers sit beside their module as
     `GRAPHERSAL_MEMORY_HOOK=off`), `parse_answer`, `Spend` (`<data dir>/sessions/spend.json`),
     `Summarizer` (exists only when enabled; budget check before each call), `facts`, `render`;
   - `src/harnesses/headless.rs`: running the user's harness: the `Headless` trait (a harness command
-    recognised, its default, free note, summaries sandbox `summaries_run` (`Homes`,
-    `Prepared`), answer, bench arguments, answer and refusal; `ClaudeHeadless`, the others'
+    recognised, its default, free note, summaries sandbox `summaries_run` (`UserEnv`: the
+    user's environment, from which a harness finds what its sandbox copies; `Prepared`), answer, bench arguments, answer and refusal; `ClaudeHeadless`, the others'
     `HeadlessRun` in their modules), `headless_of(command)`, `costs_nothing`, `program_path` (Windows: a bare name such as
     `claude` resolved through `PATH`/`PATHEXT`, so npm's `claude.cmd` is found; std runs a
     `.cmd` through `cmd.exe` with safe quoting, so keep line breaks out of arguments) and `run`

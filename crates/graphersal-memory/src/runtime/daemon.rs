@@ -530,27 +530,11 @@ impl Daemon {
             };
             let (summarizer, problem) =
                 crate::memory::summaries::Summarizer::new(&self.options.data_dir);
-            // A sandboxed opencode run may use the user's opencode logins (a copy).
-            let summarizer = summarizer.map(|summarizer| {
-                // Only the database is needed: no `opencode --version`.
-                let given = crate::harnesses::opencode::Detected::given(
-                    crate::harnesses::opencode::Major::V2,
-                );
-                match crate::harnesses::opencode::OpenCodePaths::resolve_for(
-                    &|name| std::env::var(name).ok(),
-                    given,
-                ) {
-                    Ok(paths) => summarizer.with_opencode_db(paths.db),
-                    Err(_) => summarizer,
-                }
-            });
-            // A sandboxed Codex run uses the user's Codex model settings and login (a copy).
+            // A sandboxed run may use copies of the settings and logins its harness keeps
+            // (opencode's logins, Codex's model settings and login), found in this process's
+            // environment.
             let mut summarizer = summarizer.map(|summarizer| {
-                match crate::harnesses::codex::CodexPaths::resolve(&|name| std::env::var(name).ok())
-                {
-                    Ok(paths) => summarizer.with_codex_home(paths.codex_home),
-                    Err(_) => summarizer,
-                }
+                summarizer.with_user_env(std::sync::Arc::new(|name: &str| std::env::var(name).ok()))
             });
             if let Some(problem) = problem {
                 log(&format!(

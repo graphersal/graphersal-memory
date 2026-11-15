@@ -21,14 +21,9 @@ const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 /// A prepared headless run: its arguments and its environment.
 pub type Prepared = (Vec<String>, Vec<(String, String)>);
 
-/// The user's own files a headless run's sandbox copies from (opencode's database, Codex's home).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Homes<'a> {
-    /// opencode's database (`opencode.db`).
-    pub opencode_db: Option<&'a Path>,
-    /// Codex's home (`CODEX_HOME`).
-    pub codex_home: Option<&'a Path>,
-}
+/// The user's environment a headless run's sandbox is built from (where a harness keeps the
+/// settings and logins its sandbox gets a copy of); `None`: none is copied.
+pub type UserEnv<'a> = Option<&'a dyn Fn(&str) -> Option<String>>;
 
 /// A harness run headless with a prompt on stdin (`summaries.harness_command`, `bench
 /// --harness-command`): how its command is recognised, prepared and answered. Setup-free
@@ -62,12 +57,12 @@ pub trait Headless: Sync {
         None
     }
     /// The arguments and environment of a summaries run of `args` in `work_dir` (a sandbox
-    /// of its own there, from `homes`).
+    /// of its own there, with copies of what `user_env` says the harness keeps).
     fn summaries_run(
         &self,
         args: Vec<String>,
         _work_dir: &Path,
-        _homes: &Homes<'_>,
+        _user_env: UserEnv<'_>,
     ) -> Result<crate::harnesses::headless::Prepared, String> {
         Ok((args, Vec::new()))
     }

@@ -221,6 +221,11 @@ impl Codex {
     pub fn new(paths: CodexPaths) -> Self {
         Self { paths }
     }
+
+    /// Its files.
+    pub fn paths(&self) -> &CodexPaths {
+        &self.paths
+    }
 }
 
 impl crate::harnesses::agent::OwnMemory for Codex {
@@ -747,17 +752,24 @@ impl crate::harnesses::headless::Headless for HeadlessRun {
         &self,
         args: Vec<String>,
         work_dir: &Path,
-        homes: &crate::harnesses::headless::Homes<'_>,
+        user_env: crate::harnesses::headless::UserEnv<'_>,
     ) -> Result<crate::harnesses::headless::Prepared, String> {
+        // The user's model settings and login (copies): from their Codex home.
+        let codex_home = user_env
+            .and_then(|env| CodexPaths::resolve(env).ok())
+            .map(|paths| paths.codex_home);
         let args = exec_args(&args);
         let sandbox = work_dir.join("codex");
         let _ = std::fs::remove_dir_all(&sandbox);
-        let config = sandbox_config(homes.codex_home.map(|d| d.join(CONFIG_FILE)).as_deref(), "");
+        let config = sandbox_config(
+            codex_home.as_ref().map(|d| d.join(CONFIG_FILE)).as_deref(),
+            "",
+        );
         let env = build_sandbox(
             &sandbox,
             &config,
             None,
-            homes.codex_home.map(|d| d.join("auth.json")).as_deref(),
+            codex_home.as_ref().map(|d| d.join("auth.json")).as_deref(),
         )?;
         Ok((args, env))
     }
