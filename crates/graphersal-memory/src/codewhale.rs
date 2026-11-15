@@ -66,7 +66,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::agents::{Agent, Kind};
+use crate::agents::{Harness, Kind};
 
 /// The default headless command of CodeWhale's summaries (the model and provider of the user's
 /// own configuration).
@@ -458,9 +458,21 @@ pub fn servers_key_of(mcp_file: &Path) -> &'static str {
     }
 }
 
-impl Agent for CodeWhale {
+impl Harness for CodeWhale {
     fn kind(&self) -> Kind {
         Kind::CodeWhale
+    }
+
+    fn find_program(&self, home: &Path, search: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+        find_program(home, search)
+    }
+
+    fn config_roots(&self) -> Vec<PathBuf> {
+        vec![self.paths.codewhale_home.clone()]
+    }
+
+    fn has_our_parts(&self, setup: &crate::install::Setup) -> bool {
+        !install::inspect(setup).nothing_installed()
     }
 
     fn mcp_config_file(&self) -> &Path {

@@ -21,7 +21,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::agents::{Agent, Kind};
+use crate::agents::{Harness, Kind};
 use crate::install::{
     Change, DEVELOP_SERVER, Finding, PartState, Setup, State, Step, USE_SERVER, block_separator,
     find_block_in, ok, problem, read_json, read_text, wrap_block,

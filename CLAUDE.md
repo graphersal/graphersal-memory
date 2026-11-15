@@ -25,13 +25,17 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     (`--harness codex` and `--harness cursor` work wherever `claude-code` and `opencode` do;
     a Claude Code hook whose input is Cursor's, `cursor_version`, does nothing); the
     wizard is interactive when stdin and stdout are terminals;
-  - `src/agents.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex | cursor | codewhale; `Agent`: MCP
-    configuration file, its servers key and entry shape, settings and instruction files, the
-    sessions location, the export directories, the auto-memory key, the headless command;
-    `is_our_entry` for both entry shapes) and `ClaudeCode`; `Setup::detected` (a harness's program
-    found: `Setup::program`, `PATH` plus known install locations), `leftovers` (configuration
-    without the program: reported, never offered) and `installed` (what status, doctor and
-    uninstall work on);
+  - `src/agents.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex | cursor | codewhale, with
+    its id, display and program names; the `Harness` trait: its program (`find_program`), its
+    configuration roots, whether our parts are in its files, the MCP configuration file, its
+    servers key and entry shape, settings and instruction files, the sessions location, the
+    export directories, the auto-memory key, the headless command; `is_our_entry` for both entry
+    shapes) and `ClaudeCode`; `Setup::detected` (a harness's program found: `Setup::program`,
+    `PATH` plus known install locations), `leftovers` (configuration without the program:
+    reported, never offered) and `installed` (what status, doctor and uninstall work on). The
+    harness refactor (moving every per-harness branch behind the trait) is under way;
+  - `src/harnesses.rs`: the registry, the one place that names every harness (`of`: the
+    `Harness` of a `Kind`, which `Setup::agent_of` returns);
   - `src/opencode.rs` + `src/opencode/`: opencode 1.x and 2.x, one `OpenCode` agent with the
     line as data (`Major`, `Detected`, `detect`: `opencode --version` in a scratch home, else the
     database's tables, else 2.x; the hooks never ask the binary). Paths `OpenCodePaths`: XDG
@@ -63,7 +67,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     modes; sub-agent sessions left out; a unit is the rollout file, id `session:<thread id>`);
   - `src/cursor.rs` + `src/cursor/`: Cursor (verified against its documentation of 2026-11-10;
     the module docs cite the pages; no live run yet, `docs/cursor-live-check.md` is the
-    checklist): `CursorPaths` (`~/.cursor`: `mcp.json`, `hooks.json`, our user rule file
+    checklist): `CursorPaths` (`~/.cursor`; `windows_locations` of `Cursor.exe` off `PATH`: `mcp.json`, `hooks.json`, our user rule file
     `rules/graphersal-memory.mdc`, the export directory, and the registry of transcripts
     `<data dir>/sessions/cursor-transcripts.json`), `Cursor` (the `Agent`; no headless command:
     summaries and bench refuse Cursor's CLI, `NO_HEADLESS`); `cursor/install.rs` the

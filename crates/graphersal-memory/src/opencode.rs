@@ -60,7 +60,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::agents::{Agent, Kind};
+use crate::agents::{Harness, Kind};
 
 /// The managed rules file in opencode's configuration directory.
 pub const RULES_FILE: &str = "graphersal-memory.md";
@@ -401,9 +401,21 @@ impl OpenCode {
     }
 }
 
-impl Agent for OpenCode {
+impl Harness for OpenCode {
     fn kind(&self) -> Kind {
         Kind::OpenCode
+    }
+
+    fn find_program(&self, home: &Path, search: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+        find_program(home, search)
+    }
+
+    fn config_roots(&self) -> Vec<PathBuf> {
+        vec![self.paths.config_dir.clone()]
+    }
+
+    fn has_our_parts(&self, setup: &crate::install::Setup) -> bool {
+        !install::inspect(setup).nothing_installed()
     }
 
     fn mcp_config_file(&self) -> &Path {

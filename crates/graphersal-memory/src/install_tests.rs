@@ -1407,7 +1407,7 @@ fn importing_an_export_gives_the_same_memories_back() {
     let rows = InProcess(&memory).memories_all();
     let report = crate::export::write(&elsewhere.agent(), data.path(), &rows).unwrap();
     assert_eq!(report.memories, 3, "{report:?}");
-    let exported_dir = crate::agents::Agent::memory_dir(&elsewhere.agent(), &project_dir);
+    let exported_dir = crate::agents::Harness::memory_dir(&elsewhere.agent(), &project_dir);
     let project = Some(project_dir.display().to_string());
     let before = import::read_dir(&original_dir, project.clone());
     let after = import::read_dir(&exported_dir, project);
@@ -2464,9 +2464,9 @@ fn codex_is_detected_by_its_program_leftovers_are_not_offered_and_it_is_exported
     let setup = with_programs(setup, &["codex"]);
     assert!(setup.detected().contains(&Kind::Codex));
     let agent = setup.agent_of(Kind::Codex);
-    assert!(!crate::agents::Agent::has_file_memory(agent.as_ref()));
+    assert!(!crate::agents::Harness::has_file_memory(agent.as_ref()));
     assert_eq!(
-        crate::agents::Agent::global_memory_file(agent.as_ref()),
+        crate::agents::Harness::global_memory_file(agent.as_ref()),
         home.path().join("graphersal-memory-export/codex/global.md")
     );
     assert!(crate::commands::export_note(agent.as_ref()).contains("AGENTS.md"));
@@ -4078,7 +4078,7 @@ fn a_pin_survives_the_round_trip_files_graph_files() {
     let elsewhere = setup_in(other.path(), data.path());
     let rows = InProcess(&memory).memories_all();
     crate::export::write(&elsewhere.agent(), data.path(), &rows).unwrap();
-    let exported_dir = crate::agents::Agent::memory_dir(&elsewhere.agent(), &project_dir);
+    let exported_dir = crate::agents::Harness::memory_dir(&elsewhere.agent(), &project_dir);
     let index = std::fs::read_to_string(exported_dir.join("MEMORY.md")).unwrap();
     assert!(
         index.contains("- [Graph first](graph-first.md) — study the graph first\n\n## Pinned\n"),
@@ -5063,7 +5063,7 @@ fn a_superseded_memory_is_written_but_left_out_of_the_index_and_a_conflict_is_na
     let rows = InProcess(&memory).memories_all();
     crate::projects::resolve(data.path(), &project).unwrap();
     crate::export::write(&setup.agent(), data.path(), &rows).unwrap();
-    let dir = crate::agents::Agent::memory_dir(&setup.agent(), &project_dir);
+    let dir = crate::agents::Harness::memory_dir(&setup.agent(), &project_dir);
     let index = read(&dir.join("MEMORY.md"));
     assert!(!index.contains("(use-npm.md)"), "{index}");
     assert!(index.contains("(use-pnpm.md)"), "{index}");
@@ -5771,9 +5771,9 @@ fn codewhale_is_detected_by_its_program_and_exported_as_markdown() {
     let setup = with_programs(setup, &["codewhale"]);
     assert!(setup.detected().contains(&Kind::CodeWhale));
     let agent = setup.agent_of(Kind::CodeWhale);
-    assert!(!crate::agents::Agent::has_file_memory(agent.as_ref()));
+    assert!(!crate::agents::Harness::has_file_memory(agent.as_ref()));
     assert_eq!(
-        crate::agents::Agent::global_memory_file(agent.as_ref()),
+        crate::agents::Harness::global_memory_file(agent.as_ref()),
         home.path()
             .join("graphersal-memory-export")
             .join("codewhale")

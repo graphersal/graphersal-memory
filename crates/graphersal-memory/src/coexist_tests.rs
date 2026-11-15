@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::agents::{Agent, Kind};
+use crate::agents::{Harness, Kind};
 use crate::coexist::{self, ServerState};
 use crate::import::{self, ImportState};
 use crate::install::{self, InstallOptions, Setup};

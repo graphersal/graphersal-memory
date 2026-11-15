@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::agents::{Agent, Kind};
+use crate::agents::{Harness, Kind};
 
 /// The user configuration file in the Codex home.
 pub const CONFIG_FILE: &str = "config.toml";
@@ -219,9 +219,21 @@ impl Codex {
     }
 }
 
-impl Agent for Codex {
+impl Harness for Codex {
     fn kind(&self) -> Kind {
         Kind::Codex
+    }
+
+    fn find_program(&self, _home: &Path, search: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+        find_program(search)
+    }
+
+    fn config_roots(&self) -> Vec<PathBuf> {
+        vec![self.paths.codex_home.clone()]
+    }
+
+    fn has_our_parts(&self, setup: &crate::install::Setup) -> bool {
+        !install::inspect(setup).nothing_installed()
     }
 
     fn mcp_config_file(&self) -> &Path {

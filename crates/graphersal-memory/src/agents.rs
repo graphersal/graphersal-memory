@@ -2,14 +2,16 @@
 //! about one AI agent harness, behind one interface. Claude Code ([`ClaudeCode`]), opencode
 //! (`crate::opencode::OpenCode`), Codex (`crate::codex::Codex`), Cursor
 //! (`crate::cursor::Cursor`) and CodeWhale (`crate::codewhale::CodeWhale`) implement it;
-//! `crate::install` asks the [`Agent`] for the files it edits, the JSON keys of its MCP
-//! registrations and the names the wizard shows.
+//! `crate::harnesses` is the one place that names them all. Shared code asks the [`Harness`]
+//! for its program, the files it edits, the JSON keys of its MCP registrations and the names
+//! the wizard shows, and never matches on its [`Kind`].
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::install::ClaudePaths;
+use crate::install::{ClaudePaths, Setup};
 
 /// The harnesses graphersal-memory supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -48,6 +50,17 @@ impl Kind {
         }
     }
 
+    /// The name of its program, for messages (`claude`, `codewhale`).
+    pub fn program_name(self) -> &'static str {
+        match self {
+            Kind::ClaudeCode => "claude",
+            Kind::OpenCode => "opencode",
+            Kind::Codex => "codex",
+            Kind::Cursor => "cursor",
+            Kind::CodeWhale => "codewhale",
+        }
+    }
+
     /// The name people know.
     pub fn display_name(self) -> &'static str {
         match self {
@@ -66,9 +79,18 @@ impl Kind {
 }
 
 /// One harness, as the installation sees it.
-pub trait Agent {
+pub trait Harness {
     /// Which harness this is.
     fn kind(&self) -> Kind;
+    /// Its program on this machine: on `search` (`None`: this process's `PATH`, and then the
+    /// system-wide install locations too), or in a known install location under `home` that
+    /// is not on it.
+    fn find_program(&self, home: &Path, search: Option<&OsStr>) -> Option<PathBuf>;
+    /// Its configuration directories or files: one that exists without the program is a
+    /// leftover (`Setup::leftovers`).
+    fn config_roots(&self) -> Vec<PathBuf>;
+    /// Whether a part of ours (an MCP entry, a hook, the rule block, ...) is in its files.
+    fn has_our_parts(&self, setup: &Setup) -> bool;
     /// The harness id of the command line (`claude-code`, `opencode`, `codex`).
     fn id(&self) -> &'static str {
         self.kind().id()
@@ -158,9 +180,37 @@ impl ClaudeCode {
 /// The file name of the exported global memories in Claude Code's user rules directory.
 pub const GLOBAL_RULES_FILE: &str = "graphersal-memory-global.md";
 
-impl Agent for ClaudeCode {
+impl Harness for ClaudeCode {
     fn kind(&self) -> Kind {
         Kind::ClaudeCode
+    }
+
+    /// On the search path, else `~/.local/bin/claude` (the native installer) or
+    /// `~/.claude/local/claude` (the old local install).
+    fn find_program(&self, home: &Path, search: Option<&OsStr>) -> Option<PathBuf> {
+        let path = match search {
+            Some(path) => Some(path.to_os_string()),
+            None => std::env::var_os("PATH"),
+        };
+        let mut candidates: Vec<PathBuf> = path
+            .iter()
+            .flat_map(std::env::split_paths)
+            .flat_map(|dir| ["claude", "claude.exe", "claude.cmd"].map(|name| dir.join(name)))
+            .collect();
+        candidates.push(home.join(".local").join("bin").join("claude"));
+        candidates.push(home.join(".claude").join("local").join("claude"));
+        candidates.into_iter().find(|p| p.is_file())
+    }
+
+    fn config_roots(&self) -> Vec<PathBuf> {
+        vec![
+            self.paths.config_dir.clone(),
+            self.paths.user_config.clone(),
+        ]
+    }
+
+    fn has_our_parts(&self, setup: &Setup) -> bool {
+        !crate::install::inspect(setup).nothing_installed()
     }
 
     fn mcp_config_file(&self) -> &Path {

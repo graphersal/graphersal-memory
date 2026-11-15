@@ -16,7 +16,7 @@
 
 use serde_json::{Value, json};
 
-use crate::agents::Agent;
+use crate::agents::Harness;
 use crate::install::{
     Change, DEVELOP_SERVER, Finding, PartState, Setup, State, Step, USE_SERVER, find_block_in, ok,
     problem, read_json, read_text, wrap_block,

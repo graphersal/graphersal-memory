@@ -59,7 +59,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::agents::{Agent, Kind};
+use crate::agents::{Harness, Kind};
 
 /// The MCP configuration file in the Cursor home.
 pub const MCP_FILE: &str = "mcp.json";
@@ -156,6 +156,24 @@ pub const NO_HEADLESS: &str = "Cursor's CLI (`agent -p`) is not used for summari
     opencode's `opencode run` or Codex's `codex exec` (summaries.harness_command in \
     config.json)";
 
+/// Where Cursor's Windows installers put `Cursor.exe` when it is not on `PATH`: the per-user
+/// install (`%LOCALAPPDATA%\Programs\cursor`, under the home directory) and, for this process's
+/// own machine (`system`), the per-machine one (`%ProgramFiles%\cursor`) and `%LOCALAPPDATA%`
+/// itself when it is elsewhere.
+pub fn windows_locations(home: &Path, system: bool) -> Vec<PathBuf> {
+    let exe = |base: PathBuf| base.join("Programs").join("cursor").join("Cursor.exe");
+    let mut candidates = vec![exe(home.join("AppData").join("Local"))];
+    if system && cfg!(windows) {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(exe(PathBuf::from(local)));
+        }
+        if let Some(programs) = std::env::var_os("ProgramFiles") {
+            candidates.push(PathBuf::from(programs).join("cursor").join("Cursor.exe"));
+        }
+    }
+    candidates
+}
+
 /// Cursor, as the installation sees it.
 #[derive(Debug, Clone)]
 pub struct Cursor {
@@ -169,9 +187,36 @@ impl Cursor {
     }
 }
 
-impl Agent for Cursor {
+impl Harness for Cursor {
     fn kind(&self) -> Kind {
         Kind::Cursor
+    }
+
+    /// The CLI on the search path, else the app: `~/Applications/Cursor.app` (and
+    /// `/Applications/Cursor.app` for this process's own `PATH`), or Windows' install
+    /// locations.
+    fn find_program(&self, home: &Path, search: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+        find_program(search)
+            .or_else(|| {
+                let mut bundles = vec![home.join("Applications").join("Cursor.app")];
+                if search.is_none() {
+                    bundles.push(PathBuf::from("/Applications/Cursor.app"));
+                }
+                bundles.into_iter().find(|bundle| bundle.is_dir())
+            })
+            .or_else(|| {
+                windows_locations(home, search.is_none())
+                    .into_iter()
+                    .find(|p| p.is_file())
+            })
+    }
+
+    fn config_roots(&self) -> Vec<PathBuf> {
+        vec![self.paths.cursor_dir.clone()]
+    }
+
+    fn has_our_parts(&self, setup: &crate::install::Setup) -> bool {
+        !install::inspect(setup).nothing_installed()
     }
 
     fn mcp_config_file(&self) -> &Path {
