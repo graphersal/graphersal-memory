@@ -557,6 +557,11 @@ impl Harness for CodeWhale {
         state != crate::install::PartState::Missing && enabled
     }
 
+    fn export_hint(&self) -> &'static str {
+        "to give the agent a file, paste it into ~/.codewhale/AGENTS.md or a project's \
+         AGENTS.md"
+    }
+
     fn has_sessions(&self) -> bool {
         self.paths.sessions.is_dir()
     }

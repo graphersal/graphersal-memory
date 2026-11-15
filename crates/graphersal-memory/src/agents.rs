@@ -72,6 +72,17 @@ impl Kind {
         }
     }
 
+    /// Its line in the command line's help (`--harness`).
+    pub fn cli_help(self) -> &'static str {
+        match self {
+            Kind::ClaudeCode => "Claude Code",
+            Kind::OpenCode => "opencode (1.x or 2.x: `opencode --version` says which)",
+            Kind::Codex => "OpenAI Codex CLI",
+            Kind::Cursor => "Cursor (the editor's agent)",
+            Kind::CodeWhale => "CodeWhale (the terminal agent, formerly DeepSeek TUI; preview)",
+        }
+    }
+
     /// The name people know.
     pub fn display_name(self) -> &'static str {
         match self {
@@ -221,6 +232,10 @@ pub trait Harness {
     /// Its `hook session-start|session-end --harness <id>`, when it runs hooks of ours.
     fn hook(&self) -> Option<&dyn HookHandler> {
         None
+    }
+    /// For a harness without file memory: how to give the agent an exported file.
+    fn export_hint(&self) -> &'static str {
+        "to give the agent a file, add its path to `instructions` in the agent's configuration"
     }
     /// Whether its sessions are on this machine (its transcripts directory, database or
     /// registry).
