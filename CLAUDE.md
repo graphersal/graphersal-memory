@@ -187,10 +187,11 @@ Unit tests that need more than one module's helpers sit beside their module as
     `{"__jsExpr"}`, duplicate keys, unknown tags and a second document are errors; never
     re-serialized): `find`, `put_block` (a fingerprinted managed block of whole top-level items
     appended to a block sequence, in place of an empty flow `[]`, or into a text without content;
-    a missing line break before it recorded on the begin line), `remove_block` (the original
-    bytes back, `[]` written when nothing else remains, since an empty or comments-only patch file
-    stops every dsh start); `top_level` refuses a mapping, a scalar, a non-empty flow sequence
-    or a parse error; every edit re-parsed and its items checked;
+    a missing line break before it recorded on the begin line, taken out again with exactly the
+    begin line's line ending), `remove_block` (the original bytes back, `[]` written when nothing
+    else remains, since an empty or comments-only patch file stops every dsh start); a leading
+    BOM kept; `top_level` refuses a mapping, a scalar, a non-empty flow sequence or a parse
+    error, `put_block` also an indented top-level list; every edit re-parsed and its items checked;
   - `src/install/prompt.rs`: the wizard's console (`Console`: "Step N of M", numbered choices, the
     default on Enter, re-ask, `confirm_install` with `d` for every change; colour only on a
     terminal without `NO_COLOR`), `paint`, `action_needed` and the `SEPARATOR` the other

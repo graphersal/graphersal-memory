@@ -19,7 +19,8 @@
 //! sequence `[]` (dsh's own template ends with one), or writes it into a text without YAML
 //! content (empty, whitespace, comments). [`remove_block`] takes it out again and gives the
 //! original bytes back; when no YAML content remains, it writes `[]` where the block was, so the
-//! file stays valid for dsh.
+//! file stays valid for dsh. A UTF-8 byte order mark at the start is kept byte for byte; a
+//! top-level list that does not start at column 0 is refused (the block would not join it).
 //!
 //! Every edit is checked by parsing the result: its items must be the ones before with exactly
 //! our items added (or replaced, or removed), else the edit is refused (the file is left as it
@@ -41,6 +42,15 @@ pub const END: &str = "# graphersal-memory:end";
 /// The word on the begin line saying that `put_block` added a line break before the block (the
 /// file did not end with one); `remove_block` takes it out again when the block ends the file.
 const NEWLINE_ADDED: &str = "newline-added";
+
+/// The UTF-8 byte order mark a file may start with (kept byte for byte; js-yaml skips it).
+const BOM: &str = "\u{feff}";
+
+/// Whether `at` is at the start of a line of `text` (a byte order mark before it counts as
+/// nothing).
+fn at_line_start(text: &str, at: usize) -> bool {
+    at == 0 || text[..at].ends_with('\n') || &text[..at] == BOM
+}
 
 /// The key dsh gives a `!!js` scalar's expression.
 pub const JS_EXPR: &str = "__jsExpr";
@@ -157,6 +167,9 @@ pub struct Found {
     marker_end: usize,
     /// Whether `put_block` added a line break before it.
     newline_added: bool,
+    /// The line ending of its begin line (the one `put_block` wrote, also before the block when
+    /// it added one).
+    eol: &'static str,
 }
 
 /// The managed block of `text`: `Ok(None)` without one, `Err` for a begin line without an end
@@ -165,7 +178,7 @@ pub fn find(text: &str) -> Result<Option<Found>, String> {
     let Some(start) = text
         .match_indices(BEGIN)
         .map(|(at, _)| at)
-        .find(|at| *at == 0 || text[..*at].ends_with('\n'))
+        .find(|at| at_line_start(text, *at))
     else {
         return Ok(None);
     };
@@ -174,6 +187,11 @@ pub fn find(text: &str) -> Result<Option<Found>, String> {
         .map(|n| start + n + 1)
         .ok_or("the managed block has no end marker")?;
     let begin_line = &text[start..line_end];
+    let eol = if begin_line.ends_with("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
     let words = begin_line
         .split('(')
         .next()
@@ -208,6 +226,7 @@ pub fn find(text: &str) -> Result<Option<Found>, String> {
         body,
         marker_end,
         newline_added,
+        eol,
     }))
 }
 
@@ -240,6 +259,9 @@ pub fn put_block(text: &str, body: &str) -> Result<String, String> {
             (new, before.replaced(found.start, found.end, &wanted))
         }
         None => {
+            if top == Top::Block {
+                indented_root(text, &before)?;
+            }
             let mut expected = before.items();
             expected.extend(wanted.iter().cloned());
             let new = match top {
@@ -252,7 +274,7 @@ pub fn put_block(text: &str, body: &str) -> Result<String, String> {
                 }
                 Top::EmptyFlow => {
                     let (open, close) = before.flow.ok_or("the file's `[]` was not found")?;
-                    if &text[open..close] != "[]" || !(open == 0 || text[..open].ends_with('\n')) {
+                    if &text[open..close] != "[]" || !at_line_start(text, open) {
                         return Err("the file's empty list is not written as `[]` at the start \
                                     of a line; write it so (or add the entries by hand)"
                             .to_string());
@@ -289,10 +311,9 @@ pub fn remove_block(text: &str) -> Result<Option<String>, String> {
     let new = if !has_content {
         format!("{head}[]{}{tail}", &text[found.marker_end..found.end])
     } else if found.newline_added && tail.is_empty() {
-        head.strip_suffix("\r\n")
-            .or_else(|| head.strip_suffix('\n'))
-            .unwrap_or(head)
-            .to_string()
+        // Exactly the line break `put_block` added: a carriage return of the user's before it
+        // stays.
+        head.strip_suffix(found.eol).unwrap_or(head).to_string()
     } else {
         rest
     };
@@ -300,6 +321,26 @@ pub fn remove_block(text: &str) -> Result<Option<String>, String> {
         check(&new, &before.replaced(found.start, found.end, &[]), false)?;
     }
     Ok(Some(new))
+}
+
+/// `Err` when the top-level block sequence of `text` is indented: a block at column 0 would
+/// not join it. Its first item's `-` must start its line (after a byte order mark).
+fn indented_root(text: &str, scanned: &Scanned) -> Result<(), String> {
+    let Some(&first) = scanned.item_starts.first() else {
+        return Ok(());
+    };
+    let before = text[..first].trim_end();
+    let Some(dash) = before.strip_suffix('-').map(str::len) else {
+        return Ok(());
+    };
+    if at_line_start(text, dash) {
+        return Ok(());
+    }
+    Err(
+        "the file's top-level list is indented; the top-level list must start at column 0 \
+         (each `- ` at the start of its line): move it there first"
+            .to_string(),
+    )
 }
 
 /// `Ok` when `new` parses with exactly the `expected` top-level items (and, `with_block`, our
@@ -903,6 +944,65 @@ mod tests {
         // The body must be a block sequence.
         assert!(put_block(USER, "id: x\n").is_err());
         assert!(put_block(USER, "[{id: x}]\n").is_err());
+    }
+
+    #[test]
+    fn a_lone_carriage_return_of_the_user_stays() {
+        // Lone CR line breaks, no final LF: install adds an LF before the block, uninstall
+        // takes exactly that LF out again, also after an edit elsewhere in the file.
+        let text = "- id: x\r- id: y\r";
+        let new = put_block(text, &body()).unwrap();
+        assert!(
+            new.starts_with(text) && new.contains(NEWLINE_ADDED),
+            "{new:?}"
+        );
+        assert_eq!(remove_block(&new).unwrap().as_deref(), Some(text));
+        let edited = new.replacen("- id: x\r", "- id: z\r", 1);
+        assert_eq!(
+            remove_block(&edited).unwrap().as_deref(),
+            Some("- id: z\r- id: y\r")
+        );
+        // A CRLF file without its final line break gets CRLF added and taken out.
+        let crlf = "- id: x\r\n- id: y";
+        let new = put_block(crlf, &body()).unwrap();
+        assert!(new.starts_with("- id: x\r\n- id: y\r\n# graphersal-memory:begin"));
+        assert_eq!(remove_block(&new).unwrap().as_deref(), Some(crlf));
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_kept() {
+        for text in [
+            "\u{feff}- id: hmr\n  disabled: true\n",
+            "\u{feff}[]\n",
+            "\u{feff}[]",
+            "\u{feff}# head\n[]\n",
+        ] {
+            let new = round_trip(text);
+            assert!(new.starts_with(BOM), "{new:?}");
+            assert_eq!(new.matches(BOM).count(), 1, "{new:?}");
+        }
+        for (text, back) in [
+            ("\u{feff}", "\u{feff}\n[]\n"),
+            ("\u{feff}\n", "\u{feff}\n[]\n"),
+        ] {
+            let new = put_block(text, &body()).unwrap();
+            assert_eq!(items(&new).unwrap(), vec![ours()]);
+            assert_eq!(remove_block(&new).unwrap().as_deref(), Some(back));
+        }
+    }
+
+    #[test]
+    fn an_indented_top_level_list_is_refused_with_its_reason() {
+        for text in [
+            "  - id: a\n  - id: b\n",
+            "\u{feff}  - id: a\n",
+            "# head\n    - id: a\n",
+        ] {
+            let err = put_block(text, &body()).unwrap_err();
+            assert!(err.contains("must start at column 0"), "{text:?}: {err}");
+        }
+        // An item whose content starts on the next line is at column 0 all the same.
+        round_trip("-\n  id: a\n");
     }
 
     #[test]
