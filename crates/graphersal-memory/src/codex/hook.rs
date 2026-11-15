@@ -10,6 +10,11 @@ use serde_json::Value;
 
 use crate::hook::*;
 
+/// The session start line for Codex (its `SessionStart` hook adds it to the model's context).
+pub const CODEX_START_LINE: &str = "graphersal-memory: your memory is served by the MCP server \
+    graphersal-memory (tools mcp__graphersal_memory__memories, recall, memory, remember, forget; \
+    past sessions: sessions, session).";
+
 /// The indexing request of Codex's hook: every rollout under `sessions`, with the hook's own
 /// rollout (`transcript_path`) active (start) or finished (end).
 pub fn codex_request(

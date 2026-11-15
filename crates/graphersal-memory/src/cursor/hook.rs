@@ -10,6 +10,18 @@ use serde_json::Value;
 
 use crate::hook::*;
 
+/// The session start line for Cursor (its `sessionStart` hook adds `additional_context` to
+/// the conversation).
+pub const CURSOR_START_LINE: &str = "graphersal-memory: your memory is served by the MCP server \
+    graphersal-memory (tools memories, recall, memory, remember, forget; past sessions: \
+    sessions, session).";
+
+/// Whether a hook's input comes from Cursor (its common input field `cursor_version`,
+/// cursor.com/docs/hooks).
+pub fn is_cursor_input(input: &str) -> bool {
+    serde_json::from_str::<Value>(input).is_ok_and(|v| v.get("cursor_version").is_some())
+}
+
 /// The workspace of a Cursor hook's input: the first of `workspace_roots`, else `fallback`
 /// (`CURSOR_PROJECT_DIR`).
 pub fn cursor_workspace(value: &Value, fallback: Option<&str>) -> Option<String> {

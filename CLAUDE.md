@@ -48,8 +48,11 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `PREVIOUS_BLOCK_FINGERPRINTS`, `ClaudePaths`, the block helpers, `claude_plan`, the
     structural `claude_removal`, `inspect`, `status_lines`, `claude_doctor`, the Git Bash checks;
     `crate::install` re-exports them under their old paths), `claude_code/other.rs` its
-    `OtherMemory`, `claude_code/sessions.rs` its `SessionSource`. Its file-memory import stays
-    `crate::import`, its transcript parser `crate::transcript`, its hook `crate::hook`;
+    `OtherMemory`, `claude_code/sessions.rs` its `SessionSource`, `claude_code/import.rs` its
+    file-memory import (`crate::import` keeps `Caller`/`Connect`/`slugify` and the memory-file
+    format, and re-exports it), `claude_code/transcript.rs` its JSONL parser (`crate::transcript`
+    keeps the shared `Transcript`, memory writes and path helpers), `claude_code/hook.rs` its
+    hook (`crate::hook` keeps the shared events, input and queueing);
   - `src/harnesses.rs`: the registry, the one place that names every harness (`of`: the
     `Harness` of a `Kind`, which `Setup::agent_of` returns; `driver`: the setup-free parts of a
     `Kind`, its `sessions::SessionSource` for the daemon's indexing and its

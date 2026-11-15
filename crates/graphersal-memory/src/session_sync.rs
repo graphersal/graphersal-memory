@@ -110,7 +110,7 @@ pub fn start(
     let mut done = Done::default();
     if let Some(paths) = &plan.claude {
         for dir in &plan.dirs {
-            let (imported, notes) = crate::hook::import_project(
+            let (imported, notes) = crate::claude_code::hook::import_project(
                 dir,
                 &plan.project_dir,
                 paths,

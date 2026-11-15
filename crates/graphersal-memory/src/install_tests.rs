@@ -644,7 +644,7 @@ fn the_session_start_hook_imports_the_projects_changed_files() {
     let memory = Memory::open(data.path());
     let mut connect = memory.connector();
     let deadline = Instant::now() + Duration::from_secs(60);
-    let outcome = hook::work(
+    let outcome = crate::claude_code::hook::work(
         hook::HookEvent::SessionStart,
         Some(&project_dir),
         &setup.paths,
@@ -663,7 +663,7 @@ fn the_session_start_hook_imports_the_projects_changed_files() {
         "---\ndescription: a new one\ntype: user\n---\nNew.\n",
     )
     .unwrap();
-    let outcome = hook::work(
+    let outcome = crate::claude_code::hook::work(
         hook::HookEvent::SessionEnd,
         Some(&project_dir),
         &setup.paths,
@@ -675,7 +675,7 @@ fn the_session_start_hook_imports_the_projects_changed_files() {
     let project = project_dir.display().to_string();
     let found = memory.call(&project, "memory", json!({"slug": "new-one"}));
     assert_eq!(found["kind"], "user");
-    let outcome = hook::work(
+    let outcome = crate::claude_code::hook::work(
         hook::HookEvent::SessionStart,
         Some(&project_dir),
         &setup.paths,
@@ -3277,7 +3277,7 @@ fn the_shim_and_the_hook_import_the_same_files_once() {
     assert!(count >= 3, "{listed}");
     // The hook then: nothing new, the same memories.
     let mut stdout = Vec::new();
-    let code = hook::run(
+    let code = crate::claude_code::hook::run(
         hook::HookEvent::SessionStart,
         Ok(setup.paths.clone()),
         data.path().to_path_buf(),
@@ -3308,7 +3308,7 @@ fn the_shim_and_the_hook_import_the_same_files_once() {
     let done = crate::session_sync::start(&plan, &mut connect, &mut |_| Ok(()), deadline);
     assert_eq!(done.imported, 1, "{done:?}");
     let mut stdout = Vec::new();
-    hook::run(
+    crate::claude_code::hook::run(
         hook::HookEvent::SessionStart,
         Ok(setup.paths.clone()),
         data.path().to_path_buf(),
@@ -3958,7 +3958,7 @@ fn the_session_start_hook_puts_the_freshly_imported_memories_into_additional_con
     let fetch: hook::StartFetch =
         Box::new(move |dir, max| runtime.start_context(&mcp::project_key(None, dir.unwrap()), max));
     let mut stdout = Vec::new();
-    let code = hook::run_with_context(
+    let code = crate::claude_code::hook::run_with_context(
         hook::HookEvent::SessionStart,
         Ok(setup.paths.clone()),
         data.path().to_path_buf(),
