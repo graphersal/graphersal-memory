@@ -66,6 +66,7 @@ What a harness may have (the default is "none"):
 | `has_plugin` | it gets a session plugin rather than hooks (opencode) |
 | `memory_dirs` | it has a file memory of its own (`has_file_memory`): its memory directories with their projects, which the import reads (the same format as Claude Code's: `MEMORY.md` and one file per memory); `memory_dir(root)` must be where one project's files are |
 | `export_hint` | it has no file memory: how to give the agent an exported file |
+| `bench` (`bench::BenchSupport`, in `<name>/bench.rs`) | the bench runs through its headless command: its sessions' excerpt, its instruction and memory files, its arm sandboxes and tool-free calls, the cost cap; with `Headless::bench_command` |
 | `Headless` (in `driver`) | its headless command runs the summaries (or the bench), or must be refused |
 
 The rule for every method: it returns an outcome (a plan, lines, findings), and shared code

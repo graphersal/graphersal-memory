@@ -4,7 +4,7 @@
 //! `<data dir>/bench/questions/<project slug>.json`, which the user can edit and confirms.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -32,7 +32,7 @@ const SESSION_BUDGET: usize = 30_000;
 
 /// A transcript changed more recently than this is still being written: left out, as the
 /// session indexing leaves it out.
-const RECENT: Duration = Duration::from_secs(30 * 60);
+pub(crate) const RECENT: Duration = Duration::from_secs(30 * 60);
 
 /// Who wrote a question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,80 +382,10 @@ impl QuestionSet {
 
 /// The question file of `project`.
 pub fn path(data_dir: &Path, project: &str) -> PathBuf {
-    data_dir.join("bench").join("questions").join(format!(
-        "{}.json",
-        crate::harnesses::claude_code::import::claude_slug(project)
-    ))
-}
-
-/// The finished transcripts of `project` in Claude Code's `projects` directory (its directory
-/// is named after the project's path), newest first.
-pub fn transcripts(projects_dir: &Path, project: &str, now: SystemTime) -> Vec<PathBuf> {
-    let dir = projects_dir.join(crate::harnesses::claude_code::import::claude_slug(project));
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut files: Vec<(SystemTime, PathBuf)> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "jsonl"))
-        .filter_map(|p| {
-            let modified = std::fs::metadata(&p).ok()?.modified().ok()?;
-            let age = now.duration_since(modified).unwrap_or_default();
-            (age >= RECENT).then_some((modified, p))
-        })
-        .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    files.into_iter().map(|(_, p)| p).collect()
-}
-
-/// The finished opencode sessions of `project` in `db` (unchanged for 30 minutes), newest
-/// first, parsed.
-pub fn opencode_transcripts(
-    db: &Path,
-    project: &str,
-    now: SystemTime,
-) -> Vec<(String, transcript::Transcript)> {
-    let now = now
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    crate::harnesses::opencode::sessions::of_project(db, Path::new(project))
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(_, updated)| now.saturating_sub(*updated) >= RECENT.as_secs())
-        .filter_map(|(id, _)| {
-            crate::harnesses::opencode::sessions::read(db, &id)
-                .ok()
-                .map(|t| (id, t))
-        })
-        .collect()
-}
-
-/// The finished Codex rollouts of `project` under `sessions` (unchanged for 30 minutes), newest
-/// first, parsed (the id is the session's thread id, as the indexing names it).
-pub fn codex_transcripts(
-    sessions: &Path,
-    project: &str,
-    now: SystemTime,
-) -> Vec<(String, transcript::Transcript)> {
-    let now = now
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let mut found: Vec<(u64, PathBuf)> =
-        crate::harnesses::codex::sessions::of_project(sessions, Path::new(project))
-            .into_iter()
-            .filter(|(_, modified)| now.saturating_sub(*modified) >= RECENT.as_secs())
-            .map(|(path, modified)| (modified, path))
-            .collect();
-    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    found
-        .into_iter()
-        .filter_map(|(_, path)| {
-            crate::harnesses::codex::sessions::read(&path)
-                .ok()
-                .map(|t| (crate::harnesses::codex::sessions::thread_id(&path), t))
-        })
-        .collect()
+    data_dir
+        .join("bench")
+        .join("questions")
+        .join(format!("{}.json", crate::fsutil::path_slug(project)))
 }
 
 /// The raw-transcript excerpt the questions are generated from: newest sessions first, each
@@ -472,23 +402,6 @@ pub struct Excerpt {
 }
 
 impl Excerpt {
-    /// The excerpt of `files` (Claude Code transcripts, newest first).
-    pub fn of(files: &[PathBuf], budget: usize) -> Self {
-        let parsed: Vec<(String, transcript::Transcript)> = files
-            .iter()
-            .filter_map(|file| {
-                let bytes = std::fs::read(file).ok()?;
-                let uuid = file
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let parsed = crate::harnesses::claude_code::transcript::parse(&bytes, &uuid);
-                Some((uuid, parsed))
-            })
-            .collect();
-        Self::of_transcripts(&parsed, budget)
-    }
-
     /// The excerpt of parsed sessions `(id, transcript)` (newest first).
     pub fn of_transcripts(sessions: &[(String, transcript::Transcript)], budget: usize) -> Self {
         let mut out = Self::default();
@@ -943,6 +856,7 @@ pub fn parse_import(text: &str) -> Result<(Vec<Imported>, Vec<String>), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
 
     fn excerpt() -> Excerpt {
         Excerpt {
@@ -1060,7 +974,10 @@ mod tests {
             crate::harnesses::claude_code::transcript::tests::fixture(),
         )
         .unwrap();
-        let excerpt = Excerpt::of(std::slice::from_ref(&file), EXCERPT_BUDGET);
+        let excerpt = crate::harnesses::claude_code::bench::excerpt_of(
+            std::slice::from_ref(&file),
+            EXCERPT_BUDGET,
+        );
         assert_eq!(excerpt.sessions, 1);
         assert!(
             excerpt.text.contains("[turn:0f0e0d0c-aaaa:0] USER:"),
@@ -1068,7 +985,7 @@ mod tests {
             excerpt.text
         );
         assert!(!excerpt.turns.is_empty());
-        let tiny = Excerpt::of(&[file], 10);
+        let tiny = crate::harnesses::claude_code::bench::excerpt_of(&[file], 10);
         assert_eq!(tiny.sessions, 0);
         assert!(tiny.text.is_empty());
         let prompt = prompt("/w/app", 6, &excerpt);
@@ -1088,11 +1005,11 @@ mod tests {
         std::fs::write(dir.path().join("-w-other").join("c.jsonl"), "{}").unwrap();
         let now = SystemTime::now();
         assert!(
-            transcripts(dir.path(), "/w/p", now).is_empty(),
+            crate::harnesses::claude_code::bench::transcripts(dir.path(), "/w/p", now).is_empty(),
             "too recent"
         );
         let later = now + Duration::from_secs(3600);
-        let found = transcripts(dir.path(), "/w/p", later);
+        let found = crate::harnesses::claude_code::bench::transcripts(dir.path(), "/w/p", later);
         assert_eq!(found.len(), 2);
         assert!(found.iter().all(|f| f.starts_with(&project_dir)));
     }

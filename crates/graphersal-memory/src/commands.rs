@@ -11,7 +11,6 @@ use crate::cli::{
     QuestionsEdit, SummariesAction,
 };
 use crate::config::{self, Config};
-use crate::harnesses::claude_code::install::ClaudePaths;
 use crate::install::{self, InstallOptions, Setup, UninstallOptions};
 use crate::memory::import::ImportState;
 use crate::memory::import::{self, Caller};
@@ -1448,9 +1447,7 @@ fn run_bench(
     let mut harnesses = crate::harnesses::Harnesses::resolve(&env, &data_dir, true)?;
     if let Some(dir) = &request.claude_dir {
         let dir = absolute(dir);
-        harnesses.set_claude_paths(ClaudePaths::resolve(&|name: &str| {
-            (name == "CLAUDE_CONFIG_DIR").then(|| dir.display().to_string())
-        })?);
+        harnesses.set_claude_config_dir(&dir)?;
     }
     let exe =
         std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
