@@ -311,8 +311,12 @@ memory, of the session's project and the global ones. This replaces what Claude 
   with their titles and hooks, so a pin survives files -> graph -> files.
 - **Delivery**: the session-start hooks (Claude Code: `additionalContext`; Cursor:
   `additional_context`) and the `use` server's instructions of each connection, computed when the
-  connection opens. A Claude Code connection whose settings hold our SessionStart hook leaves it
-  out of the instructions, so it is not sent twice; per harness: [Supported
+  connection opens (opencode, Codex, CodeWhale and DeepSeek Harness get it only there). A Claude
+  Code connection whose settings hold our SessionStart hook leaves it out of the instructions, so
+  it is not sent twice; Claude Code without the hook, CodeWhale and DeepSeek Harness get the
+  short form, cut to 4,096 characters of instructions (CodeWhale cuts server instructions there,
+  dsh rejects a server whose instructions are too long; our server entries name the harness in
+  their `env`, so the server knows); per harness: [Supported
   harnesses](harnesses.md#the-start-context-what-reaches-the-model-at-a-sessions-start).
 - **Superseded and conflicting memories**: a superseded memory never starts a session; open
   conflicts follow the groups with both versions ([Conflicts](#conflicts-between-memories)).
@@ -396,7 +400,11 @@ The harness loads its own instruction files into every session (Claude Code: `~/
 `.claude/rules/*.md`; opencode: its `AGENTS.md` and `instructions` entries, the project's
 `AGENTS.md`, Claude Code's files where it reads them; Codex: `~/.codex/AGENTS(.override).md`,
 the project's `AGENTS(.override).md` and its fallback names; Cursor: `~/.cursor/rules/*.mdc`,
-the project's `.cursor/rules/*.mdc`, `.cursorrules` and `AGENTS.md`). A memory can contradict
+the project's `.cursor/rules/*.mdc`, `.cursorrules` and `AGENTS.md`; CodeWhale: its one global
+file (the first of `~/.codewhale/AGENTS.md`, `~/.agents/AGENTS.md`, `~/.deepseek/AGENTS.md`, then
+the same names `instructions.md`) and the project's `AGENTS.md`; DeepSeek Harness:
+`$DSH_HOME/AGENTS.md` (`~/.dsh/AGENTS.md`), `$DSH_AGENTS_HOME/AGENTS.md` (`~/.agents/AGENTS.md`)
+and the project's `AGENTS.md`, `CLAUDE.md`, `AGENTS.local.md` and `CLAUDE.local.md`). A memory can contradict
 one of their lines, for example a memory "use pnpm" against a `CLAUDE.md` line "always use npm".
 graphersal-memory never imports those rules (the agent would get them twice) and never edits
 those files; it finds the pairs worth a look, and the agent or you decide.
