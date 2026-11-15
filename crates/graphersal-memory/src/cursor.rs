@@ -354,6 +354,27 @@ impl Harness for Cursor {
     }
 }
 
+/// Cursor's CLI (`crate::harness::Headless`): recognised only to be refused.
+pub struct HeadlessRun;
+
+impl crate::harness::Headless for HeadlessRun {
+    fn matches(&self, command: &[String]) -> bool {
+        is_cursor_cli(command)
+    }
+
+    fn summaries_refusal(&self) -> Option<&'static str> {
+        Some(NO_HEADLESS)
+    }
+
+    fn bench_refusal(&self, _command: &[String]) -> Option<(&'static str, &'static str)> {
+        Some((
+            "the bench does not run through Cursor's CLI.",
+            "Cursor's CLI reports no cost, so the budget could not stop the run, and it reads \
+             your ~/.cursor (MCP servers, hooks) with no way to isolate a run.",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

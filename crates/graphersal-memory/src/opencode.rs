@@ -875,6 +875,68 @@ pub fn is_our_plugin(text: &str) -> bool {
         .is_some_and(|line| line.trim_start_matches("// ") == MARKER)
 }
 
+/// opencode's headless runs (`crate::harness::Headless`): `opencode run` in a sandbox of its
+/// own, `--format json`, `--standalone` for 2.x.
+pub struct HeadlessRun;
+
+impl crate::harness::Headless for HeadlessRun {
+    fn matches(&self, command: &[String]) -> bool {
+        is_opencode(command)
+    }
+
+    fn default_command(&self) -> Option<&'static str> {
+        Some(DEFAULT_HEADLESS_COMMAND)
+    }
+
+    fn default_command_note(&self) -> &'static str {
+        "opencode only; a free model of opencode Zen"
+    }
+
+    fn costs_nothing(&self, command: &[String]) -> bool {
+        free_model(command)
+    }
+
+    fn free_note(&self, command: &[String]) -> Option<String> {
+        free_model(command).then(|| {
+            format!(
+                "`{}` uses a free model of opencode Zen, free for a limited time; the monthly \
+                 budget still applies",
+                command.join(" ")
+            )
+        })
+    }
+
+    fn summaries_run(
+        &self,
+        args: Vec<String>,
+        work_dir: &Path,
+        homes: &crate::harness::Homes<'_>,
+    ) -> Result<crate::harness::Prepared, String> {
+        let mut args = headless_args(&args);
+        args.extend(["--format".to_string(), "json".to_string()]);
+        let sandbox = work_dir.join("opencode");
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let env = build_sandbox(
+            &sandbox,
+            &json!({"permission": permissions(&[]), "mcp": {}}),
+            homes.opencode_db,
+        )?;
+        Ok((args, env))
+    }
+
+    fn answer(&self, stdout: &str, _command: &[String]) -> String {
+        normalize_run_output(stdout).to_string()
+    }
+
+    fn bench_args(&self, args: &[String]) -> Vec<String> {
+        headless_args(args)
+    }
+
+    fn bench_answer(&self, output: &crate::harness::Output, _command: &[String]) -> Option<Value> {
+        Some(normalize_run_output(&output.stdout))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
