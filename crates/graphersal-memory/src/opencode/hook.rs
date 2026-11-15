@@ -10,6 +10,11 @@ use serde_json::Value;
 
 use crate::hook::*;
 
+/// The session start line for opencode (its plugin shows it as a toast).
+pub const OPENCODE_START_LINE: &str = "graphersal-memory: your memory is served by the MCP \
+    server graphersal-memory (memories, recall, memory, remember, forget; past sessions: \
+    sessions, session).";
+
 /// The indexing request of opencode's plugin: every session of `db`, with the plugin's own
 /// session active (start) or finished (end).
 pub fn opencode_request(

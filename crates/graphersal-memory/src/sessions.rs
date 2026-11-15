@@ -1275,8 +1275,8 @@ mod tests {
         // The fixture is JSON: the directory goes in as a JSON string's content (a Windows
         // path's backslashes escaped).
         let escaped = serde_json::to_string(&work.display().to_string()).unwrap();
-        let text =
-            crate::transcript::tests::fixture().replace("/w/app", &escaped[1..escaped.len() - 1]);
+        let text = crate::claude_code::transcript::tests::fixture()
+            .replace("/w/app", &escaped[1..escaped.len() - 1]);
         let file = dir.join("abc.jsonl");
         std::fs::write(&file, text).unwrap();
         // A sub-agent transcript and a stray file are never indexed.

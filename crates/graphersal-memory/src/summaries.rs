@@ -623,8 +623,10 @@ mod tests {
 
     #[test]
     fn the_condensed_transcript_fits_its_budget() {
-        let mut transcript =
-            crate::transcript::parse(crate::transcript::tests::fixture().as_bytes(), "x");
+        let mut transcript = crate::claude_code::transcript::parse(
+            crate::claude_code::transcript::tests::fixture().as_bytes(),
+            "x",
+        );
         transcript.turns[0].user = "u".repeat(50_000);
         let text = condensed(&transcript, &["src/a.rs".to_string()], 5_000);
         assert!(text.chars().count() <= 5_000, "{}", text.len());

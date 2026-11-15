@@ -482,7 +482,7 @@ impl Excerpt {
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
-                let parsed = transcript::parse(&bytes, &uuid);
+                let parsed = crate::claude_code::transcript::parse(&bytes, &uuid);
                 Some((uuid, parsed))
             })
             .collect();
@@ -1055,7 +1055,7 @@ mod tests {
     fn the_excerpt_marks_turn_ids_and_respects_its_budget() {
         let dir = crate::mcp_tests::TempDir::new("excerpt");
         let file = dir.path().join("0f0e0d0c-aaaa.jsonl");
-        std::fs::write(&file, transcript::tests::fixture()).unwrap();
+        std::fs::write(&file, crate::claude_code::transcript::tests::fixture()).unwrap();
         let excerpt = Excerpt::of(std::slice::from_ref(&file), EXCERPT_BUDGET);
         assert_eq!(excerpt.sessions, 1);
         assert!(

@@ -5,9 +5,12 @@
 //! import in `crate::import`, its transcript parser in `crate::transcript` and its hook in
 //! `crate::hook`.
 
+pub mod hook;
+pub mod import;
 pub mod install;
 pub mod other;
 pub mod sessions;
+pub mod transcript;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -185,7 +188,7 @@ impl HookHandler for ClaudeCode {
         stdout: &mut dyn std::io::Write,
         stderr: &mut dyn std::io::Write,
     ) -> u8 {
-        if crate::hook::is_cursor_input(&String::from_utf8_lossy(&input)) {
+        if crate::cursor::hook::is_cursor_input(&String::from_utf8_lossy(&input)) {
             let _ = writeln!(
                 stderr,
                 "graphersal-memory hook: run by Cursor for Claude Code's settings; nothing to do \
@@ -194,7 +197,7 @@ impl HookHandler for ClaudeCode {
             );
             return 0;
         }
-        crate::hook::run_with_context(
+        hook::run_with_context(
             event,
             Ok(self.paths.clone()),
             setup.data_dir.clone(),
