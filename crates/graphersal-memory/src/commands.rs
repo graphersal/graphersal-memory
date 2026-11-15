@@ -784,6 +784,21 @@ pub(crate) fn daemon_connector(
     }
 }
 
+/// [`daemon_connector`] for the shim's session start, which outlives daemons: no new daemon
+/// after one was stopped on purpose (`client::connect_again`).
+fn daemon_connector_again(
+    setup: &Setup,
+) -> impl FnMut(&str) -> Result<Box<dyn Caller>, String> + Send + 'static {
+    let location = setup_location(setup);
+    move |project: &str| -> Result<Box<dyn Caller>, String> {
+        Ok(Box::new(client::connect_again(
+            &location,
+            project,
+            CALL_TIMEOUT,
+        )?))
+    }
+}
+
 /// `import`: the file memory of every project, new and changed files only.
 pub fn run_import(
     setup: &Setup,
@@ -1364,12 +1379,23 @@ fn sync_instructions(
     root: &str,
     force: bool,
 ) -> Result<Option<crate::memory::instructions::Synced>, String> {
+    sync_instructions_with(setup, harness, root, force, &mut |line| {
+        shim::request(location, line)
+    })
+}
+
+/// [`sync_instructions`] through `request` (the shim's session start: `shim::request_again`).
+fn sync_instructions_with(
+    setup: &Setup,
+    harness: &str,
+    root: &str,
+    force: bool,
+    request: &mut dyn FnMut(&serde_json::Value) -> Result<serde_json::Value, String>,
+) -> Result<Option<crate::memory::instructions::Synced>, String> {
     let kinds = crate::memory::instructions::kinds(setup, harness);
     let project = (!root.is_empty()).then(|| Path::new(root));
     let files = crate::memory::instructions::files(setup, &kinds, project);
-    crate::memory::instructions::sync(&setup.data_dir, root, &files, force, &mut |line| {
-        shim::request(location, line)
-    })
+    crate::memory::instructions::sync(&setup.data_dir, root, &files, force, request)
 }
 
 /// A `bench` or `bench questions` invocation.
@@ -1624,17 +1650,24 @@ fn session_events(
         .map_or(0, |since| since.as_secs());
     let location = setup_location(&setup);
     let run_dir = setup.run_dir.clone();
-    let mut connect = daemon_connector(&setup);
+    // The session start outlives a daemon stopped on purpose meanwhile (`uninstall`): it never
+    // starts a new one then, as the shim's reconnect does not.
+    let mut connect = daemon_connector_again(&setup);
     let harness = options.harness.clone();
     let root = options.project.clone();
     Some(shim::Events {
         start: Box::new(move || {
-            let mut enqueue = |request: sessions::Request| enqueue_request(&location, &request);
+            let mut enqueue = |request: sessions::Request| {
+                taken(&shim::request_again(&location, &request.to_control())?)
+            };
             let deadline = std::time::Instant::now() + hook::BUDGET;
             let mut notes =
                 session_sync::start(&start_plan, &mut connect, &mut enqueue, deadline).notes;
             // Then the instruction files of the session's project, for the conflict check.
-            if let Err(err) = sync_instructions(&setup, &location, &harness, &root, false) {
+            let synced = sync_instructions_with(&setup, &harness, &root, false, &mut |line| {
+                shim::request_again(&location, line)
+            });
+            if let Err(err) = synced {
                 notes.push(format!(
                     "cannot compare the memories with the instruction files: {err}"
                 ));

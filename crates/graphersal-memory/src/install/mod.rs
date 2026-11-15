@@ -4612,6 +4612,9 @@ pub(crate) struct InstallLock {
     _lock: Box<fd_lock::RwLock<std::fs::File>>,
 }
 
+/// How long `InstallLock::take` waits for a lock another install still holds.
+const LOCK_GRACE: Duration = Duration::from_secs(1);
+
 /// What a second install or uninstall says while the first runs.
 pub const ANOTHER_INSTALL: &str = "another graphersal-memory install or uninstall is running \
     (it holds the install lock); nothing was changed. Wait until it ends, then run this again";
@@ -4637,14 +4640,24 @@ impl InstallLock {
             .open(&path)
             .map_err(|err| format!("cannot open {}: {err}", path.display()))?;
         let mut lock = Box::new(fd_lock::RwLock::new(file));
-        match lock.try_write() {
-            // The guard only borrows the lock; forgetting it keeps the lock held until the
-            // file closes, when `InstallLock` is dropped (the OS releases it then).
-            Ok(guard) => std::mem::forget(guard),
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                return Err(ANOTHER_INSTALL.to_string());
+        // A lock held a moment longer (another install ending) is waited for, briefly.
+        let deadline = std::time::Instant::now() + LOCK_GRACE;
+        loop {
+            match lock.try_write() {
+                // The guard only borrows the lock; forgetting it keeps the lock held until the
+                // file closes, when `InstallLock` is dropped (the OS releases it then).
+                Ok(guard) => {
+                    std::mem::forget(guard);
+                    break;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(ANOTHER_INSTALL.to_string());
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(err) => return Err(format!("cannot lock {}: {err}", path.display())),
             }
-            Err(err) => return Err(format!("cannot lock {}: {err}", path.display())),
         }
         Ok(Some(Self { _lock: lock }))
     }

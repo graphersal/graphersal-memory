@@ -120,6 +120,25 @@ pub fn connect(
     McpClient::start(reader, stream)
 }
 
+/// [`connect`] for a process that outlives daemons (the shim's session start): a daemon is
+/// started only when [`shim::may_start`] allows it, never after one was stopped on purpose.
+pub fn connect_again(
+    location: &DaemonLocation,
+    project: &str,
+    timeout: Duration,
+) -> Result<McpClient<std::io::BufReader<Stream>, Stream>, String> {
+    let options = ShimOptions {
+        location: location.clone(),
+        profile: Profile::Use,
+        project: project.to_string(),
+        harness: "graphersal-memory".to_string(),
+        start_context: crate::runtime::protocol::StartContextMode::None,
+    };
+    let opened = shim::open_with(&options, shim::may_start(&location.run_dir))?;
+    let _ = opened.reader.get_ref().set_read_timeout(Some(timeout));
+    McpClient::start(opened.reader, opened.stream)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -357,6 +357,19 @@ pub fn request(location: &DaemonLocation, line: &Value) -> Result<Value, String>
     Ok(answer)
 }
 
+/// A request line to the daemon for a process that outlives daemons ([`connect_again`]: no new
+/// daemon after one was stopped on purpose).
+pub fn request_again(location: &DaemonLocation, line: &Value) -> Result<Value, String> {
+    let stream = connect_again(location)?;
+    let (answer, _) = exchange(
+        &stream,
+        &line.to_string(),
+        location.start_timeout,
+        &location.log_file(),
+    )?;
+    Ok(answer)
+}
+
 /// A request line to the running daemon; `None` when none answers (nothing is started).
 pub fn request_running(run_dir: &Path, line: &Value) -> Result<Option<Value>, String> {
     let Ok(stream) = ipc::connect(run_dir) else {
