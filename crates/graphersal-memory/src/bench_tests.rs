@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 
-use crate::bench::{self, Call, DryRun, Harness, Kind, Options};
+use crate::bench::{self, Call, DryRun, Harness, Kind, Options, questions};
 use crate::cli::BenchArm;
 use crate::install::ClaudePaths;
 use crate::mcp_tests::TempDir;
@@ -762,6 +762,87 @@ fn a_codewhale_command_is_refused_with_commands_to_copy_and_the_flag_replaces_it
     );
     let err = options_with(Some("claude 'x")).unwrap_err();
     assert!(err.starts_with("--harness-command:"), "{err}");
+}
+
+#[test]
+fn without_finished_sessions_the_bench_says_so_before_asking_and_names_projects_to_run_in() {
+    let machine = Machine::new();
+    // Another project, a git repository, with a finished session.
+    let other = TempDir::new("bench-other-project");
+    std::fs::create_dir_all(other.path().join(".git")).unwrap();
+    let other_text = other.path().display().to_string();
+    let other_dir = machine
+        .claude()
+        .projects
+        .join(crate::import::claude_slug(&other_text));
+    std::fs::create_dir_all(&other_dir).unwrap();
+    let transcript = other_dir.join("1f0e0d0c-1111-2222-3333-444444444444.jsonl");
+    std::fs::write(
+        &transcript,
+        format!("{}\n", json!({"type": "user", "cwd": other_text})),
+    )
+    .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&transcript)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(48 * 3600))
+        .unwrap();
+
+    let mut options = machine.options();
+    options.project = "/w/no-sessions".into();
+    options.interactive = true;
+    for questions_only in [false, true] {
+        let mut harness = DryRun::default();
+        let mut out = Vec::new();
+        let mut input = "Which port does the API use?\n\n".as_bytes();
+        let err = if questions_only {
+            bench::questions_command(&options, false, &mut harness, &mut input, &mut out)
+        } else {
+            bench::run(&options, &mut harness, &mut input, &mut out)
+        }
+        .unwrap_err();
+        let shown = String::from_utf8_lossy(&out);
+        // Refused before the step that asks for the user's own questions.
+        assert!(!shown.contains("Add your own questions"), "{shown}");
+        assert!(harness.calls.is_empty());
+        assert!(!questions::path(&options.data_dir, &options.project).exists());
+
+        let lines: Vec<&str> = err.lines().collect();
+        assert_eq!(
+            lines[0], "no finished session transcript of /w/no-sessions yet.",
+            "{err}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("  looked in: ")),
+            "{err}"
+        );
+        let cd = lines
+            .iter()
+            .position(|l| {
+                l.starts_with("    cd ")
+                    && l.contains(&*other.path().file_name().unwrap().to_string_lossy())
+            })
+            .unwrap_or_else(|| panic!("{err}"));
+        let command = if questions_only {
+            "bench questions"
+        } else {
+            "bench"
+        };
+        assert_eq!(
+            lines[cd + 1],
+            format!(
+                "    graphersal-memory {command} --harness-command \"claude -p --model sonnet\""
+            ),
+            "{err}"
+        );
+        assert!(
+            lines.contains(
+                &"    graphersal-memory bench --questions 0 --harness-command \"claude -p --model sonnet\""
+            ),
+            "{err}"
+        );
+    }
 }
 
 #[test]
