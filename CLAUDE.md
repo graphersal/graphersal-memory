@@ -598,8 +598,10 @@ cargo test --workspace
 cargo run -p graphersal-memory -- --help
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and Windows; it is
-started by hand (`workflow_dispatch`).
+CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and Windows, and
+`cargo check --workspace --all-targets --locked` on the declared `rust-version` (1.88; locally
+`cargo +1.88.0 check ...`): no language feature newer than the MSRV. It is started by hand
+(`workflow_dispatch`).
 
 ## Releases
 
