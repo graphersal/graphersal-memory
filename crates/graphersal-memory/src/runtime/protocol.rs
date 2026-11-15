@@ -156,6 +156,11 @@ pub struct Handshake {
     pub data_dir: Option<String>,
     /// Whether the instructions carry the start context.
     pub start_context: StartContextMode,
+    /// Where the harness keeps the sessions the connection's end ends
+    /// (`crate::memory::sessions::SessionSource::ended_by_connection`), as the shim resolved it
+    /// from its own environment (`harness.sessions`, optional): the harness may have given the
+    /// shim variables the daemon, started by another process, never saw (dsh's `DSH_HOME`).
+    pub sessions: Option<String>,
 }
 
 /// What the first line of a connection asks for.
@@ -238,22 +243,37 @@ pub fn parse_opening(line: &[u8]) -> Result<Opening, (Refusal, String)> {
         harness: harness.to_string(),
         data_dir: text("data_dir").map(str::to_string),
         start_context: StartContextMode::parse(text("start_context")),
+        sessions: object
+            .get("harness")
+            .and_then(|harness| harness.get("sessions"))
+            .and_then(Value::as_str)
+            .filter(|dir| !dir.is_empty())
+            .map(str::to_string),
     }))
 }
 
 /// The handshake line the shim sends (without its line end), with the whole start context.
 #[cfg(test)]
 pub fn handshake_line(profile: Profile, project: &str, harness: &str, data_dir: &str) -> String {
-    handshake_line_with(profile, project, harness, data_dir, StartContextMode::Full)
+    handshake_line_with(
+        profile,
+        project,
+        harness,
+        data_dir,
+        StartContextMode::Full,
+        None,
+    )
 }
 
-/// [`handshake_line`] with the start context mode `start`.
+/// [`handshake_line`] with the start context mode `start` and the harness's sessions
+/// directory (`Handshake::sessions`).
 pub fn handshake_line_with(
     profile: Profile,
     project: &str,
     harness: &str,
     data_dir: &str,
     start: StartContextMode,
+    sessions: Option<&str>,
 ) -> String {
     let name = std::path::Path::new(project)
         .file_name()
@@ -263,7 +283,7 @@ pub fn handshake_line_with(
         "protocol": PROTOCOL,
         "profile": match profile { Profile::Use => "use", Profile::Develop => "develop" },
         "project": {"root": project, "name": name},
-        "harness": {"name": harness, "version": null},
+        "harness": {"name": harness, "version": null, "sessions": sessions},
         "data_dir": data_dir,
         "start_context": start.name(),
     })
@@ -336,12 +356,26 @@ mod tests {
             StartContextMode::Short,
             StartContextMode::None,
         ] {
-            let line = handshake_line_with(Profile::Use, "/w", "claude-code", "/d", mode);
+            let line = handshake_line_with(Profile::Use, "/w", "claude-code", "/d", mode, None);
             let Ok(Opening::Handshake(handshake)) = parse_opening(line.as_bytes()) else {
                 panic!("{line}");
             };
             assert_eq!(handshake.start_context, mode);
+            assert_eq!(handshake.sessions, None);
         }
+        // The harness's sessions directory, as the shim resolved it.
+        let line = handshake_line_with(
+            Profile::Use,
+            "/w",
+            "dsh",
+            "/d",
+            StartContextMode::Short,
+            Some("/own/dsh/sessions"),
+        );
+        let Ok(Opening::Handshake(handshake)) = parse_opening(line.as_bytes()) else {
+            panic!("{line}");
+        };
+        assert_eq!(handshake.sessions.as_deref(), Some("/own/dsh/sessions"));
         let old = br#"{"protocol":1,"shim_version":"0.0.0","profile":"use","project":{"root":"/w"},"harness":{"name":"x"}}"#;
         let Ok(Opening::Handshake(handshake)) = parse_opening(old) else {
             panic!("an older shim's handshake");

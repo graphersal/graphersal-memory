@@ -1595,12 +1595,19 @@ fn shim_options(
 ) -> Result<ShimOptions, String> {
     let harness = shim::harness_name(&|name| std::env::var(name).ok()).to_string();
     let hook_installed = start_hook_installed(cli, &harness);
+    // Where the harness's sessions are, from this process's environment, which the harness set
+    // up (the daemon may have been started by another process without it).
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let sessions = crate::harnesses::agent::Kind::from_id(&harness)
+        .and_then(|kind| crate::harnesses::sessions(kind).ended_by_connection(&env))
+        .map(|dir| dir.display().to_string());
     Ok(ShimOptions {
         location: location(cli)?,
         profile,
         project: project(project_flag)?,
         start_context: start_context_mode(&harness, hook_installed),
         harness,
+        sessions,
     })
 }
 

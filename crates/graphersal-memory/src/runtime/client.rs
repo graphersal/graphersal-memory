@@ -114,6 +114,7 @@ pub fn connect(
         project: project.to_string(),
         harness: "graphersal-memory".to_string(),
         start_context: crate::runtime::protocol::StartContextMode::None,
+        sessions: None,
     };
     let (stream, reader) = shim::open(&options)?;
     let _ = reader.get_ref().set_read_timeout(Some(timeout));
@@ -133,6 +134,7 @@ pub fn connect_again(
         project: project.to_string(),
         harness: "graphersal-memory".to_string(),
         start_context: crate::runtime::protocol::StartContextMode::None,
+        sessions: None,
     };
     let opened = shim::open_with(&options, shim::may_start(&location.run_dir))?;
     let _ = opened.reader.get_ref().set_read_timeout(Some(timeout));

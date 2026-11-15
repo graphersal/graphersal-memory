@@ -166,9 +166,21 @@ fn row_text(setup: &Setup, name: &str, profile: &str, enabled: bool) -> String {
     if !enabled {
         text.push_str("      disabled: true\n");
     }
+    // dsh drops `DSH_*` from the child's environment: a moved home goes back in through `env`
+    // (`DshPaths::row_env`).
+    let paths = setup.dsh();
+    let home = if paths.explicit_home {
+        format!(
+            "          {}: {}\n",
+            crate::harnesses::dsh::HOME_ENV,
+            yamledit::string(&paths.dsh_home.display().to_string())
+        )
+    } else {
+        String::new()
+    };
     text.push_str(&format!(
         "      config:\n        serverName: {name}\n        transport: stdio\n        command: {}\n        \
-         args: [{}]\n        env:\n          {}: {}\n        startupTimeoutMs: {}\n",
+         args: [{}]\n        env:\n          {}: {}\n{home}        startupTimeoutMs: {}\n",
         yamledit::string(&setup.exe.display().to_string()),
         list(&args(setup, profile)),
         crate::runtime::shim::HARNESS_ENV,
@@ -1232,17 +1244,52 @@ mod tests {
         };
         let mut setup = machine(home.path(), data.path());
         setup.set_dsh(DshPaths::resolve(&env).unwrap());
+        // A file of the user's own in the moved home: given back byte for byte.
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("cordis.patch.yml"), fixture::USER_PATCH).unwrap();
+        let before = snapshot(home.path());
         let memory = Memory::open(data.path());
         let (code, out) = run_install(&setup, &memory, into_dsh());
         assert_eq!(code, 0, "{out}");
-        assert!(read(&own.join("cordis.patch.yml")).contains("serverName: graphersal-memory"));
+        let installed = read(&own.join("cordis.patch.yml"));
+        assert!(installed.contains("serverName: graphersal-memory"));
         assert!(read(&own.join("AGENTS.md")).contains("## Memory: graphersal-memory"));
         assert!(!home.path().join(".dsh").exists());
         nothing_elsewhere(home.path());
+        // Both rows give dsh's child the moved home back (dsh drops DSH_* from its env).
+        let found = yamledit::find(&installed).unwrap().unwrap();
+        let items = yamledit::items(&found.body).unwrap();
+        let rows = inserted(&items);
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(
+                row["config"]["env"]["DSH_HOME"],
+                own_text.as_str(),
+                "{installed}"
+            );
+            assert_eq!(row["config"]["env"]["GRAPHERSAL_MEMORY_HARNESS"], "dsh");
+        }
+        assert_eq!(inspect(&setup).use_row, PartState::Installed);
+        // A second install and a refresh change nothing.
+        let (code, out) = run_install(&setup, &memory, into_dsh());
+        assert_eq!(code, 0, "{out}");
+        let (code, out) = run_install(&setup, &memory, crate::install::install_tests::refresh());
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(read(&own.join("cordis.patch.yml")), installed);
         let (code, out) = run_uninstall(&setup, out_of_dsh());
         assert_eq!(code, 0, "{out}");
-        assert!(!own.exists(), "{out}");
+        assert_eq!(snapshot(home.path()), before, "{out}");
         memory.close();
+    }
+
+    #[test]
+    fn the_default_home_adds_no_dsh_home_to_the_rows() {
+        let tmp = TempDir::new("dsh-default-env");
+        let setup = bare_setup_in(tmp.path(), tmp.path());
+        assert!(!setup.dsh().explicit_home);
+        let body = block_body(&setup, false);
+        assert!(!body.contains("DSH_HOME"), "{body}");
+        assert!(body.contains("        env:\n          GRAPHERSAL_MEMORY_HARNESS: dsh\n        startupTimeoutMs: 60000\n"), "{body}");
     }
 
     #[test]

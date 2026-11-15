@@ -1341,7 +1341,12 @@ impl Daemon {
         if handshake.profile == crate::cli::Profile::Use
             && let Some(kind) = crate::harnesses::agent::Kind::from_id(&handshake.harness)
         {
-            self.end_sessions_with_connection(kind, &handshake.project, opened);
+            self.end_sessions_with_connection(
+                kind,
+                &handshake.project,
+                opened,
+                handshake.sessions.as_deref(),
+            );
         }
     }
 
@@ -1350,21 +1355,28 @@ impl Daemon {
     /// and kills them when it exits, before our shim can send the session end, seen live with
     /// v0.10.2), opened at `opened` (seconds) for the project at `root`: the daemon queues the
     /// indexing itself, with that project's sessions written since then marked ended. Where
-    /// the sessions are comes from this process's environment.
+    /// the sessions are comes from the handshake (`sessions`: the shim resolved it from the
+    /// environment the harness gave it, such as dsh's `DSH_HOME` in our row's `env`), else from
+    /// this process's environment.
     fn end_sessions_with_connection(
         self: &Arc<Self>,
         kind: crate::harnesses::agent::Kind,
         root: &str,
         opened: u64,
+        sessions: Option<&str>,
     ) {
         if root.is_empty() {
             return;
         }
         let reader = crate::harnesses::sessions(kind);
         let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-        let Some(dir) = reader.ended_by_connection(&env) else {
+        let Some(own) = reader.ended_by_connection(&env) else {
             return;
         };
+        let dir = sessions
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .unwrap_or(own);
         let mut request = sessions::Request::for_harness(kind, &dir);
         request
             .ended

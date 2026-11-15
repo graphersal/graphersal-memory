@@ -38,7 +38,13 @@
 //!   is dsh's minus `/KEY|PASSWORD|SECRET|TOKEN/i` and `DSH_*`, then the row's `env` merged
 //!   (`packages/subprocess/subprocess/src/index.ts:54, 73-76`,
 //!   `packages/mcp/mcp-client/src/transport.ts:21-23, 34-39`): the row's `env` names the harness
-//!   (`crate::runtime::shim::HARNESS_ENV`). A second row with the same `serverName` throws
+//!   (`crate::runtime::shim::HARNESS_ENV`) and, when `$DSH_HOME` moved the dsh home at install
+//!   time, carries `DSH_HOME` with its absolute path, so the shim (its session start and end,
+//!   `crate::memory::session_sync`) resolves the same home. The shim sends the sessions
+//!   directory in its handshake (`crate::runtime::protocol::Handshake::sessions`), so the daemon,
+//!   which another harness may have started without `DSH_HOME`, ends the right sessions when the
+//!   connection closes. A `DSH_HOME` set or changed after install points dsh at a home without
+//!   our rows: `install --harness dsh` runs again there. A second row with the same `serverName` throws
 //!   "already in use" (`index.ts:212-224`), also against a server of the web and Desktop
 //!   profiles' `mcp-manager` row (`packages/bundle/web-app/cordis.patch.yml:148-154`): `doctor`
 //!   names one. The model sees a tool as `mcp__<serverName>__<tool>`, every tool loaded
@@ -117,6 +123,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::harnesses::agent::{Harness, Kind};
+
+/// The variable that moves the dsh home.
+pub const HOME_ENV: &str = "DSH_HOME";
 
 /// The patch file of the home layer (and of each profile).
 pub const PATCH_FILE: &str = "cordis.patch.yml";
@@ -211,7 +220,7 @@ impl DshPaths {
     /// ([`crate::runtime::store::home_dir`]) and `DSH_HOME`.
     pub fn resolve(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         let home = crate::runtime::store::home_dir(env)?;
-        let explicit = env("DSH_HOME")
+        let explicit = env(HOME_ENV)
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .map(|value| expand(&value, &home))
@@ -239,6 +248,17 @@ impl DshPaths {
             dsh_home,
             home,
         }
+    }
+
+    /// The `env` of our rows: the harness's name, and the dsh home when [`HOME_ENV`] moved it
+    /// (as an absolute path: dsh drops every `DSH_*` variable from its MCP children's
+    /// environment, so without it our shim would look in `~/.dsh`).
+    pub fn row_env(&self) -> Value {
+        let mut env = json!({crate::runtime::shim::HARNESS_ENV: Kind::Dsh.id()});
+        if self.explicit_home {
+            env[HOME_ENV] = json!(self.dsh_home.display().to_string());
+        }
+        env
     }
 
     /// The profiles' patch files that exist, by profile name.
@@ -390,10 +410,11 @@ impl Harness for Dsh {
 
     /// A row's `config` (`packages/mcp/mcp-client/src/index.ts:161-190`) without its
     /// `serverName`: `env` names the harness (dsh sets no variable of its own that would tell
-    /// the shim), so the start context is the short one.
+    /// the shim), so the start context is the short one, and carries [`HOME_ENV`] when it
+    /// moved the dsh home (dsh drops every `DSH_*` variable from the child's environment).
     fn mcp_entry(&self, exe: &Path, args: &[String]) -> Value {
         json!({"transport": "stdio", "command": exe.display().to_string(), "args": args,
-               "env": {crate::runtime::shim::HARNESS_ENV: Kind::Dsh.id()},
+               "env": self.paths.row_env(),
                "startupTimeoutMs": STARTUP_TIMEOUT_MS})
     }
 
@@ -717,6 +738,41 @@ mod tests {
         ]);
         assert_eq!(
             sessions::Sessions.ended_by_connection(&env),
+            Some(own.join("sessions"))
+        );
+    }
+
+    #[test]
+    fn our_rows_carry_dsh_home_only_when_it_moved_the_home() {
+        use crate::memory::sessions::SessionSource;
+        let home = pb("/h");
+        let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let exe = pb("/x/graphersal-memory");
+        let env = env_of(&[(var, home.display().to_string())]);
+        let agent = Dsh::new(DshPaths::resolve(&env).unwrap());
+        let entry = agent.mcp_entry(&exe, &["mcp".into()]);
+        assert_eq!(entry["env"], json!({"GRAPHERSAL_MEMORY_HARNESS": "dsh"}));
+        // `~` expanded: the row names the absolute dsh home, which the shim resolves again
+        // from the row's env (dsh drops its own DSH_HOME from the child's environment).
+        let env = env_of(&[
+            (var, home.display().to_string()),
+            ("DSH_HOME", "~/tools/dsh".to_string()),
+        ]);
+        let paths = DshPaths::resolve(&env).unwrap();
+        let entry = Dsh::new(paths.clone()).mcp_entry(&exe, &["mcp".into()]);
+        let own = home.join("tools").join("dsh");
+        assert_eq!(
+            entry["env"],
+            json!({"GRAPHERSAL_MEMORY_HARNESS": "dsh", "DSH_HOME": own.display().to_string()})
+        );
+        let child = |name: &str| {
+            (name == var)
+                .then(|| home.display().to_string())
+                .or_else(|| entry["env"][name].as_str().map(str::to_string))
+        };
+        assert_eq!(DshPaths::resolve(&child).unwrap(), paths);
+        assert_eq!(
+            sessions::Sessions.ended_by_connection(&child),
             Some(own.join("sessions"))
         );
     }

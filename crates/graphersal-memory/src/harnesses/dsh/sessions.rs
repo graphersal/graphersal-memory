@@ -493,8 +493,9 @@ impl crate::memory::sessions::SessionSource for Sessions {
 
     /// dsh keeps one MCP child for its whole run and has no session end event, so the end of
     /// a dsh `use` connection ends the sessions written meanwhile. dsh drops every `DSH_*`
-    /// variable from its MCP children's environment, so the daemon sees `DSH_HOME` only when
-    /// it was started with it; else this is `~/.dsh/sessions`.
+    /// variable from its MCP children's environment; our row's `env` gives `DSH_HOME` back when
+    /// install saw one, and the shim sends what this resolves in its environment in the
+    /// handshake (`crate::runtime::protocol::Handshake::sessions`).
     fn ended_by_connection(&self, env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
         crate::harnesses::dsh::DshPaths::resolve(env)
             .ok()

@@ -270,6 +270,7 @@ fn keep_daemon(location: &DaemonLocation) -> Result<(), String> {
         project: String::new(),
         harness: "graphersal-memory-ui".to_string(),
         start_context: crate::runtime::protocol::StartContextMode::None,
+        sessions: None,
     };
     let first = crate::runtime::shim::open(&options)?;
     std::thread::Builder::new()
