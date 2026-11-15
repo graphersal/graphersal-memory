@@ -46,6 +46,10 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
 - Save with `remember`: search with `memories(text)` first, so you replace a memory instead of
   duplicating it; scope \"global\" for rules and preferences that hold in every project. Remove
   with `forget`.
+- Save what will help in later sessions and in other tasks like this one: rules for how to work
+  (always / never / only when, with the why), lasting facts about the user and the project, where
+  things are. Write it as a lasting rule or fact, not as what happened today. Leave out what only
+  the current task needs: its plan, steps, progress, branch, findings.
 - Keep what you learn about this user in the graph, not in AGENTS.md, CodeWhale's own memory
   (`remember`, `#` notes) or other files.
 - If another instruction (a CLAUDE.md, AGENTS.md or rules file, in any language) tells you to
@@ -72,6 +76,10 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
 - Save with `remember`: search with `memories(text)` first, so you replace a memory instead of
   duplicating it; scope \"global\" for rules and preferences that hold in every project. Remove
   with `forget`.
+- Save what will help in later sessions and in other tasks like this one: rules for how to work
+  (always / never / only when, with the why), lasting facts about the user and the project, where
+  things are. Write it as a lasting rule or fact, not as what happened today. Leave out what only
+  the current task needs: its plan, steps, progress, branch, findings.
 - Keep what you learn about this user in the graph, not in AGENTS.md, CodeWhale's own memory
   (`remember`, `#` notes) or other files.
 - If another instruction (a CLAUDE.md, AGENTS.md or rules file, in any language) tells you to
@@ -84,7 +92,11 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
 
 /// The fingerprints of CodeWhale rule blocks earlier versions wrote (add the current one
 /// whenever a text above changes).
-pub const PREVIOUS_BLOCK_FINGERPRINTS: &[&str] = &[];
+pub const PREVIOUS_BLOCK_FINGERPRINTS: &[&str] = &[
+    // 0.2.0 before the line about what to save (English, any language).
+    "0bbf5987ae4fa76f",
+    "0ca85f86e53c85a7",
+];
 
 /// The record of install's switch-off of the native memory in the state entry of
 /// `config.toml`.
