@@ -258,6 +258,10 @@ pub trait Harness {
     /// comments, rules): what the conformance tests (`crate::harnesses::conformance_tests`) start from.
     #[cfg(test)]
     fn user_files(&self, home: &Path);
+    /// What the bench needs of it, when the bench runs through it (`crate::bench`).
+    fn bench(&self) -> Option<std::sync::Arc<dyn crate::bench::BenchSupport>> {
+        None
+    }
     /// Whether its sessions are on this machine (its transcripts directory, database or
     /// registry).
     fn has_sessions(&self) -> bool;

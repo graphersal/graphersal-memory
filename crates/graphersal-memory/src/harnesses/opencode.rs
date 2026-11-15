@@ -53,6 +53,7 @@
 //!   memory: the export of `uninstall` writes readable Markdown files into
 //!   `~/graphersal-memory-export/opencode/` instead ([`OpenCode::memory_dir`]).
 
+pub mod bench;
 pub mod hook;
 pub mod install;
 pub mod other;
@@ -303,14 +304,10 @@ pub struct OpenCodePaths {
 }
 
 impl OpenCodePaths {
-    /// Resolves the paths from the environment (`env` reads one variable) and detects the line
-    /// (`opencode --version` on `PATH`, else its data): `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
-    /// `OPENCODE_DB`, 2.x `OPENCODE_CONFIG_DIR`, home [`crate::runtime::store::home_dir`].
-    pub fn resolve(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
-        Self::resolve_for(env, detect(env, None, true)?)
-    }
-
-    /// The paths of the line `detected`.
+    /// The paths of the line `detected` (`detect`: `opencode --version` on `PATH`, else its
+    /// data), from the environment (`env` reads one variable): `XDG_CONFIG_HOME`,
+    /// `XDG_DATA_HOME`, `OPENCODE_DB`, 2.x `OPENCODE_CONFIG_DIR`, home
+    /// [`crate::runtime::store::home_dir`].
     pub fn resolve_for(
         env: &dyn Fn(&str) -> Option<String>,
         detected: Detected,
@@ -462,6 +459,10 @@ impl Harness for OpenCode {
     #[cfg(test)]
     fn user_files(&self, home: &Path) {
         fixture::user_files(home);
+    }
+
+    fn bench(&self) -> Option<std::sync::Arc<dyn crate::bench::BenchSupport>> {
+        Some(std::sync::Arc::new(self.clone()))
     }
 
     fn has_sessions(&self) -> bool {
@@ -894,6 +895,10 @@ impl crate::harnesses::headless::Headless for HeadlessRun {
 
     fn default_command(&self) -> Option<&'static str> {
         Some(DEFAULT_HEADLESS_COMMAND)
+    }
+
+    fn bench_command(&self) -> Option<&'static str> {
+        Some("opencode run")
     }
 
     fn default_command_note(&self) -> &'static str {

@@ -73,6 +73,19 @@ impl Harnesses {
         }
     }
 
+    /// The harness the bench runs through for `command` (Claude Code's when the command is
+    /// no harness's the bench knows).
+    pub fn bench_for(&self, command: &[String]) -> std::sync::Arc<dyn crate::bench::BenchSupport> {
+        crate::harnesses::headless::headless_of(command)
+            .and_then(|(kind, _)| self.get(kind).bench())
+            .unwrap_or_else(|| std::sync::Arc::new(self.claude_code.clone()))
+    }
+
+    /// Claude Code with other files (`bench --claude-dir`).
+    pub fn set_claude_paths(&mut self, paths: crate::harnesses::claude_code::install::ClaudePaths) {
+        self.claude_code = ClaudeCode::new(paths);
+    }
+
     /// The harness of `kind`.
     pub fn get(&self, kind: Kind) -> &dyn Harness {
         match kind {

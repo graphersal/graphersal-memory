@@ -78,6 +78,11 @@ pub trait Headless: Sync {
     fn bench_answer(&self, _output: &Output, _command: &[String]) -> Option<serde_json::Value> {
         None
     }
+    /// The command the bench runs through, as `--harness-command` takes it (`None`: the
+    /// bench does not run through it).
+    fn bench_command(&self) -> Option<&'static str> {
+        None
+    }
     /// Why the bench does not run through `command`: (headline, why); `None` when it does.
     fn bench_refusal(&self, _command: &[String]) -> Option<(&'static str, &'static str)> {
         None

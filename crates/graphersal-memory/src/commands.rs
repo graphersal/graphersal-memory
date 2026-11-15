@@ -1407,9 +1407,7 @@ pub struct BenchRequest {
 /// else the settings').
 pub fn bench_options(
     data_dir: &Path,
-    claude: ClaudePaths,
-    opencode: crate::harnesses::opencode::OpenCodePaths,
-    codex: crate::harnesses::codex::CodexPaths,
+    harnesses: crate::harnesses::Harnesses,
     exe: PathBuf,
     project: String,
     request: &BenchRequest,
@@ -1426,9 +1424,7 @@ pub fn bench_options(
         interactive: terminal && !request.yes && !request.dry_run && !request.review,
         color: terminal && crate::install::prompt::color_allowed(&|name| std::env::var(name).ok()),
         project,
-        claude,
-        opencode,
-        codex,
+        harnesses,
         data_dir: data_dir.to_path_buf(),
         exe,
         harness_command: match &request.harness_command {
@@ -1448,22 +1444,19 @@ fn run_bench(
 ) -> Result<u8, String> {
     let (data_dir, _) = dirs(cli)?;
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-    let claude = match &request.claude_dir {
-        Some(dir) => {
-            let dir = absolute(dir);
-            ClaudePaths::resolve(&|name: &str| {
-                (name == "CLAUDE_CONFIG_DIR").then(|| dir.display().to_string())
-            })?
-        }
-        None => ClaudePaths::resolve(&env)?,
-    };
+    // opencode's line from `opencode --version`, as its arms are built for it.
+    let mut harnesses = crate::harnesses::Harnesses::resolve(&env, &data_dir, true)?;
+    if let Some(dir) = &request.claude_dir {
+        let dir = absolute(dir);
+        harnesses.set_claude_paths(ClaudePaths::resolve(&|name: &str| {
+            (name == "CLAUDE_CONFIG_DIR").then(|| dir.display().to_string())
+        })?);
+    }
     let exe =
         std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
     let options = bench_options(
         &data_dir,
-        claude,
-        crate::harnesses::opencode::OpenCodePaths::resolve(&env)?,
-        crate::harnesses::codex::CodexPaths::resolve(&env)?,
+        harnesses,
         mcp::canonical(&exe),
         project(request.project.as_deref())?,
         request,
