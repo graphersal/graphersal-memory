@@ -1063,6 +1063,15 @@ pub fn questions_command(
     )?;
     let mut set = QuestionSet::load(&options.data_dir, &options.project)?
         .unwrap_or_else(|| QuestionSet::empty(&options.project));
+    // Generating needs finished sessions: say so before asking for the user's questions.
+    let mut excerpt = None;
+    if options.questions > 0 {
+        let found = excerpt_for(options);
+        if found.sessions == 0 {
+            return Err(no_transcripts(options, "bench questions"));
+        }
+        excerpt = Some(found);
+    }
     if options.interactive && ask_own_questions(options, &mut set, input, out) > 0 {
         set.save_to(&file)?;
     }
@@ -1075,9 +1084,9 @@ pub fn questions_command(
         );
         return Ok(0);
     }
-    let excerpt = excerpt_for(options);
+    let excerpt = excerpt.unwrap_or_else(|| excerpt_for(options));
     if excerpt.sessions == 0 {
-        return Err(no_transcripts(options));
+        return Err(no_transcripts(options, "bench questions"));
     }
     let free = crate::harness::costs_nothing(&options.harness_command);
     let price = if free { 0.0 } else { 1.0 };
@@ -1184,33 +1193,154 @@ pub fn questions_command(
     Ok(0)
 }
 
-fn no_transcripts(options: &Options) -> String {
-    if codex(options) {
-        return format!(
-            "no finished Codex session of {} under {} (sessions still being written are left \
-             out for 30 minutes)",
-            options.project,
-            options.codex.sessions.display()
-        );
+/// Why the bench has nothing to write questions from, where it looked, and what to run
+/// instead (`command`: `bench` or `bench questions`), ready to copy.
+fn no_transcripts(options: &Options, command: &str) -> String {
+    let (what, place) = if codex(options) {
+        ("Codex session", options.codex.sessions.clone())
+    } else if opencode(options) {
+        ("opencode session", options.opencode.db.clone())
+    } else {
+        (
+            "session transcript",
+            options
+                .claude
+                .projects
+                .join(crate::import::claude_slug(&options.project)),
+        )
+    };
+    let home = crate::store::home_dir(&|name| std::env::var(name).ok()).ok();
+    let shown = |path: &Path| {
+        let text = path.display().to_string();
+        match &home {
+            Some(home) => crate::install::tilde(&text, home),
+            None => text,
+        }
+    };
+    let flag = harness_flag(&options.harness_command);
+    let mut lines = vec![
+        format!("no finished {what} of {} yet.", options.project),
+        String::new(),
+        format!("  looked in: {}", shown(&place)),
+        String::new(),
+    ];
+    lines.extend(
+        crate::prompt::wrap(
+            "The bench writes its questions from the project's finished sessions. A session \
+             counts once it has been unchanged for 30 minutes, so the one you are in now is \
+             left out.",
+            crate::prompt::WIDTH,
+        )
+        .into_iter()
+        .map(|line| format!("  {line}")),
+    );
+    lines.push(String::new());
+    lines.push("What you can do:".to_string());
+    lines.push(String::new());
+    let others = if codex(options) || opencode(options) {
+        Vec::new()
+    } else {
+        claude_projects_with_sessions(options, SystemTime::now())
+    };
+    if let Some(first) = others.first() {
+        lines.push("  Run it in a project with finished sessions, for example:".to_string());
+        lines.push(String::new());
+        lines.push(format!(
+            "    cd {}",
+            shell_word(&first.display().to_string())
+        ));
+        lines.push(format!("    graphersal-memory {command}{flag}"));
+        lines.push(String::new());
+        if others.len() > 1 {
+            let rest: Vec<String> = others[1..].iter().map(|dir| shown(dir)).collect();
+            lines.push(format!(
+                "  Other projects with finished sessions: {}",
+                rest.join(", ")
+            ));
+            lines.push(String::new());
+        }
+    } else {
+        lines.push("  Run it in a project with finished sessions:".to_string());
+        lines.push(String::new());
+        lines.push("    cd <project>".to_string());
+        lines.push(format!("    graphersal-memory {command}{flag}"));
+        lines.push(String::new());
     }
-    if opencode(options) {
-        return format!(
-            "no finished opencode session of {} in {} (sessions still being written are left \
-             out for 30 minutes)",
-            options.project,
-            options.opencode.db.display()
-        );
+    lines.push("  Or ask only your own questions here, each with its answer:".to_string());
+    lines.push(String::new());
+    lines.push(
+        "    graphersal-memory bench questions add \"<question>\" --answer \"<answer>\""
+            .to_string(),
+    );
+    lines.push(format!("    graphersal-memory bench --questions 0{flag}"));
+    lines.join("\n")
+}
+
+/// ` --harness-command "<command>"` for a command whose words copy back unchanged, else empty
+/// (the settings' command is used then).
+fn harness_flag(command: &[String]) -> String {
+    let plain = command.iter().all(|word| {
+        !word.is_empty()
+            && !word
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '$' | '`' | '\\'))
+    });
+    if plain && !command.is_empty() {
+        format!(" --harness-command \"{}\"", command.join(" "))
+    } else {
+        String::new()
     }
-    format!(
-        "no finished session transcript of {} under {} (sessions still being written are left \
-         out for 30 minutes)",
-        options.project,
-        options
-            .claude
-            .projects
-            .join(crate::import::claude_slug(&options.project))
-            .display()
-    )
+}
+
+/// `text` as one shell word: as it is when it needs no quoting, else in double quotes.
+fn shell_word(text: &str) -> String {
+    let plain = text
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | ':' | '~'));
+    if plain {
+        text.to_string()
+    } else if cfg!(windows) {
+        format!("\"{text}\"")
+    } else {
+        let escaped: String = text
+            .chars()
+            .flat_map(|c| match c {
+                '"' | '$' | '`' | '\\' => vec!['\\', c],
+                c => vec![c],
+            })
+            .collect();
+        format!("\"{escaped}\"")
+    }
+}
+
+/// Up to three other projects (git repositories) with finished Claude Code sessions, the one
+/// with the most first.
+fn claude_projects_with_sessions(options: &Options, now: SystemTime) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(&options.claude.projects) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(usize, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|dir| dir.is_dir())
+        .filter_map(|dir| crate::import::resolve_project_dir(&dir))
+        .filter(|project| project.join(".git").exists())
+        .filter_map(|project| {
+            let text = project.display().to_string();
+            if text == options.project {
+                return None;
+            }
+            let count = questions::transcripts(&options.claude.projects, &text, now).len();
+            (count > 0).then_some((count, project))
+        })
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    found.dedup_by(|a, b| a.1 == b.1);
+    found
+        .into_iter()
+        .take(3)
+        .map(|(_, project)| project)
+        .collect()
 }
 
 /// `bench`: plans, asks, runs every arm, writes the report. Returns the exit code.
@@ -1252,10 +1382,6 @@ pub fn run(
     let file = questions::path(&options.data_dir, &options.project);
     let loaded = QuestionSet::load(&options.data_dir, &options.project)?;
     let mut set = loaded.unwrap_or_else(|| QuestionSet::empty(&options.project));
-    if options.interactive && ask_own_questions(options, &mut set, input, out) > 0 {
-        set.save_to(&file)?;
-    }
-    let (_, user_kept) = set.count(Origin::User);
     let (_, generated_kept) = set.count(Origin::Generated);
     // Generated questions: the kept ones, else a new generation of --questions; none for 0.
     let generate_count = if options.questions > 0 && generated_kept == 0 {
@@ -1263,20 +1389,30 @@ pub fn run(
     } else {
         0
     };
+    // Generating needs finished sessions: say so before asking for the user's questions.
+    let mut found = None;
+    if generate_count > 0 {
+        let excerpt = excerpt_for(options);
+        if excerpt.sessions == 0 {
+            return Err(no_transcripts(options, "bench"));
+        }
+        found = Some(excerpt);
+    }
+    if options.interactive && ask_own_questions(options, &mut set, input, out) > 0 {
+        set.save_to(&file)?;
+    }
+    let (_, user_kept) = set.count(Origin::User);
     let asked_generated = match options.questions {
         0 => 0,
         _ if generate_count > 0 => generate_count,
         n => generated_kept.min(n),
     };
     let pending = set.pending();
-    let excerpt = if generate_count > 0 || !pending.is_empty() {
-        excerpt_for(options)
-    } else {
-        Excerpt::default()
+    let excerpt = match found {
+        Some(excerpt) => excerpt,
+        None if !pending.is_empty() => excerpt_for(options),
+        None => Excerpt::default(),
     };
-    if generate_count > 0 && excerpt.sessions == 0 {
-        return Err(no_transcripts(options));
-    }
     // Without transcripts a pending reference cannot be looked up: asked, not judged.
     let can_look_up = excerpt.sessions > 0 && !pending.is_empty();
     let count = user_kept + asked_generated;
