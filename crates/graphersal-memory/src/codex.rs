@@ -236,6 +236,33 @@ impl Harness for Codex {
         !install::inspect(setup).nothing_installed()
     }
 
+    fn removal(
+        &self,
+        setup: &crate::install::Setup,
+        state: &crate::install::State,
+        develop_only: bool,
+        conflicts: &mut Vec<String>,
+    ) -> Result<Vec<(crate::install::Change, &'static str)>, String> {
+        install::removal(setup, state, develop_only, conflicts)
+    }
+
+    fn own_memory_restored(
+        &self,
+        _setup: &crate::install::Setup,
+        state: &crate::install::State,
+    ) -> Option<(PathBuf, String)> {
+        let config = &self.paths.config_file;
+        state
+            .file(config)
+            .is_some_and(|entry| entry.contains_key(install::MEMORIES_RECORD))
+            .then(|| {
+                (
+                    config.clone(),
+                    "Codex's memories: switched on again, as before install".to_string(),
+                )
+            })
+    }
+
     /// With the record of the memories switch, which goes with the write of `config.toml`.
     fn plan(
         &self,

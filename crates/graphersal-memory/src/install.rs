@@ -1122,6 +1122,33 @@ impl HarnessPlan {
     }
 }
 
+/// When install switched Claude Code's auto-memory off (its state records it): the settings
+/// file uninstall switches it back in, and the report line (back to how it was while it is
+/// still off; a value the user set since install stays).
+pub(crate) fn claude_own_memory_restored(
+    setup: &Setup,
+    state: &State,
+) -> Option<(PathBuf, String)> {
+    let settings = setup.paths.settings.clone();
+    if !state
+        .file(&settings)
+        .is_some_and(|entry| entry.contains_key(AUTO_MEMORY_RECORD))
+    {
+        return None;
+    }
+    let off_now = setup
+        .agent()
+        .auto_memory_key()
+        .is_some_and(|key| read_json(&settings, &mut Vec::new())[key] == Value::Bool(false));
+    let name = Kind::ClaudeCode.display_name();
+    let line = if off_now {
+        format!("{name}'s auto-memory: back to how it was before install")
+    } else {
+        format!("{name}'s auto-memory: kept as you set it after install")
+    };
+    Some((settings, line))
+}
+
 /// Claude Code's part of an install: the MCP entries, the hooks and the auto-memory switch in
 /// the settings, the rule block.
 pub(crate) fn claude_plan(setup: &Setup, input: &PlanInput<'_>) -> Result<HarnessPlan, String> {
@@ -4793,82 +4820,38 @@ pub fn uninstall_with(
     } else {
         None
     };
-    let state = State::load(setup)?;
-    let opencode_state = State::load_of(setup, Kind::OpenCode)?;
-    let codex_state = State::load_of(setup, Kind::Codex)?;
-    let cursor_state = State::load_of(setup, Kind::Cursor)?;
-    let codewhale_state = State::load_of(setup, Kind::CodeWhale)?;
+    // Each harness's state, in wizard order.
+    let mut states: Vec<(Kind, State)> = Vec::new();
+    for kind in Kind::ALL {
+        states.push((kind, State::load_of(setup, kind)?));
+    }
     let mut conflicts = Vec::new();
     let mut changes: Vec<(Kind, Change, &'static str)> = Vec::new();
-    if kinds.contains(&Kind::ClaudeCode) {
-        for (change, what) in claude_removal(setup, options, &state, &mut conflicts)
+    for (kind, kind_state) in &states {
+        if !kinds.contains(kind) {
+            continue;
+        }
+        for (change, what) in setup
+            .agent_of(*kind)
+            .removal(
+                setup,
+                kind_state,
+                options.disable_develop_only,
+                &mut conflicts,
+            )
             .map_err(|err| way_out(&err, &kinds, "uninstall", "uninstall from"))?
         {
-            changes.push((Kind::ClaudeCode, change, what));
-        }
-    }
-    if kinds.contains(&Kind::OpenCode) {
-        for (change, what) in crate::opencode::install::removal(
-            setup,
-            &opencode_state,
-            options.disable_develop_only,
-            &mut conflicts,
-        )
-        .map_err(|err| way_out(&err, &kinds, "uninstall", "uninstall from"))?
-        {
-            changes.push((Kind::OpenCode, change, what));
-        }
-    }
-    if kinds.contains(&Kind::Codex) {
-        for (change, what) in crate::codex::install::removal(
-            setup,
-            &codex_state,
-            options.disable_develop_only,
-            &mut conflicts,
-        )
-        .map_err(|err| way_out(&err, &kinds, "uninstall", "uninstall from"))?
-        {
-            changes.push((Kind::Codex, change, what));
-        }
-    }
-    if kinds.contains(&Kind::Cursor) {
-        for (change, what) in crate::cursor::install::removal(
-            setup,
-            &cursor_state,
-            options.disable_develop_only,
-            &mut conflicts,
-        )
-        .map_err(|err| way_out(&err, &kinds, "uninstall", "uninstall from"))?
-        {
-            changes.push((Kind::Cursor, change, what));
-        }
-    }
-    if kinds.contains(&Kind::CodeWhale) {
-        for (change, what) in crate::codewhale::install::removal(
-            setup,
-            &codewhale_state,
-            options.disable_develop_only,
-            &mut conflicts,
-        )
-        .map_err(|err| way_out(&err, &kinds, "uninstall", "uninstall from"))?
-        {
-            changes.push((Kind::CodeWhale, change, what));
+            changes.push((*kind, change, what));
         }
     }
     // Other memory tools' entries install switched off go back on (M15).
     let mut restored: Vec<(Kind, String)> = Vec::new();
     if !options.disable_develop_only {
-        for (kind, kind_state) in [
-            (Kind::ClaudeCode, &state),
-            (Kind::OpenCode, &opencode_state),
-            (Kind::Codex, &codex_state),
-            (Kind::Cursor, &cursor_state),
-            (Kind::CodeWhale, &codewhale_state),
-        ] {
-            if !kinds.contains(&kind) {
+        for (kind, kind_state) in &states {
+            if !kinds.contains(kind) {
                 continue;
             }
-            restore_others(kind, kind_state, &mut changes, &mut restored)
+            restore_others(*kind, kind_state, &mut changes, &mut restored)
                 .map_err(|err| way_out(&err, &kinds, "uninstall", "uninstall from"))?;
         }
     }
@@ -5075,75 +5058,22 @@ pub fn uninstall_with(
     } else if exporting {
         report.push("not exported (you answered no)".to_string());
     }
-    if !options.disable_develop_only
-        && kinds.contains(&Kind::ClaudeCode)
-        && state
-            .file(&setup.paths.settings)
-            .is_some_and(|entry| entry.contains_key(AUTO_MEMORY_RECORD))
-        && changes
-            .iter()
-            .any(|(_, change, _)| change.path == setup.paths.settings)
-    {
-        // Back only when it is still off; a value the user set since install stays.
-        let off_now = setup.agent().auto_memory_key().is_some_and(|key| {
-            read_json(&setup.paths.settings, &mut Vec::new())[key] == Value::Bool(false)
-        });
-        push_for(
-            Kind::ClaudeCode,
-            if off_now {
-                format!(
-                    "{}'s auto-memory: back to how it was before install",
-                    setup.agent().display_name()
-                )
-            } else {
-                format!(
-                    "{}'s auto-memory: kept as you set it after install",
-                    setup.agent().display_name()
-                )
-            },
-            &mut report,
-        );
-    }
-    if !options.disable_develop_only
-        && kinds.contains(&Kind::Codex)
-        && codex_state
-            .file(&setup.codex.config_file)
-            .is_some_and(|entry| entry.contains_key(crate::codex::install::MEMORIES_RECORD))
-        && changes
-            .iter()
-            .any(|(_, change, _)| change.path == setup.codex.config_file)
-    {
-        push_for(
-            Kind::Codex,
-            "Codex's memories: switched on again, as before install".to_string(),
-            &mut report,
-        );
-    }
-    if !options.disable_develop_only
-        && kinds.contains(&Kind::CodeWhale)
-        && codewhale_state
-            .file(&setup.codewhale.config_file)
-            .is_some_and(|entry| entry.contains_key(crate::codewhale::install::MEMORY_RECORD))
-        && changes
-            .iter()
-            .any(|(_, change, _)| change.path == setup.codewhale.config_file)
-    {
-        push_for(
-            Kind::CodeWhale,
-            "CodeWhale's memory: switched on again, as before install".to_string(),
-            &mut report,
-        );
+    // A harness's own memory install switched off: back on with the write of its file.
+    if !options.disable_develop_only {
+        for (kind, kind_state) in &states {
+            if !kinds.contains(kind) {
+                continue;
+            }
+            if let Some((file, line)) = setup.agent_of(*kind).own_memory_restored(setup, kind_state)
+                && changes.iter().any(|(_, change, _)| change.path == file)
+            {
+                push_for(*kind, line, &mut report);
+            }
+        }
     }
     for (kind, line) in &restored {
         push_for(*kind, line.clone(), &mut report);
     }
-    let mut states = [
-        (Kind::ClaudeCode, state),
-        (Kind::OpenCode, opencode_state),
-        (Kind::Codex, codex_state),
-        (Kind::Cursor, cursor_state),
-        (Kind::CodeWhale, codewhale_state),
-    ];
     for (kind, change, _) in &changes {
         match &change.after {
             Some(text) => {
@@ -5328,14 +5258,14 @@ fn restore_others(
 }
 
 /// The removal of our parts from Claude Code's files: one `(change, what)` per file.
-fn claude_removal(
+pub(crate) fn claude_removal(
     setup: &Setup,
-    options: &UninstallOptions,
+    develop_only: bool,
     state: &State,
     conflicts: &mut Vec<String>,
 ) -> Result<Vec<(Change, &'static str)>, String> {
     let mut changes = Vec::new();
-    let targets: Vec<&Path> = if options.disable_develop_only {
+    let targets: Vec<&Path> = if develop_only {
         vec![&setup.paths.user_config]
     } else {
         vec![
@@ -5360,7 +5290,7 @@ fn claude_removal(
         });
         // A backup that holds our parts (an install that ran twice at once) is never put back.
         let untouched = untouched && !crate::install::backup_holds_ours(entry);
-        if untouched && !options.disable_develop_only {
+        if untouched && !develop_only {
             let existed = entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(true)));
             let after = if existed {
                 let backup = entry
@@ -5393,15 +5323,8 @@ fn claude_removal(
         }
         let text = String::from_utf8(bytes.clone())
             .map_err(|_| format!("{} is not UTF-8 text", path.display()))?;
-        if let Some(new) = remove_ours(
-            setup,
-            path,
-            &text,
-            entry,
-            options.disable_develop_only,
-            conflicts,
-        )
-        .map_err(|e| in_file(path, e))?
+        if let Some(new) = remove_ours(setup, path, &text, entry, develop_only, conflicts)
+            .map_err(|e| in_file(path, e))?
         {
             let created_by_us =
                 entry.is_some_and(|e| e.get("existed") == Some(&Value::Bool(false)));
@@ -5413,7 +5336,7 @@ fn claude_removal(
                     created: Vec::new(),
                     separator: None,
                 },
-                if options.disable_develop_only {
+                if develop_only {
                     "remove the develop server"
                 } else if delete {
                     "remove our parts and delete the file (install created it, nothing else is in it)"

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::install::{ClaudePaths, HarnessPlan, PlanInput, Setup};
+use crate::install::{Change, ClaudePaths, HarnessPlan, PlanInput, Setup, State};
 
 /// The harnesses graphersal-memory supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -94,6 +94,20 @@ pub trait Harness {
     /// Its part of an install: steps, file changes, conflicts and the records that go with
     /// them.
     fn plan(&self, setup: &Setup, input: &PlanInput<'_>) -> Result<HarnessPlan, String>;
+    /// What uninstall changes in its files (`develop_only`: only the develop server goes),
+    /// each change with what it is; parts it leaves are added to `conflicts`.
+    fn removal(
+        &self,
+        setup: &Setup,
+        state: &State,
+        develop_only: bool,
+        conflicts: &mut Vec<String>,
+    ) -> Result<Vec<(Change, &'static str)>, String>;
+    /// When install switched the harness's own memory off (its state records it): the file
+    /// uninstall switches it back on in, and the report line.
+    fn own_memory_restored(&self, _setup: &Setup, _state: &State) -> Option<(PathBuf, String)> {
+        None
+    }
     /// The harness id of the command line (`claude-code`, `opencode`, `codex`).
     fn id(&self) -> &'static str {
         self.kind().id()
@@ -218,6 +232,20 @@ impl Harness for ClaudeCode {
 
     fn plan(&self, setup: &Setup, input: &PlanInput<'_>) -> Result<HarnessPlan, String> {
         crate::install::claude_plan(setup, input)
+    }
+
+    fn removal(
+        &self,
+        setup: &Setup,
+        state: &State,
+        develop_only: bool,
+        conflicts: &mut Vec<String>,
+    ) -> Result<Vec<(Change, &'static str)>, String> {
+        crate::install::claude_removal(setup, develop_only, state, conflicts)
+    }
+
+    fn own_memory_restored(&self, setup: &Setup, state: &State) -> Option<(PathBuf, String)> {
+        crate::install::claude_own_memory_restored(setup, state)
     }
 
     fn mcp_config_file(&self) -> &Path {

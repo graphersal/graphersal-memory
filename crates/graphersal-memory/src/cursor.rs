@@ -219,6 +219,16 @@ impl Harness for Cursor {
         !install::inspect(setup).nothing_installed()
     }
 
+    fn removal(
+        &self,
+        setup: &crate::install::Setup,
+        state: &crate::install::State,
+        develop_only: bool,
+        conflicts: &mut Vec<String>,
+    ) -> Result<Vec<(crate::install::Change, &'static str)>, String> {
+        install::removal(setup, state, develop_only, conflicts)
+    }
+
     fn plan(
         &self,
         setup: &crate::install::Setup,
