@@ -4,6 +4,8 @@
 > CodeWhale (Cursor without summaries and `bench`, and checked against its documentation and
 > fixtures only: a live check is pending; CodeWhale, new in 0.2.0, is a **preview**: built from its
 > source (v0.10.2), tested against fixtures and run live once on macOS, details in its section).
+> DeepSeek Harness (`dsh`, new after 0.2.1) is a **preview** too: built from its source (dsh-v0.2.2-rc.3) and
+> tested against fixtures, not run live yet, without summaries and `bench`.
 > Any of them can be installed at once and share one store and one daemon.
 
 Every harness below supports MCP, so the memory tools work the same way everywhere. What differs is
@@ -17,6 +19,7 @@ transcripts, and whether it has hooks.
 | OpenAI Codex CLI | install, rule block, hooks, past sessions, opt-in summaries, bench with a local model | one managed block of `[mcp_servers.*]` tables in `~/.codex/config.toml` (`$CODEX_HOME`), edited as text with a backup | a marked block in `~/.codex/AGENTS.md` (or `AGENTS.override.md` when that is the one Codex loads) | its rollout files (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`), read-only | SessionStart / SessionEnd in `~/.codex/hooks.json` (run once you trust them in `/hooks`) |
 | Cursor | install, rule file, hooks, past sessions the hooks report (no summaries or bench through Cursor; not yet checked with a live Cursor) | a member of `mcpServers` in `~/.cursor/mcp.json`, edited in place with a backup | a rule file of our own, `~/.cursor/rules/graphersal-memory.mdc` (`alwaysApply: true`) | the transcripts its hooks name (`transcript_path`), read-only | sessionStart / sessionEnd in `~/.cursor/hooks.json` |
 | CodeWhale (preview) | install, rule block, past sessions, the import of its own memory, opt-in summaries (no bench through CodeWhale yet; run live once, on macOS) | members of `servers` (or `mcpServers`) in `~/.codewhale/mcp.json`, edited in place with a backup; our tools in `[tools] always_load` of `~/.codewhale/config.toml` | a marked block in `~/.codewhale/AGENTS.md` (or the global file CodeWhale loads) | its saved sessions (`~/.codewhale/sessions/<id>.json`), read-only | none: the MCP connection marks the start and end |
+| DeepSeek Harness (`dsh`; preview) | install, rule block, past sessions, other memory reported (no summaries or bench through dsh; not yet run live) | one managed block in `~/.dsh/cordis.patch.yml` (`$DSH_HOME`), the home layer every profile reads, edited as text with a backup | a marked block in `~/.dsh/AGENTS.md` | its session files (`~/.dsh/sessions/<project>/<session>/session.v4.jsonl.zstd`), read-only | none: the MCP connection marks the start and end |
 
 The rule block tells the agent how to use the memory tools, what is worth saving (what later
 sessions and similar tasks need, not the current task's plan or progress) and which memory
@@ -50,6 +53,7 @@ gets to the model, per harness (documentation checked on 2026-11-11):
 | opencode 1.x and 2.x | the MCP server's `instructions`; the plugin still shows only the short start line as a toast | Both lines put every server's instructions into the system prompt (`<mcp_instructions>`: 1.x [`session/system.ts`](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/session/system.ts), 2.x [`mcp/instructions.ts`](https://github.com/anomalyco/opencode/blob/dev/packages/core/src/mcp/instructions.ts)). A plugin could add context too (2.x `instructions.entry`), which would send it twice. |
 | Codex | the MCP server's `instructions`; the SessionStart hook keeps printing the short start line | Codex gives a server's instructions to the model as the description of its tool namespace ([`codex-mcp/src/rmcp_client.rs`](https://github.com/openai/codex/blob/main/codex-rs/codex-mcp/src/rmcp_client.rs)); hooks run only after the user trusted them, so the instructions are the channel that always works. Its hook output would reach the model as well ("Plain text on `stdout` is added as extra developer context", [hooks](https://learn.chatgpt.com/docs/hooks)), so the hook does not repeat it. |
 | Cursor | the sessionStart hook's `additional_context`, and the MCP server's `instructions` | `additional_context` is documented as "Additional context to add to the conversation's initial system context" ([hooks](https://cursor.com/docs/hooks)); whether Cursor gives MCP instructions to the model is not documented. Both carry it until a live check shows whether Cursor reads the instructions (then the text reaches the model twice; see [cursor-live-check.md](cursor-live-check.md)). |
+| DeepSeek Harness (`dsh`) | the MCP server's `instructions`, cut to 4,096 characters (as Claude Code's without the hook) | dsh puts every server's instructions into the system prompt, but rejects the whole server (it does not cut) when they are longer than `maxInstructionBytes` (32,768 bytes by default; `packages/mcp/mcp-client/src/connection.ts`). Our row's `env` names the harness, so the server keeps the instructions far below that (a test proves the bound for any characters). |
 
 **Claude Code without the hook needs v2.1.296 or newer** for the start context to arrive through
 the instructions: graphersal-memory fits them to 4,096 characters, the limit since v2.1.296; older
@@ -78,10 +82,10 @@ and `doctor` show what is there; nothing of yours is changed unless you choose i
 
 | What | Where | How |
 |---|---|---|
-| Built-in memory | Claude Code `autoMemoryEnabled` and its memory files; Codex `[features] memories` and `$CODEX_HOME/memories_v2/`; Cursor's Memories | on/off and how many files; Cursor keeps its Memories itself (not readable from files: its Settings, "Rules & Memories", shows them); opencode has none |
-| Other memory tools | the MCP entries of `~/.claude.json` (user scope and each project's local scope) and a project's `.mcp.json`, opencode's `mcp` / `mcp.servers`, Codex's `[mcp_servers.*]`, Cursor's `~/.cursor/mcp.json` and a project's `.cursor/mcp.json` | a known tool's name in the entry's name, command, arguments or URL; or a name that says memory; or tool names that look like memory tools (`remember`, `recall`, `add_memory`, `search_memory`, `create_entities`, ...) where the configuration shows them: the entry's own allow lists, Claude Code's permission rules `mcp__<server>__<tool>` |
+| Built-in memory | Claude Code `autoMemoryEnabled` and its memory files; Codex `[features] memories` and `$CODEX_HOME/memories_v2/`; Cursor's Memories | on/off and how many files; Cursor keeps its Memories itself (not readable from files: its Settings, "Rules & Memories", shows them); opencode and DeepSeek Harness have none |
+| Other memory tools | the MCP entries of `~/.claude.json` (user scope and each project's local scope) and a project's `.mcp.json`, opencode's `mcp` / `mcp.servers`, Codex's `[mcp_servers.*]`, Cursor's `~/.cursor/mcp.json` and a project's `.cursor/mcp.json`, DeepSeek Harness's MCP client rows and `mcp-manager` servers in its home layer and each profile layer (`~/.dsh/profiles/*/cordis.patch.yml`) | a known tool's name in the entry's name, command, arguments or URL; or a name that says memory; or tool names that look like memory tools (`remember`, `recall`, `add_memory`, `search_memory`, `create_entities`, ...) where the configuration shows them: the entry's own allow lists, Claude Code's permission rules `mcp__<server>__<tool>` |
 | Memory plugins | Claude Code `enabledPlugins` and `plugins/installed_plugins.json`, Claude Code hooks, opencode's `plugin` list and plugin files | a known tool's name |
-| Instruction files | `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md` and rules, `AGENTS.md` / `AGENTS.override.md`, opencode's `instructions`, Cursor rules (`*.mdc`, `.cursorrules`), user scope and the current project's | names only, so it works in any language: a paragraph or list item (wrapped lines belong to it) naming `MEMORY.md`, a known memory tool, another memory server found on the machine, or a memory tool name such as `create_entities`; a paragraph naming graphersal-memory is not counted. Whether the line really sends memory elsewhere is judged by the agent: the rule block tells it to point such an instruction out to you. opencode also loads `CLAUDE.md` (yours and the project's) when it has no `AGENTS.md` of its own; Codex loads a project file named in `project_doc_fallback_filenames` |
+| Instruction files | `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md` and rules, `AGENTS.md` / `AGENTS.override.md`, opencode's `instructions`, Cursor rules (`*.mdc`, `.cursorrules`), DeepSeek Harness's `~/.dsh/AGENTS.md` and `~/.agents/AGENTS.md`, user scope and the current project's | names only, so it works in any language: a paragraph or list item (wrapped lines belong to it) naming `MEMORY.md`, a known memory tool, another memory server found on the machine, or a memory tool name such as `create_entities`; a paragraph naming graphersal-memory is not counted. Whether the line really sends memory elsewhere is judged by the agent: the rule block tells it to point such an instruction out to you. opencode also loads `CLAUDE.md` (yours and the project's) when it has no `AGENTS.md` of its own; Codex loads a project file named in `project_doc_fallback_filenames` |
 | External writers | each imported memory directory | a generated-file header in its `MEMORY.md` ("generated by", "do not edit", "exported from", ...), or imported files changed while no Claude Code session of that project ran (their modification time outside every transcript's time span, after the oldest transcript) |
 
 **Your choice per other memory tool** (wizard step "Other memory"; flags for scripts, each taking
@@ -96,7 +100,8 @@ the server's name and repeatable):
    read-only or changing file, a symbolic link stays a link). Claude Code and Cursor have no
    switched-off state for a user-scope entry, so it is removed and kept in the install state;
    opencode gets `"enabled": false` (1.x) or `"disabled": true` (2.x); Codex gets
-   `enabled = false`. `uninstall` switches it on again: a file nobody changed since gets its
+   `enabled = false`. DeepSeek Harness's servers are not switched off by install: `doctor` and
+   the plan say how to do it by hand (see its section). `uninstall` switches it on again: a file nobody changed since gets its
    original bytes back; in a file the harness rewrote since, the entry is put back (or its
    switch back to what it was). An entry you put back or switched on yourself meanwhile is left
    as it is. `install --enable-other NAME` switches it on again without uninstalling.
@@ -788,6 +793,143 @@ CodeWhale home, and a run in a home of its own would need a copy of your provide
 With summaries through CodeWhale, run the bench through another harness:
 `graphersal-memory bench --harness-command "claude -p"`.
 
+## DeepSeek Harness (`dsh`; preview)
+
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) is DeepSeek's own
+agent harness (TypeScript on Cordis; a CLI with the profiles `acp`, `web`, `headless`, `sdk`,
+`sdk-minimal`, and a Desktop app). It is not CodeWhale (formerly "DeepSeek TUI"), which has its
+own section: CodeWhale's `~/.deepseek` directory and `DEEPSEEK_*` variables are never read for
+dsh. Built against the source of tag **dsh-v0.2.2-rc.3** (commit 38a6a5c, 2026-11-13); each fact
+below names the file it comes from in the module docs (`crates/graphersal-memory/src/harnesses/dsh.rs`).
+dsh is a developer preview that announces breaking changes (its README), and its row ids change
+between versions; a later version may differ.
+
+**Not run live yet.** Everything below is tested against files in dsh's formats on temporary
+homes; no test or person has run graphersal-memory with a real dsh.
+[dsh-live-check.md](dsh-live-check.md) is the checklist that ends the preview.
+
+### Where dsh keeps things
+
+- **Home**: `$DSH_HOME` when set (empty counts as unset; a leading `~` is expanded), else
+  `~/.dsh`, the same on every OS (no XDG; `packages/util/home-paths/src/index.ts`). A relative
+  `DSH_HOME` is not followed by install (dsh would resolve it against its working directory).
+  The second instruction root `$DSH_AGENTS_HOME` (else `~/.agents`) is read, never written.
+- **Configuration layers** (later wins): the bundle's layers, each profile's
+  `~/.dsh/profiles/<name>/cordis.patch.yml` (dsh's Settings rewrite it), the **home layer**
+  `~/.dsh/cordis.patch.yml`, then `--patch` overlays. Every profile, Desktop's included, applies
+  the home layer, and nothing in dsh writes it (`packages/boot/app-boot/src/profile-context.ts`,
+  `apps/cli/src/profile-boot.ts`). `profiles/<name>/cordis.yml` is rewritten at every start.
+  So install writes the home layer only, never a profile layer or `cordis.yml`.
+- **Patch files**: a top-level YAML list of patch operations (js-yaml 4, the JSON schema plus
+  the `!!js` tag; duplicate keys and unknown tags are errors). A new row must sit inside
+  `- insert: [...]`: a bare `- id: x` only overrides an existing row and is skipped with a
+  warning when there is none. A row is switched off by `disabled: true` beside its `id`. A
+  missing file is no layer; **an empty or comments-only file stops every dsh start**; dsh's own
+  empty template is a `[]` under a comment header (`vendor/include/src/patch.ts`,
+  `vendor/loader/src/config/entry.ts`, `packages/boot/app-boot/src/index.ts`).
+- **MCP servers**: one `@deepseek-ai/dsh-mcp-client` row per server (shipped with the CLI;
+  `packages/mcp/mcp-client/src/index.ts`). There is no `dsh mcp add`. The model sees a tool as
+  `mcp__<serverName>__<tool>`, every tool loaded up front, so ours are
+  `mcp__graphersal-memory__memories` and so on. Without `startupTimeoutMs` dsh's start waits for
+  a server forever, so our rows set 60 seconds (the first connection may start the daemon). dsh
+  starts the server with its own environment minus every `DSH_*` variable and every name with
+  `KEY`, `PASSWORD`, `SECRET` or `TOKEN`, then adds the row's `env`
+  (`packages/subprocess/subprocess/src/index.ts`, `packages/mcp/mcp-client/src/transport.ts`).
+  A second server of the same name is refused ("already in use"), also against a server of the
+  web and Desktop profiles' MCP manager (the `mcp-manager` row): `doctor` names one.
+- **The start context**: the server's instructions go into the system prompt; above
+  `maxInstructionBytes` (32,768 bytes by default, the attribution line included) the server is
+  rejected, not cut (`packages/mcp/mcp-client/src/connection.ts`). Our row's `env` sets
+  `GRAPHERSAL_MEMORY_HARNESS=dsh`, so our server gives the short start context (at most 4,096
+  characters of instructions, as for Claude Code without its hook), far below the limit
+  whatever the characters; a test proves the bound and a round trip fills the budget.
+- **Rules**: the first request carries `~/.dsh/AGENTS.md`, then `~/.agents/AGENTS.md`, then the
+  project's `AGENTS.md`/`CLAUDE.md` chain, 64 KiB per chain
+  (`packages/context/agent-instructions/README.md`). The rule block goes into
+  `~/.dsh/AGENTS.md`. The `sdk-minimal` profile loads no instruction files, so there only the
+  MCP server's instructions reach the model; `doctor` notes it when that profile exists.
+- **Session start and end**: dsh's hook bridges are experimental packages no bundle loads (no
+  session end, an empty `transcript_path`), so install adds no hooks and `hook --harness dsh`
+  does nothing. dsh keeps one MCP server process for its whole run, so the connection does the
+  hooks' work: at its start the indexing of finished sessions is queued; when it closes, the
+  daemon indexes that project's dsh sessions written meanwhile as ended. Other sessions are
+  indexed once unchanged for 30 minutes. dsh's README says it starts a short probe of a stdio
+  server before the server itself; that probe opens and closes a connection at dsh's start,
+  before any session is written (not seen live yet).
+- **Project scoping (a known limit)**: dsh gives the server no MCP roots and starts it in dsh's
+  own working directory, and one server process serves every session of that dsh process
+  (`connection.ts`, `transport.ts`). In `headless`, and in any profile started from the
+  project's directory, the project is right. In `web`, Desktop and `acp`, where one dsh serves
+  several workspaces, every session's memories and session start go to the project of the
+  directory dsh was started in (for Desktop, wherever the app was launched). Start `dsh web`
+  from the project you work in, or use `headless`, until this is solved.
+- **Sessions**: `~/.dsh/sessions/<project key>/<session>/session.v4.jsonl.zstd` (the
+  `sdk-minimal` profile writes `session.v4.jsonl` uncompressed, in the same place;
+  `packages/session/session-persistence-jsonl/src/format.ts`). The `.zstd` file is a chain of
+  zstd frames whose last one can be cut by a crash or a write in progress: it is read frame by
+  frame, and a cut frame ends the read. The project key in the directory name is lossy, so the
+  project is the header's `cwd`. The reader takes your prompts (messages dsh injects are not
+  yours and are left out), the assistant's text, tool names and the memories our tools wrote;
+  sub-agent sessions and sessions without a working directory (`_no-cwd/`) give no turns. Older
+  generations beside the v4 file (`session.jsonl`, `session.v1..v3.jsonl[.zstd]`) are not read,
+  and a file of an unknown version is logged and indexed as empty (not failed) until it
+  changes. Sessions are indexed as `session:dsh-<uuid>`.
+- **Memory**: dsh has none of its own (its "memory" rows are in-memory SQLite indexes).
+- **Other memory**: other memory tools' servers in the home layer and every profile layer
+  (inserted MCP client rows by their `serverName`, and the MCP manager's servers) are detected
+  and can be named read-only in the rule block, but install never switches one off: our block
+  is rewritten whole on every install, and a server in a profile layer belongs to dsh's
+  Settings. `doctor` (and the plan, when you ask to switch one off) says how to do it by hand (an override `- id: <its
+  id>` with `disabled: true` in the home layer, outside our block; the row itself when it has no
+  `id`; dsh's Settings for an MCP manager server). Desktop's own profile layer lives in a
+  directory the Electron app manages, which was not traced, so its servers are not seen.
+- **Program**: the npm package `@deepseek-ai/dsh` installed globally (`npm install -g
+  @deepseek-ai/dsh`; on Windows npm's `dsh.cmd`, also looked for in `%APPDATA%\npm`), or the
+  Desktop app's link (`/usr/local/bin/dsh` on macOS, a `dsh.cmd` directory on the Windows user
+  `PATH`). `npx @deepseek-ai/dsh` leaves no program behind: such a configuration is a leftover,
+  shown by `status` and never offered, and `doctor` says how to install dsh globally. Debian's
+  and Ubuntu's `dsh` package (a distributed shell) has the same name: a found `dsh` counts only
+  when its real path or its script text names DeepSeek's package (it is never run to find out),
+  and `doctor` names a `dsh` it rejected.
+- **Privacy**: dsh's session log upload is on by default and sends memories our tools return to
+  DeepSeek with official API requests; see [privacy.md](privacy.md#deepseek-harness-dsh).
+
+### What `install` writes
+
+| File | What | How it is recognised |
+|---|---|---|
+| `~/.dsh/cordis.patch.yml` (the home layer) | one managed block holding one `- insert:` item with two rows: `graphersal-memory` (`name: "@deepseek-ai/dsh-mcp-client"`, `config: {serverName, transport: stdio, command: <this binary>, args: [mcp, --profile, use], env: {GRAPHERSAL_MEMORY_HARNESS: dsh}, startupTimeoutMs: 60000}`) and `graphersal-memory-develop` with `disabled: true` (`--enable-develop` switches it on); with `$DSH_HOME` set, both rows' `env` also carry `DSH_HOME` with its absolute path (dsh drops `DSH_*` from the server's environment, and our server needs it to find the sessions) | the marker comment lines with the block's fingerprint; a hand edit inside, or a row of another program named like ours, is a conflict |
+| `~/.dsh/AGENTS.md` | the managed rule block, after your own text | the marker lines; a hand edit inside is a conflict |
+
+The block is appended to your list of patch operations, as text: every other byte of the file
+stays, and every edit is parsed again and must add exactly our item. A missing file is created
+(uninstall deletes it again); dsh's empty template `[]` is replaced by the block, and uninstall
+puts the `[]` back, so the file never ends up empty or comments-only (which would stop dsh). A
+file dsh itself could not start with (a syntax error, a duplicate key, an unknown tag, a top
+level that is not a list) is refused, naming the file, with nothing written; so is a top level
+written as a non-empty flow list (`[...]`): write it as `- ...` lines first. Backups, the state
+(`<data dir>/install/dsh.json`) and the byte-identical `uninstall` of an untouched file work as
+for Claude Code; in a file changed since, uninstall removes only our block.
+
+A `DSH_HOME` set or changed after install points dsh at a home without our rows: run
+`graphersal-memory install --harness dsh` again with that `DSH_HOME`.
+
+### `uninstall` and the export
+
+dsh has no file memory. Uninstall exports every memory as readable Markdown under
+`~/graphersal-memory-export/dsh/` (per project `MEMORY.md` and one file per memory,
+`global.md`). It is not loaded automatically; paste what you need into `~/.dsh/AGENTS.md` or a
+project's `AGENTS.md`. `graphersal-memory export --to-files --harness dsh` writes it again.
+
+### Summaries and `bench`: not through dsh
+
+`dsh --profile headless --json -` cannot run without tools (there is no flag, and the tool rows
+change from version to version), reports no cost, so the monthly budget could not be kept, and
+saves every run as a session. So a summaries harness command or a `bench --harness-command`
+naming `dsh` is refused with that reason. With dsh alone, summaries stay off; with another
+harness installed, they and the bench run through it (`summaries.harness_command` in
+`config.json`). This is revisited when dsh gains a way to run without tools.
+
 ## Windows
 
 Windows 10 version 1803 or later, x86_64. CI runs the whole test suite on Windows, including the
@@ -802,6 +944,7 @@ variable set by Git Bash or Cygwin is used only when `USERPROFILE` is missing.
 | opencode 1.x and 2.x | `%USERPROFILE%\.config\opencode\` and `%USERPROFILE%\.local\share\opencode\opencode.db` (the XDG layout, also on Windows; `XDG_CONFIG_HOME`/`XDG_DATA_HOME` move them) | the plugin starts the binary directly (no shell), without a console window | [1.x `global.ts`](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/core/src/global.ts), [2.x `global-roots.ts`](https://github.com/anomalyco/opencode/blob/v2.2.4/packages/util/src/global-roots.ts) |
 | Codex | `%USERPROFILE%\.codex\` (or `%CODEX_HOME%`, which Codex canonicalizes; so does install, so the hook trust keys Codex records match) | `cmd.exe /C` (`%ComSpec%`) | [`utils/home-dir`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/utils/home-dir/src/lib.rs), [`hooks/src/engine/command_runner.rs`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/hooks/src/engine/command_runner.rs) |
 | Cursor | `%USERPROFILE%\.cursor\` | PowerShell, so install writes a command PowerShell runs (see below) | [hooks](https://cursor.com/docs/hooks) ("On Windows, the desktop app runs hook commands through PowerShell") |
+| DeepSeek Harness (`dsh`) | `%USERPROFILE%\.dsh\` (or `%DSH_HOME%`); the program is npm's `dsh.cmd` (also looked for in `%APPDATA%\npm`) or the Desktop app's | no hooks | [`home-paths`](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.3/packages/util/home-paths/src/index.ts), [`command-manager-entry.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.3/apps/desktop/src/command-manager-entry.ts) |
 
 - **Hook commands.** A command whose program is a quoted path (`"C:\...\graphersal-memory.exe"
   hook ...`) runs in Git Bash and `cmd.exe`, but not in PowerShell, which reads a quoted string

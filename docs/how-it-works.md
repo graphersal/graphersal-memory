@@ -256,7 +256,8 @@ anything changes.
   answers to its questions, the assistant's text replies until the next prompt, the names of the
   tools it used). Tool inputs and results are not kept, except the names of the memories the
   session wrote through the memory tools: each call of `remember`, `pin`, `settle` or `forget`
-  (in every harness's transcript: Claude Code, opencode 1.x and 2.x, Codex, Cursor) links the
+  (in every harness's transcript: Claude Code, opencode 1.x and 2.x, Codex, Cursor, CodeWhale,
+  DeepSeek Harness) links the
   session to that memory with a `wrote` edge (the calls in order, the first and last time, how
   many), when the memory still exists. A session indexed before this was added is linked once,
   at the next indexing run, from its transcript if that still exists. Memories written in the

@@ -10,7 +10,7 @@ thought of is welcome there.
 |---|---|
 | Memory core | A local graph store with the memory tools over MCP (search, read, remember, forget, pin, past sessions), project and global memories, and two MCP servers: `use` (on) and `develop` (structure tools, off by default). |
 | Shared daemon | Several agent sessions share one memory at once. A small background daemon starts on demand and exits after two idle hours, with no ports and no setup; upgrades and crashes are handled without your help. |
-| One-command install | `install` (a short wizard) and `uninstall` for Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI, Cursor and CodeWhale (new in 0.2.0, a preview), any combination on one store; `status` and `doctor`; the import of Claude Code's file memory; the export back into files on `uninstall` (`export --to-files`); a moved repository keeps its memories (`projects`). |
+| One-command install | `install` (a short wizard) and `uninstall` for Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI, Cursor, CodeWhale (new in 0.2.0, a preview) and DeepSeek Harness (`dsh`; new after 0.2.1, a preview, not yet run live: install, uninstall, status, doctor, past sessions, the short start context, other memory reported; no summaries or `bench` through it), any combination on one store; `status` and `doctor`; the import of Claude Code's file memory; the export back into files on `uninstall` (`export --to-files`); a moved repository keeps its memories (`projects`). |
 | Embedding model | `minishlab/potion-retrieval-32M` (English) or `minishlab/potion-multilingual-128M`, downloaded once from Hugging Face and run locally on the CPU, or a built-in embedder with no download. |
 | Start context | Pinned, "how to work" and "about you" memories at the start of every session, within a character budget (8,000 by default), so a harness's own file memory can be switched off without losing your rules. |
 | Conflicts | `remember` checks a new memory against its nearest neighbours; a later decision supersedes an older one and keeps its history; open conflicts and unchecked imported memories in `conflicts()`, settled with `settle`. |
@@ -26,6 +26,12 @@ thought of is welcome there.
 
 - **CodeWhale beyond the preview**: a memory written through it, Linux and Windows
   ([codewhale-live-check.md](codewhale-live-check.md)), and `bench` through `codewhale exec`.
+- **DeepSeek Harness beyond the preview**: the live run ([dsh-live-check.md](dsh-live-check.md));
+  the right project per session in its `web`, Desktop and `acp` profiles (today the directory
+  dsh was started in); summaries and `bench` through `dsh` once it can run without tools;
+  switching another memory tool off through our block in its home layer (today it is reported
+  with the steps by hand); and the servers of the Desktop app's own profile layer, which are not
+  seen yet.
 - **Verify what is built but not yet run live**: Cursor with a live login
   ([cursor-live-check.md](cursor-live-check.md)), the harnesses on Windows, the browser UI on
   Linux and Windows, and the memory tools through Codex with a stronger local model.

@@ -3,8 +3,8 @@
 **Local graph memory for AI coding agents: your agent's rules, decisions and past sessions in a
 graph on your machine, searched through MCP instead of loaded on every turn.**
 
-Works with Claude Code, opencode, OpenAI Codex CLI, Cursor and CodeWhale (preview). One binary,
-no account, no telemetry. Version 0.2.1 is an early release, and honest about its limits
+Works with Claude Code, opencode, OpenAI Codex CLI, Cursor, CodeWhale (preview) and DeepSeek
+Harness (`dsh`, preview). One binary, no account, no telemetry. Version 0.2.1 is an early release, and honest about its limits
 ([status](#status)).
 
 <picture>
@@ -166,6 +166,7 @@ What it writes, per harness (only these entries; each file is backed up first):
 | Codex CLI | MCP servers in `~/.codex/config.toml`; a marked block in `~/.codex/AGENTS.md`; two hooks in `~/.codex/hooks.json` |
 | Cursor | MCP server in `~/.cursor/mcp.json`; `~/.cursor/rules/graphersal-memory.mdc`; two hooks in `~/.cursor/hooks.json` |
 | CodeWhale (preview) | MCP servers in `~/.codewhale/mcp.json`; the memory tools in `[tools] always_load` of `~/.codewhale/config.toml`; a marked block in `~/.codewhale/AGENTS.md`; no hooks |
+| DeepSeek Harness (`dsh`, preview) | MCP servers in one marked block of `~/.dsh/cordis.patch.yml` (the layer every profile reads); a marked block in `~/.dsh/AGENTS.md`; no hooks |
 
 The marked block (and the rules files) tells the agent how to use the memory tools and which
 memory language to use; it holds none of your memories, which reach the agent through the tools
@@ -182,8 +183,8 @@ graphersal-memory uninstall --purge    # and delete the memory data too (asks fi
 
 `uninstall` first writes every memory back as files: for Claude Code into its memory files
 (`MEMORY.md` and one file per memory; the global ones into
-`~/.claude/rules/graphersal-memory-global.md`), for opencode, Codex, Cursor and CodeWhale, which
-have no file memory, as Markdown under `~/graphersal-memory-export/<harness>/`. A file you changed is kept and
+`~/.claude/rules/graphersal-memory-global.md`), for opencode, Codex, Cursor, CodeWhale and
+DeepSeek Harness, which have no file memory, as Markdown under `~/graphersal-memory-export/<harness>/`. A file you changed is kept and
 the graph's version goes beside it. Then it removes exactly what `install` added and puts the
 harness's own memory switch back. A file nobody touched since install gets its original bytes
 back; the test suite checks that install followed by uninstall leaves the configuration byte for
@@ -266,6 +267,7 @@ Details, including exactly what summaries and `bench` send: [docs/privacy.md](do
 | OpenAI Codex CLI | yes | yes | through `codex exec`; `bench` only with a local model |
 | Cursor | yes | yes (the transcripts its hooks report) | no |
 | CodeWhale (preview) | yes | yes | summaries through `codewhale exec`; `bench` planned |
+| DeepSeek Harness (`dsh`, preview) | yes | yes | no |
 
 Any combination can be installed at once; they share one store and one daemon. An MCP client
 without hooks can still use the server: it imports the project's memory files and queues the
@@ -289,6 +291,14 @@ Known limits of 0.2.1:
   memory written through CodeWhale, Linux and Windows are not checked yet, and CodeWhale asks once
   per memory tool per run (it has no permanent approval for MCP tools):
   [docs/codewhale-live-check.md](docs/codewhale-live-check.md).
+- **DeepSeek Harness** (`dsh`) support (new after 0.2.1, a preview) is built from dsh's source (dsh-v0.2.2-rc.3)
+  and tested against fixtures; it has not been run with a live dsh yet. No summaries or `bench`
+  through dsh (it cannot run without tools). In the `web`, Desktop and `acp` profiles one dsh
+  serves several workspaces through one MCP server started in dsh's launch directory, so
+  memories go to that directory's project; `headless`, or dsh started from the project, is
+  right. dsh uploads its session log, memories included, with official DeepSeek API requests
+  unless you switch it off ([docs/privacy.md](docs/privacy.md#deepseek-harness-dsh)):
+  [docs/dsh-live-check.md](docs/dsh-live-check.md).
 - **Windows**: no harness has been run live on Windows yet; the daemon, install and the hooks are
   covered by the test suite there.
 - **The browser UI** needs internet for its libraries; it has been run in a browser only on macOS
@@ -368,5 +378,5 @@ and an MCP endpoint ([site](https://graphersal.github.io)).
 ## Licence
 
 Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE). Claude, Claude
-Code, Codex, Cursor and opencode are names of their respective owners; graphersal-memory is not
-affiliated with or endorsed by any of them.
+Code, Codex, Cursor, opencode, CodeWhale, DeepSeek and DeepSeek Harness are names of their
+respective owners; graphersal-memory is not affiliated with or endorsed by any of them.
