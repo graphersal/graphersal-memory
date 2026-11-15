@@ -458,6 +458,61 @@ pub fn servers_key_of(mcp_file: &Path) -> &'static str {
     }
 }
 
+impl crate::agents::OwnMemory for CodeWhale {
+    /// Its memory: on by `[memory] enabled`/`backend` in `config.toml` or the environment.
+    fn now(&self, setup: &crate::install::Setup) -> Result<crate::agents::OwnMemoryNow, String> {
+        let on = memory_on(
+            &crate::install::read_text(&self.paths.config_file)
+                .ok()
+                .flatten()
+                .and_then(|text| crate::tomledit::parse(&text).ok())
+                .unwrap_or(serde_json::Value::Null),
+            self.paths.memory_env_on,
+        );
+        let answered = crate::install::State::load_of(setup, Kind::CodeWhale)?
+            .meta
+            .contains_key("auto_memory_off");
+        Ok(crate::agents::OwnMemoryNow {
+            on,
+            askable: on,
+            off_by_user: false,
+            answered,
+        })
+    }
+
+    fn question(
+        &self,
+        setup: &crate::install::Setup,
+        _start_sentence: &str,
+    ) -> crate::agents::OwnMemoryQuestion {
+        crate::agents::OwnMemoryQuestion {
+            title: "CodeWhale's memory".to_string(),
+            lines: vec![
+                "CodeWhale's own memory is on: it keeps notes in its own store and loads them"
+                    .to_string(),
+                "into sessions; with graphersal-memory both would keep the same facts twice."
+                    .to_string(),
+                install::NOTHING_IS_LOST.to_string(),
+            ],
+            yes: format!(
+                "switch it off ([memory] enabled = false in {})",
+                setup.show(&self.paths.config_file.display().to_string())
+            ),
+            no: "keep it on".to_string(),
+        }
+    }
+
+    fn also(&self, setup: &crate::install::Setup) -> Vec<String> {
+        vec![
+            format!(
+                "The same answer switches CodeWhale's own memory off ([memory] enabled in {}),",
+                setup.show(&self.paths.config_file.display().to_string())
+            ),
+            "after importing its reviewed entries; uninstall switches it on again.".to_string(),
+        ]
+    }
+}
+
 impl Harness for CodeWhale {
     fn kind(&self) -> Kind {
         Kind::CodeWhale
@@ -473,6 +528,27 @@ impl Harness for CodeWhale {
 
     fn has_our_parts(&self, setup: &crate::install::Setup) -> bool {
         !install::inspect(setup).nothing_installed()
+    }
+
+    fn own_memory(&self) -> Option<&dyn crate::agents::OwnMemory> {
+        Some(self)
+    }
+
+    /// Its SQLite store, once CodeWhale is on this machine (or was installed into).
+    fn native_memory(
+        &self,
+        setup: &crate::install::Setup,
+        project: Option<&Path>,
+    ) -> Option<Box<dyn crate::agents::NativeMemory>> {
+        let present = self
+            .find_program(&self.paths.home, setup.search_path.as_deref())
+            .is_some()
+            || crate::install::State::exists_of(setup, Kind::CodeWhale);
+        if !present {
+            return None;
+        }
+        memory::Native::load(&self.paths.memory_store, &setup.data_dir, project)
+            .map(|native| Box::new(native) as Box<dyn crate::agents::NativeMemory>)
     }
 
     fn develop_on(&self, setup: &crate::install::Setup) -> bool {
