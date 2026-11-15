@@ -30,7 +30,10 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     (`find_program`), its configuration roots, whether our parts are in its files, its part of an
     install (`plan` -> `install::HarnessPlan` with the state `records` written with their file;
     `PlanInput`), of an uninstall (`removal`, `own_memory_restored`), `status_lines`, `doctor`,
-    `develop_on`, `action_needed`, `has_plugin`, the MCP configuration file, its
+    `develop_on`, `action_needed`, `has_plugin`, `has_sessions`, the optional capabilities
+    `own_memory` (`OwnMemory`), `native_memory` (`NativeMemory`), `other_memory`
+    (`coexist::OtherMemory`) and `hook` (`HookHandler`: `hook --harness <id>`; none: "needs no
+    hook"), the MCP configuration file, its
     servers key and entry shape, settings and instruction files, the sessions location, the
     export directories, the auto-memory key, the headless command; `is_our_entry` for both entry
     shapes) and `ClaudeCode`; `Setup::detected` (a harness's program found: `Setup::program`,
@@ -38,7 +41,8 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     reported, never offered) and `installed` (what status, doctor and uninstall work on). The
     harness refactor (moving every per-harness branch behind the trait) is under way;
   - `src/harnesses.rs`: the registry, the one place that names every harness (`of`: the
-    `Harness` of a `Kind`, which `Setup::agent_of` returns);
+    `Harness` of a `Kind`, which `Setup::agent_of` returns; `sessions`: the setup-free
+    `sessions::SessionSource` of a `Kind`, for the daemon's indexing);
   - `src/opencode.rs` + `src/opencode/`: opencode 1.x and 2.x, one `OpenCode` agent with the
     line as data (`Major`, `Detected`, `detect`: `opencode --version` in a scratch home, else the
     database's tables, else 2.x; the hooks never ask the binary). Paths `OpenCodePaths`: XDG

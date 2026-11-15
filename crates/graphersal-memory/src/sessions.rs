@@ -104,7 +104,7 @@ impl Request {
     /// A request for the Claude Code transcripts under `projects_dir`, with the default idle
     /// time.
     pub fn new(projects_dir: &Path) -> Self {
-        Self::for_harness(Kind::ClaudeCode, projects_dir)
+        Self::for_harness(Kind::default(), projects_dir)
     }
 
     /// A request for the sessions of `harness` kept in `dir`, with the default idle time.
@@ -134,7 +134,7 @@ impl Request {
     /// Claude Code).
     pub fn from_control(line: &Value) -> Result<Self, String> {
         let harness = match line["harness"].as_str() {
-            None => Kind::ClaudeCode,
+            None => Kind::default(),
             Some(id) => Kind::from_id(id).ok_or_else(|| format!("unknown harness {id}"))?,
         };
         let dir = line["projects_dir"]
@@ -264,9 +264,50 @@ pub struct Unit {
 /// The sessions of `request`'s harness. Claude Code: the transcripts ([`scan`]); a file that
 /// cannot be read is skipped. opencode: the top-level sessions of its database (none when it
 /// has no database yet; `Err` when the database cannot be read).
-pub fn units(request: &Request) -> Result<Vec<Unit>, String> {
-    match request.harness {
-        Kind::ClaudeCode => Ok(scan(&request.projects_dir)
+/// The sessions of one harness as the indexing reads them (`crate::harnesses::sessions`):
+/// without a setup, from the request's directory and the data directory only (the daemon
+/// indexes).
+pub trait SessionSource: Sync {
+    /// Its session units under `dir` (files, or `<db>#<id>` for opencode).
+    fn units(&self, dir: &Path) -> Result<Vec<Unit>, String>;
+    /// A unit's own id (the graph's `session:<id>`): its file name without extension unless
+    /// the harness says otherwise.
+    fn unit_id(&self, file: &Path) -> String {
+        file.file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
+    /// The transcript of a unit and its source label (`transcript:<file name>`, ...).
+    fn read(&self, file: &Path, data_dir: &Path) -> Result<(Transcript, String), String>;
+    /// The units under `sessions` of the work directory `dir` written since `since`
+    /// (seconds), which the end of its MCP connection marks ended (a harness without a
+    /// session end hook: CodeWhale).
+    fn written_since(&self, _sessions: &Path, _dir: &Path, _since: u64) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    /// Where its sessions are, read from the environment, when the end of its `use`
+    /// connection ends them (CodeWhale); `None` otherwise.
+    fn ended_by_connection(&self, _env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// `<prefix>:<file name>`, a session's source label.
+pub fn source_label(prefix: &str, file: &Path) -> String {
+    format!(
+        "{prefix}:{}",
+        file.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    )
+}
+
+/// Claude Code's sessions: the top-level transcripts of its projects directory.
+pub struct ClaudeSessions;
+
+impl SessionSource for ClaudeSessions {
+    fn units(&self, dir: &Path) -> Result<Vec<Unit>, String> {
+        Ok(scan(dir)
             .into_iter()
             .filter_map(|path| {
                 let (size, modified) = stamp(&path)?;
@@ -276,12 +317,21 @@ pub fn units(request: &Request) -> Result<Vec<Unit>, String> {
                     modified,
                 })
             })
-            .collect()),
-        Kind::OpenCode => crate::opencode::sessions::units(&request.projects_dir),
-        Kind::Codex => Ok(crate::codex::sessions::units(&request.projects_dir)),
-        Kind::Cursor => crate::cursor::sessions::units(&request.projects_dir),
-        Kind::CodeWhale => Ok(crate::codewhale::sessions::units(&request.projects_dir)),
+            .collect())
     }
+
+    fn read(&self, file: &Path, _data_dir: &Path) -> Result<(Transcript, String), String> {
+        let bytes =
+            std::fs::read(file).map_err(|err| format!("cannot read {}: {err}", file.display()))?;
+        Ok((
+            transcript::parse(&bytes, &self.unit_id(file)),
+            source_label("transcript", file),
+        ))
+    }
+}
+
+pub fn units(request: &Request) -> Result<Vec<Unit>, String> {
+    crate::harnesses::sessions(request.harness).units(&request.projects_dir)
 }
 
 /// The transcripts under `projects_dir`: `<dir>/<session>.jsonl` (the sub-agents' transcripts
@@ -446,22 +496,11 @@ pub fn project_of(transcript: &Transcript, file: &Path) -> Option<String> {
 /// The session's id in the graph: `session:<transcript file name>` (Codex: `session:<thread
 /// id>`; opencode:
 /// `session:<session id>`).
-pub fn session_id(file: &Path) -> String {
-    format!("session:{}", unit_uuid(file))
-}
-
-/// The session's own id: the transcript's file name, the opencode session id, or the thread
-/// id of a Codex rollout.
-fn unit_uuid(file: &Path) -> String {
-    if let Some((_, id)) = crate::opencode::sessions::split_unit(file) {
-        return id;
-    }
-    if crate::codex::sessions::is_rollout(file) {
-        return crate::codex::sessions::thread_id(file);
-    }
-    file.file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default()
+pub fn session_id(harness: Kind, file: &Path) -> String {
+    format!(
+        "session:{}",
+        crate::harnesses::sessions(harness).unit_id(file)
+    )
 }
 
 /// One parsed transcript with what the indexing derives from it.
@@ -480,76 +519,19 @@ struct Parsed {
     source: String,
 }
 
-/// The registry of Cursor's transcripts in `data_dir`.
-fn cursor_registry(data_dir: &Path) -> PathBuf {
-    data_dir.join("sessions").join(crate::cursor::REGISTRY_FILE)
-}
-
 /// Parses a transcript (a Cursor transcript is one `data_dir`'s registry lists); with `resolve`
 /// its project's directory is resolved to the project's stable id (`crate::projects::resolve`),
 /// else the id is the directory.
 fn parse_file(
+    harness: Kind,
     file: &Path,
     modified: u64,
     data_dir: &Path,
     resolve: bool,
 ) -> Result<Option<Parsed>, String> {
-    let uuid = unit_uuid(file);
-    let cursor = crate::opencode::sessions::split_unit(file)
-        .is_none()
-        .then(|| crate::cursor::sessions::project_of(&cursor_registry(data_dir), file))
-        .flatten();
-    let (harness, transcript, source) = match crate::opencode::sessions::split_unit(file) {
-        Some((db, id)) => (
-            Kind::OpenCode,
-            crate::opencode::sessions::read(&db, &id)?,
-            format!("opencode:{id}"),
-        ),
-        None if cursor.is_some() => (
-            Kind::Cursor,
-            crate::cursor::sessions::read(file, cursor.as_deref().unwrap_or_default())?,
-            format!(
-                "cursor:{}",
-                file.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            ),
-        ),
-        None if crate::codewhale::sessions::is_session(file) => (
-            Kind::CodeWhale,
-            crate::codewhale::sessions::read(file)?,
-            format!(
-                "codewhale:{}",
-                file.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            ),
-        ),
-        None if crate::codex::sessions::is_rollout(file) => (
-            Kind::Codex,
-            crate::codex::sessions::read(file)?,
-            format!(
-                "rollout:{}",
-                file.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            ),
-        ),
-        None => {
-            let bytes = std::fs::read(file)
-                .map_err(|err| format!("cannot read {}: {err}", file.display()))?;
-            (
-                Kind::ClaudeCode,
-                transcript::parse(&bytes, &uuid),
-                format!(
-                    "transcript:{}",
-                    file.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                ),
-            )
-        }
-    };
+    let reader = crate::harnesses::sessions(harness);
+    let uuid = reader.unit_id(file);
+    let (transcript, source) = reader.read(file, data_dir)?;
     if transcript.turns.is_empty() {
         return Ok(None);
     }
@@ -581,7 +563,7 @@ fn parse_file(
     };
     Ok(Some(Parsed {
         harness,
-        id: session_id(file),
+        id: session_id(harness, file),
         source,
         transcript,
         uuid,
@@ -749,13 +731,14 @@ fn link_session(writer: &mut dyn Writer, parsed: &Parsed) -> Result<bool, String
 /// The one-time link of a session indexed before the links existed (its state entry has no
 /// current `memory_links`): read its transcript again, link, record the version.
 fn backfill_links(
+    harness: Kind,
     file: &Path,
     modified: u64,
     data_dir: &Path,
     writer: &mut dyn Writer,
     state: &mut State,
 ) -> Result<bool, String> {
-    let linked = match parse_file(file, modified, data_dir, true)? {
+    let linked = match parse_file(harness, file, modified, data_dir, true)? {
         Some(parsed) => link_session(writer, &parsed)?,
         None => false,
     };
@@ -857,7 +840,14 @@ pub fn run(
             if entry["memory_links"].as_u64() != Some(LINKS_VERSION) {
                 let linked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _doing = crate::daemon::doing(format!("linking {}", file.display()));
-                    backfill_links(&file, modified, data_dir, writer, &mut state)
+                    backfill_links(
+                        request.harness,
+                        &file,
+                        modified,
+                        data_dir,
+                        writer,
+                        &mut state,
+                    )
                 }))
                 .unwrap_or_else(|_| Err("linking it panicked (a bug, logged)".to_string()));
                 match linked {
@@ -888,7 +878,14 @@ pub fn run(
             let _doing = crate::daemon::doing(format!("indexing {}", file.display()));
             crate::daemon::injected_panic("index", &file.display().to_string());
             index_one(
-                &file, size, modified, data_dir, writer, &mut cache, &mut state,
+                request.harness,
+                &file,
+                size,
+                modified,
+                data_dir,
+                writer,
+                &mut cache,
+                &mut state,
             )
         }))
         .unwrap_or_else(|_| Err("indexing it panicked (a bug, logged)".to_string()));
@@ -939,7 +936,14 @@ pub fn run(
             report.done += 1;
             let summarized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _doing = crate::daemon::doing(format!("summarizing {}", file.display()));
-                summarize_one(&file, data_dir, writer, summarizer, &mut state)
+                summarize_one(
+                    request.harness,
+                    &file,
+                    data_dir,
+                    writer,
+                    summarizer,
+                    &mut state,
+                )
             }))
             .unwrap_or_else(|_| {
                 Err(Refused::Failed(format!(
@@ -1009,7 +1013,9 @@ enum Indexed {
     Written { turns: usize, linked: bool },
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_one(
+    harness: Kind,
     file: &Path,
     size: u64,
     modified: u64,
@@ -1018,7 +1024,7 @@ fn index_one(
     cache: &mut BTreeMap<String, Known>,
     state: &mut State,
 ) -> Result<Indexed, String> {
-    let Some(parsed) = parse_file(file, modified, data_dir, true)? else {
+    let Some(parsed) = parse_file(harness, file, modified, data_dir, true)? else {
         *state.entry_mut(file) = json!({"size": size, "mtime": modified, "empty": true});
         return Ok(Indexed::Empty);
     };
@@ -1068,6 +1074,7 @@ enum Summarized {
 }
 
 fn summarize_one(
+    harness: Kind,
     file: &Path,
     data_dir: &Path,
     writer: &mut dyn Writer,
@@ -1101,7 +1108,7 @@ fn summarize_one(
             None => return Ok(Summarized::Waiting),
         },
     };
-    let parsed = match parse_file(file, modified, data_dir, true) {
+    let parsed = match parse_file(harness, file, modified, data_dir, true) {
         Ok(Some(parsed)) if parsed.transcript.fingerprint == fingerprint => parsed,
         // Changed since its indexing: the next run indexes it again first.
         Ok(_) => return Ok(Summarized::Waiting),
@@ -1177,7 +1184,7 @@ pub fn estimate(
     idle: Duration,
     since: Option<&str>,
 ) -> Result<Estimate, String> {
-    estimate_for(Kind::ClaudeCode, projects_dir, data_dir, idle, since)
+    estimate_for(Kind::default(), projects_dir, data_dir, idle, since)
 }
 
 /// [`estimate`] for the sessions of `harness` kept in `dir`.
@@ -1218,7 +1225,7 @@ pub fn estimate_for(
         } else if same && entry["empty"] == true {
             continue;
         } else {
-            match parse_file(&file, modified, data_dir, false) {
+            match parse_file(harness, &file, modified, data_dir, false) {
                 Ok(Some(parsed)) => (
                     summaries::prompt(&parsed.transcript, &parsed.files, &parsed.project)
                         .chars()

@@ -188,6 +188,30 @@ impl Cursor {
     }
 }
 
+impl crate::agents::HookHandler for Cursor {
+    /// The transcript recorded in the registry and queued; the start answer carries the start
+    /// context of the workspace.
+    fn run(
+        &self,
+        setup: &crate::install::Setup,
+        event: crate::hook::HookEvent,
+        input: Vec<u8>,
+        stdout: &mut dyn std::io::Write,
+        stderr: &mut dyn std::io::Write,
+    ) -> u8 {
+        crate::hook::run_cursor_with_context(
+            event,
+            self.paths.registry.clone(),
+            std::env::var("CURSOR_PROJECT_DIR").ok(),
+            Some(crate::commands::hook_enqueue(setup)),
+            Some(crate::commands::start_fetch(setup, Kind::Cursor)),
+            std::io::Cursor::new(input),
+            stdout,
+            stderr,
+        )
+    }
+}
+
 impl Harness for Cursor {
     fn kind(&self) -> Kind {
         Kind::Cursor
@@ -222,6 +246,14 @@ impl Harness for Cursor {
 
     fn develop_on(&self, setup: &crate::install::Setup) -> bool {
         install::inspect(setup).develop_server != crate::install::PartState::Missing
+    }
+
+    fn hook(&self) -> Option<&dyn crate::agents::HookHandler> {
+        Some(self)
+    }
+
+    fn has_sessions(&self) -> bool {
+        self.paths.registry.is_file()
     }
 
     fn other_memory(&self) -> Option<&dyn crate::coexist::OtherMemory> {

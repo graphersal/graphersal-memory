@@ -341,6 +341,25 @@ pub fn parse(bytes: &[u8], fallback_id: &str, project: &str) -> Transcript {
     out
 }
 
+/// Cursor's sessions (`crate::sessions::SessionSource`): the transcripts its hooks
+/// recorded in the registry of the data directory.
+pub struct Sessions;
+
+impl crate::sessions::SessionSource for Sessions {
+    fn units(&self, dir: &Path) -> Result<Vec<Unit>, String> {
+        units(dir)
+    }
+
+    fn read(&self, file: &Path, data_dir: &Path) -> Result<(Transcript, String), String> {
+        let registry = data_dir.join("sessions").join(crate::cursor::REGISTRY_FILE);
+        let project = project_of(&registry, file).unwrap_or_default();
+        Ok((
+            read(file, &project)?,
+            crate::sessions::source_label("cursor", file),
+        ))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

@@ -337,6 +337,33 @@ pub fn written_since(sessions: &Path, directory: &Path, since: u64) -> Vec<PathB
         .collect()
 }
 
+/// CodeWhale's sessions (`crate::sessions::SessionSource`): its saved sessions, ended
+/// by the end of its MCP connection (it has no session end hook we use).
+pub struct Sessions;
+
+impl crate::sessions::SessionSource for Sessions {
+    fn units(&self, dir: &Path) -> Result<Vec<Unit>, String> {
+        Ok(units(dir))
+    }
+
+    fn read(&self, file: &Path, _data_dir: &Path) -> Result<(Transcript, String), String> {
+        Ok((
+            read(file)?,
+            crate::sessions::source_label("codewhale", file),
+        ))
+    }
+
+    fn written_since(&self, sessions: &Path, dir: &Path, since: u64) -> Vec<PathBuf> {
+        written_since(sessions, dir, since)
+    }
+
+    fn ended_by_connection(&self, env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+        crate::codewhale::CodeWhalePaths::resolve(env)
+            .ok()
+            .map(|paths| paths.sessions)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

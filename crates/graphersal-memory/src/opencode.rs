@@ -402,6 +402,27 @@ impl OpenCode {
     }
 }
 
+impl crate::agents::HookHandler for OpenCode {
+    /// Run by its plugin: the session `<db>#<id>` queued (active, then ended).
+    fn run(
+        &self,
+        setup: &crate::install::Setup,
+        event: crate::hook::HookEvent,
+        input: Vec<u8>,
+        stdout: &mut dyn std::io::Write,
+        stderr: &mut dyn std::io::Write,
+    ) -> u8 {
+        crate::hook::run_opencode(
+            event,
+            self.paths.db.clone(),
+            Some(crate::commands::hook_enqueue(setup)),
+            std::io::Cursor::new(input),
+            stdout,
+            stderr,
+        )
+    }
+}
+
 impl Harness for OpenCode {
     fn kind(&self) -> Kind {
         Kind::OpenCode
@@ -426,6 +447,14 @@ impl Harness for OpenCode {
 
     fn has_plugin(&self) -> bool {
         true
+    }
+
+    fn hook(&self) -> Option<&dyn crate::agents::HookHandler> {
+        Some(self)
+    }
+
+    fn has_sessions(&self) -> bool {
+        self.paths.db.is_file()
     }
 
     fn other_memory(&self) -> Option<&dyn crate::coexist::OtherMemory> {

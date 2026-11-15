@@ -295,6 +295,30 @@ pub fn parse(bytes: &[u8], fallback_id: &str) -> Transcript {
     out
 }
 
+/// Codex's sessions (`crate::sessions::SessionSource`): its rollout files.
+pub struct Sessions;
+
+impl crate::sessions::SessionSource for Sessions {
+    fn units(&self, dir: &Path) -> Result<Vec<Unit>, String> {
+        Ok(units(dir))
+    }
+
+    /// The thread id of a rollout.
+    fn unit_id(&self, file: &Path) -> String {
+        if is_rollout(file) {
+            thread_id(file)
+        } else {
+            file.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        }
+    }
+
+    fn read(&self, file: &Path, _data_dir: &Path) -> Result<(Transcript, String), String> {
+        Ok((read(file)?, crate::sessions::source_label("rollout", file)))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

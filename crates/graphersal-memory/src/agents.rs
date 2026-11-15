@@ -156,6 +156,20 @@ pub struct NativeImport {
     pub problems: Vec<String>,
 }
 
+/// A harness's hooks of ours (`graphersal-memory hook ... --harness <id>`): what one does with
+/// the harness's input. Always exit 0: a hook never blocks a session.
+pub trait HookHandler {
+    /// Runs the hook of `event` on `input` (read already).
+    fn run(
+        &self,
+        setup: &Setup,
+        event: crate::hook::HookEvent,
+        input: Vec<u8>,
+        stdout: &mut dyn std::io::Write,
+        stderr: &mut dyn std::io::Write,
+    ) -> u8;
+}
+
 /// One harness, as the installation sees it.
 pub trait Harness {
     /// Which harness this is.
@@ -204,6 +218,13 @@ pub trait Harness {
     fn other_memory(&self) -> Option<&dyn crate::coexist::OtherMemory> {
         None
     }
+    /// Its `hook session-start|session-end --harness <id>`, when it runs hooks of ours.
+    fn hook(&self) -> Option<&dyn HookHandler> {
+        None
+    }
+    /// Whether its sessions are on this machine (its transcripts directory, database or
+    /// registry).
+    fn has_sessions(&self) -> bool;
     /// Whether it gets a session plugin rather than hooks (opencode).
     fn has_plugin(&self) -> bool {
         false
@@ -362,6 +383,14 @@ impl Harness for ClaudeCode {
         crate::install::claude_develop_on(setup)
     }
 
+    fn has_sessions(&self) -> bool {
+        self.paths.projects.is_dir()
+    }
+
+    fn hook(&self) -> Option<&dyn HookHandler> {
+        Some(self)
+    }
+
     fn own_memory(&self) -> Option<&dyn OwnMemory> {
         Some(self)
     }
@@ -435,6 +464,41 @@ impl Harness for ClaudeCode {
 
     fn headless_command(&self) -> Option<&'static str> {
         Some(crate::config::DEFAULT_HARNESS_COMMAND)
+    }
+}
+
+impl HookHandler for ClaudeCode {
+    /// The memory files of the session's project imported, the indexing queued, the start
+    /// context at the start. Claude Code's hooks run by Cursor (its third-party hooks) do
+    /// nothing: the Cursor hooks do Cursor's part.
+    fn run(
+        &self,
+        setup: &Setup,
+        event: crate::hook::HookEvent,
+        input: Vec<u8>,
+        stdout: &mut dyn std::io::Write,
+        stderr: &mut dyn std::io::Write,
+    ) -> u8 {
+        if crate::hook::is_cursor_input(&String::from_utf8_lossy(&input)) {
+            let _ = writeln!(
+                stderr,
+                "graphersal-memory hook: run by Cursor for Claude Code's settings; nothing to do \
+                 (graphersal-memory's own Cursor hooks handle Cursor: `graphersal-memory install \
+                 --harness cursor`)"
+            );
+            return 0;
+        }
+        crate::hook::run_with_context(
+            event,
+            Ok(self.paths.clone()),
+            setup.data_dir.clone(),
+            Box::new(crate::commands::daemon_connector(setup)),
+            Some(crate::commands::hook_enqueue(setup)),
+            Some(crate::commands::start_fetch(setup, Kind::ClaudeCode)),
+            std::io::Cursor::new(input),
+            stdout,
+            stderr,
+        )
     }
 }
 
