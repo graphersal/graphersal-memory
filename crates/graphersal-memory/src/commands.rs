@@ -376,11 +376,13 @@ pub fn run_cli(
             check,
             dry_run,
             yes,
+            from_source,
         } => run_upgrade(
             cli,
             *check,
             *dry_run,
             *yes,
+            *from_source,
             &mut BufReader::new(stdin),
             &mut stdout,
         ),
@@ -2224,6 +2226,7 @@ fn run_upgrade(
     check: bool,
     dry_run: bool,
     yes: bool,
+    from_source: bool,
     input: &mut dyn std::io::BufRead,
     out: &mut dyn Write,
 ) -> Result<u8, String> {
@@ -2245,6 +2248,8 @@ fn run_upgrade(
         scratch: std::env::temp_dir()
             .join(format!("graphersal-memory-upgrade-{}", std::process::id())),
         windows: cfg!(windows),
+        from_source,
+        build: crate::install::update::release_build(std::env::consts::OS, std::env::consts::ARCH),
     };
     crate::install::update::run(
         &options,

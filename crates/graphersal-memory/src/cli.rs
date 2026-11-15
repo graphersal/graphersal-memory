@@ -139,11 +139,11 @@ pub enum Command {
     Status,
     /// Check the installation and explain how to fix what is wrong.
     Doctor,
-    /// Upgrade to the latest release: through the release's installer, or cargo when it was
-    /// installed with cargo; then restart the daemon. Shows the plan and asks first.
+    /// Upgrade to the latest release: the release's build through its installer, also into
+    /// cargo's directory; then restart the daemon. Shows the plan and asks first.
     Upgrade {
         /// Only say whether a newer release is available, and how to upgrade.
-        #[arg(long, conflicts_with_all = ["dry_run", "yes"])]
+        #[arg(long, conflicts_with_all = ["dry_run", "yes", "from_source"])]
         check: bool,
         /// Show the plan without changing anything.
         #[arg(long)]
@@ -151,6 +151,11 @@ pub enum Command {
         /// Do not ask.
         #[arg(long, short = 'y')]
         yes: bool,
+        /// Build it with `cargo install` instead of the release's build (a binary installed
+        /// with cargo only; without it cargo builds only when the release's build cannot be
+        /// used).
+        #[arg(long)]
+        from_source: bool,
     },
     /// Serve MCP over stdio for one harness session (the harness starts this, not you).
     Mcp {

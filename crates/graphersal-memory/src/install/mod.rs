@@ -28,6 +28,7 @@
 //! from its backup when nobody changed it since `install` wrote it (or deletes it when install
 //! created it); otherwise it removes our members and our block from the current text.
 
+pub mod cargo_records;
 pub mod coexist;
 #[cfg(test)]
 pub(crate) mod coexist_tests;
