@@ -19,12 +19,17 @@ pub use uds_windows::UnixStream;
 /// Whether the process `pid` runs.
 #[cfg(unix)]
 pub fn alive(pid: u64) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
+    // `kill -0` answers yes for a zombie too: a process that exited and whose parent (the
+    // shim's waiting thread) has not collected it yet. `ps` tells its state (`Z`: exited).
+    Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .output()
+        .is_ok_and(|output| {
+            let state = String::from_utf8_lossy(&output.stdout);
+            let state = state.trim();
+            output.status.success() && !state.is_empty() && !state.starts_with('Z')
+        })
 }
 
 /// Whether the process `pid` runs (`tasklist` prints its line, `/NH`: without the header).
