@@ -112,6 +112,7 @@ function Install-GraphersalMemory([string]$Version, [string]$Dir, [string]$BaseU
 
         New-Item -ItemType Directory -Force -Path $Dir | Out-Null
         $target = Join-Path $Dir 'graphersal-memory.exe'
+        $upgrade = Test-Path $target
         # A running graphersal-memory.exe (its daemon) cannot be overwritten, but it can be renamed:
         # move it aside, put the new one in place, and remove the old one when it is free.
         if (Test-Path $target) {
@@ -131,16 +132,23 @@ function Install-GraphersalMemory([string]$Version, [string]$Dir, [string]$BaseU
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $onPath = ($env:Path -split ';') + ($userPath -split ';') |
         Where-Object { $_ -and ($_.TrimEnd('\') -ieq $Dir.TrimEnd('\')) }
-    $next = 'graphersal-memory install'
+    $program = 'graphersal-memory'
     if (-not $onPath) {
         Write-Host ''
         Write-Host "$Dir is not on your PATH. To add it for your user (new terminals see it):"
         Write-Host "  [Environment]::SetEnvironmentVariable('Path', `"$Dir;`" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')"
-        $next = "& '$target' install"
+        $program = "& '$target'"
     }
     Write-Host ''
-    Write-Host 'Next step: connect it to your agents (Claude Code, opencode, Codex, Cursor, CodeWhale) with'
-    Write-Host "  $next"
+    if ($upgrade) {
+        Write-Host 'Upgraded. If it is set up in your agents, bring the daemon and the installed parts to this'
+        Write-Host 'version with (`graphersal-memory upgrade` does both by itself):'
+        Write-Host "  $program daemon restart"
+        Write-Host "  $program install --refresh"
+    } else {
+        Write-Host 'Next step: connect it to your agents (Claude Code, opencode, Codex, Cursor, CodeWhale) with'
+        Write-Host "  $program install"
+    }
 }
 
 Install-GraphersalMemory -Version $Version -Dir $Dir -BaseUrl $BaseUrl

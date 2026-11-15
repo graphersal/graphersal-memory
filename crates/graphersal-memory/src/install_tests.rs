@@ -959,6 +959,113 @@ fn an_untouched_block_of_an_earlier_version_is_updated_and_uninstalled_cleanly()
     memory.close();
 }
 
+fn refresh() -> InstallOptions {
+    InstallOptions {
+        refresh: true,
+        ..yes()
+    }
+}
+
+#[test]
+fn refresh_brings_an_earlier_block_to_this_version_and_keeps_every_choice() {
+    let home = TempDir::new("refresh-home");
+    let data = TempDir::new("refresh-data");
+    existing_home(home.path());
+    // opencode is found on this machine too, but install goes into Claude Code only.
+    let setup = with_programs(
+        bare_setup_in(home.path(), data.path()),
+        &["claude", "opencode"],
+    );
+    let memory = Memory::open(data.path());
+    let only_claude = InstallOptions {
+        harnesses: Some(vec![Kind::ClaudeCode]),
+        ..yes()
+    };
+    let (code, out) = run_install(&setup, &memory, only_claude);
+    assert_eq!(code, 0, "{out}");
+    // The user switched Claude Code's auto-memory back on after install.
+    let settings = read(&setup.paths.settings);
+    let on = settings.replace(
+        "\"autoMemoryEnabled\": false",
+        "\"autoMemoryEnabled\": true",
+    );
+    assert_ne!(on, settings, "{settings}");
+    std::fs::write(&setup.paths.settings, on).unwrap();
+    let installed = snapshot(home.path());
+    // The rule block as an earlier version left it.
+    let previous = crate::fsutil::fingerprint(BLOCK_0_0_0.as_bytes());
+    let old = with_block(&setup, &block_with(BLOCK_0_0_0, &previous));
+    std::fs::write(&setup.paths.instructions, &old).unwrap();
+
+    let (code, out) = run_install(&setup, &memory, refresh());
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("update the block to this version"), "{out}");
+    assert!(!out.contains("opencode"), "{out}");
+    // The block is this version's again; the auto-memory stays on, the develop server
+    // unregistered, opencode untouched.
+    assert_eq!(snapshot(home.path()), installed, "{out}");
+
+    // Nothing left to do: nothing written.
+    let (code, out) = run_install(&setup, &memory, refresh());
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("up to date"), "{out}");
+    assert_eq!(snapshot(home.path()), installed, "{out}");
+    memory.close();
+}
+
+#[test]
+fn refresh_dry_run_and_without_an_install_change_nothing_and_uninstall_stays_exact() {
+    let home = TempDir::new("refresh-dry-home");
+    let data = TempDir::new("refresh-dry-data");
+    existing_home(home.path());
+    let before = snapshot(home.path());
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    // Not installed: nothing to refresh, nothing written (not even the data directory).
+    let (code, out) = run_install(&setup, &memory, refresh());
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("not installed in any harness"), "{out}");
+    assert_eq!(snapshot(home.path()), before);
+    assert!(!data.path().join("install").exists());
+
+    run_install(&setup, &memory, yes());
+    let previous = crate::fsutil::fingerprint(BLOCK_0_0_0.as_bytes());
+    let old = with_block(&setup, &block_with(BLOCK_0_0_0, &previous));
+    std::fs::write(&setup.paths.instructions, &old).unwrap();
+    let outdated = snapshot(home.path());
+    let dry = InstallOptions {
+        dry_run: true,
+        ..refresh()
+    };
+    let (code, out) = run_install(&setup, &memory, dry);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Dry run"), "{out}");
+    assert_eq!(snapshot(home.path()), outdated, "{out}");
+
+    let (code, out) = run_install(&setup, &memory, refresh());
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = run_uninstall(&setup, uninstall_yes());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    memory.close();
+}
+
+#[test]
+fn refresh_keeps_a_hand_edited_block_and_says_so() {
+    let home = TempDir::new("refresh-edit-home");
+    let data = TempDir::new("refresh-edit-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    run_install(&setup, &memory, yes());
+    let text = read(&setup.paths.instructions).replace("Save with", "Please save with");
+    std::fs::write(&setup.paths.instructions, &text).unwrap();
+    let (code, out) = run_install(&setup, &memory, refresh());
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("conflict:"), "{out}");
+    assert_eq!(read(&setup.paths.instructions), text);
+    memory.close();
+}
+
 #[test]
 fn a_hand_edited_block_of_an_earlier_version_is_still_a_conflict() {
     let home = TempDir::new("oldedit-home");

@@ -121,6 +121,7 @@ pub fn run_cli(
             enable_develop,
             summaries,
             other,
+            refresh,
         } => {
             let harnesses = match harness {
                 None => None,
@@ -150,6 +151,7 @@ pub fn run_cli(
                 project_dir: current_project(),
                 interactive: terminal,
                 color: terminal && crate::prompt::color_allowed(&|name| std::env::var(name).ok()),
+                refresh: *refresh,
             };
             setup(cli).and_then(|setup| {
                 // `all`: every harness whose program is found (Claude Code when none is).

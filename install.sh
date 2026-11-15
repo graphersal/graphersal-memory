@@ -136,6 +136,8 @@ binary="$tmp/graphersal-memory-$found_version-$platform/graphersal-memory"
 [ -f "$binary" ] || fail "$archive holds no graphersal-memory binary"
 
 mkdir -p "$dir" || fail "cannot create $dir"
+upgrade=""
+[ -f "$dir/graphersal-memory" ] && upgrade=1
 # Copy next to the target, then rename: a running binary is replaced, never half-written.
 cp "$binary" "$dir/.graphersal-memory.new" || fail "cannot write to $dir"
 chmod 755 "$dir/.graphersal-memory.new"
@@ -144,14 +146,21 @@ say "Installed $dir/graphersal-memory"
 "$dir/graphersal-memory" --version || fail "the installed binary does not run on this system"
 
 case ":${PATH:-}:" in
-  *":$dir:"*) next="graphersal-memory install" ;;
+  *":$dir:"*) program="graphersal-memory" ;;
   *)
     say ""
     say "$dir is not on your PATH. Add it, for example in your shell's profile:"
     say "  export PATH=\"$dir:\$PATH\""
-    next="$dir/graphersal-memory install"
+    program="$dir/graphersal-memory"
     ;;
 esac
 say ""
-say "Next step: connect it to your agents (Claude Code, opencode, Codex, Cursor, CodeWhale) with"
-say "  $next"
+if [ -n "$upgrade" ]; then
+  say "Upgraded. If it is set up in your agents, bring the daemon and the installed parts to this"
+  say "version with (\`graphersal-memory upgrade\` does both by itself):"
+  say "  $program daemon restart"
+  say "  $program install --refresh"
+else
+  say "Next step: connect it to your agents (Claude Code, opencode, Codex, Cursor, CodeWhale) with"
+  say "  $program install"
+fi

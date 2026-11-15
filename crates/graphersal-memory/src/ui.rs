@@ -902,7 +902,9 @@ mod tests {
         assert_eq!(update["current"], crate::update::CURRENT);
         assert_eq!(update["upgrade"], "graphersal-memory upgrade");
         assert!(
-            update["manual"].as_array().is_some_and(|m| m.len() == 2),
+            update["manual"]
+                .as_array()
+                .is_some_and(|m| m.len() == 3 && m[2] == "graphersal-memory install --refresh"),
             "{update}"
         );
         assert!(

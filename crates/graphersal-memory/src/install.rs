@@ -986,6 +986,8 @@ pub struct InstallOptions {
     pub interactive: bool,
     /// Colour in the wizard.
     pub color: bool,
+    /// Only bring the parts install wrote up to this version (`--refresh`, run by `upgrade`).
+    pub refresh: bool,
 }
 
 /// Options of `uninstall`.
@@ -1803,6 +1805,30 @@ pub struct Answers {
     pub disable_other: Vec<String>,
     /// Import the other tools' memories whose format is known.
     pub import_other: bool,
+    /// Per harness, the own-memory switch as it is now (`install --refresh`: what is off stays
+    /// off, what is on stays on); empty: `auto_memory_off` for every harness.
+    pub own_memory_as_is: Vec<(Kind, bool)>,
+    /// Per harness, whether the develop server is on as it is now (`install --refresh`); empty:
+    /// `develop` for every harness.
+    pub develop_as_is: Vec<(Kind, bool)>,
+}
+
+impl Answers {
+    /// Whether the own memory of `kind` is (or stays) switched off.
+    fn own_memory_off(&self, kind: Kind) -> bool {
+        self.own_memory_as_is
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map_or(self.auto_memory_off, |(_, off)| *off)
+    }
+
+    /// Whether the develop server of `kind` is (or stays) on.
+    fn develop_on(&self, kind: Kind) -> bool {
+        self.develop_as_is
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map_or(self.develop, |(_, on)| *on)
+    }
 }
 
 /// The model the answers default to: the flag, else the current model (unless the language
@@ -1846,6 +1872,8 @@ fn default_answers(options: &InstallOptions, current: &Current) -> Answers {
                 .unwrap_or(!current.auto_memory_off_by_user),
         summaries: options.summaries || current.config.summaries.enabled,
         develop: options.enable_develop || current.develop_registered,
+        own_memory_as_is: Vec::new(),
+        develop_as_is: Vec::new(),
     }
 }
 
@@ -2225,6 +2253,8 @@ fn ask(
         kept: others.0.kept,
         disable_other: others.0.disable,
         import_other: others.1,
+        own_memory_as_is: Vec::new(),
+        develop_as_is: Vec::new(),
     })
 }
 
@@ -2583,12 +2613,13 @@ fn plan_install(
     let mut after = Vec::new();
     if claude {
         let mut steps = Vec::new();
-        let (step, change) = plan_user_config(setup, answers.develop, &mut conflicts)?;
+        let (step, change) =
+            plan_user_config(setup, answers.develop_on(Kind::ClaudeCode), &mut conflicts)?;
         steps.push(step);
         changes.extend(change);
         let (step, change, plan) = plan_settings(
             setup,
-            answers.auto_memory_off,
+            answers.own_memory_off(Kind::ClaudeCode),
             &start_context_sentence(current),
             &state,
         )?;
@@ -2610,7 +2641,7 @@ fn plan_install(
             setup,
             answers.language,
             &answers.read_only,
-            answers.develop,
+            answers.develop_on(Kind::OpenCode),
         )?;
         sections.push((Kind::OpenCode.display_name().to_string(), plan.steps));
         opencode_changes = plan.changes;
@@ -2623,8 +2654,8 @@ fn plan_install(
             setup,
             answers.language,
             &answers.read_only,
-            answers.develop,
-            answers.auto_memory_off,
+            answers.develop_on(Kind::Codex),
+            answers.own_memory_off(Kind::Codex),
         )?;
         sections.push((Kind::Codex.display_name().to_string(), plan.steps));
         codex_changes = plan.changes;
@@ -2637,7 +2668,7 @@ fn plan_install(
             setup,
             answers.language,
             &answers.read_only,
-            answers.develop,
+            answers.develop_on(Kind::Cursor),
         )?;
         sections.push((Kind::Cursor.display_name().to_string(), plan.steps));
         cursor_changes = plan.changes;
@@ -2650,8 +2681,8 @@ fn plan_install(
             setup,
             answers.language,
             &answers.read_only,
-            answers.develop,
-            answers.auto_memory_off,
+            answers.develop_on(Kind::CodeWhale),
+            answers.own_memory_off(Kind::CodeWhale),
         )?;
         sections.push((Kind::CodeWhale.display_name().to_string(), plan.steps));
         codewhale_changes = plan.changes;
@@ -3308,6 +3339,9 @@ pub fn install(
     input: &mut dyn BufRead,
     out: &mut dyn Write,
 ) -> Result<u8, String> {
+    if options.refresh {
+        return refresh(setup, options, input, out);
+    }
     if options.harnesses.is_none() && setup.detected().is_empty() {
         return Ok(refuse_without_programs(setup, out, options.color));
     }
@@ -3746,6 +3780,188 @@ pub fn install(
     })
 }
 
+/// `install --refresh` (`upgrade` runs it through the new binary): the parts install wrote, in
+/// the harnesses it is installed in, brought to this version (the rule block, the MCP entries,
+/// the hooks, ...). Nothing else changes: no question, no new harness, no import, no settings
+/// file, no download, no other memory tool switched or newly named; what is on or off stays
+/// so. A part edited by hand stays a conflict, as with `install`.
+fn refresh(
+    setup: &Setup,
+    options: &InstallOptions,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+) -> Result<u8, String> {
+    let color = options.color;
+    let harnesses = setup.installed();
+    let _ = writeln!(
+        out,
+        "{}",
+        paint(color, "1", "graphersal-memory install --refresh")
+    );
+    if harnesses.is_empty() {
+        let _ = writeln!(
+            out,
+            "  not installed in any harness: nothing to refresh (`graphersal-memory install` \
+             sets it up)"
+        );
+        return Ok(0);
+    }
+    if let Some(reason) = crate::store::foreign_data_dir(&setup.data_dir) {
+        return Err(reason);
+    }
+    let current = Current::read(setup, None)?;
+    let answers = refresh_answers(setup, &current, harnesses);
+    let plan = plan_install(setup, options, &answers, &current)
+        .map_err(|err| way_out(&err, &answers.harnesses, "install", "install into"))?;
+    let print_conflicts = |out: &mut dyn Write, conflicts: &[String]| {
+        for conflict in conflicts {
+            let line = paint(color, "33", &format!("conflict: {}", setup.show(conflict)));
+            let _ = writeln!(out, "  {line}");
+        }
+    };
+    let exit = |conflicts: &[String]| u8::from(!conflicts.is_empty());
+    if all_changes(&plan).next().is_none() {
+        let _ = writeln!(
+            out,
+            "  {}: the installed parts are up to date",
+            names_of(&answers.harnesses)
+        );
+        print_conflicts(out, &plan.conflicts);
+        return Ok(exit(&plan.conflicts));
+    }
+    let _ = writeln!(
+        out,
+        "\n{}",
+        if options.dry_run {
+            "Dry run: this is what the refresh would do (nothing is changed)."
+        } else {
+            "This is what the refresh will do:"
+        }
+    );
+    let sections: Vec<(String, Vec<Step>)> = plan
+        .sections
+        .iter()
+        .filter(|(title, _)| answers.harnesses.iter().any(|k| k.display_name() == title))
+        .cloned()
+        .collect();
+    print_sections(out, setup, &sections, color);
+    if !plan.conflicts.is_empty() {
+        let _ = writeln!(out);
+    }
+    print_conflicts(out, &plan.conflicts);
+    if options.dry_run {
+        return Ok(0);
+    }
+    if !options.yes {
+        let _ = writeln!(out);
+        match ask_yes_no("Refresh?", true, input, out) {
+            Reply::Yes => {}
+            Reply::No => {
+                let _ = writeln!(
+                    out,
+                    "Cancelled: nothing was changed (pass --yes to run without asking)."
+                );
+                return Ok(1);
+            }
+            Reply::NoInput => {
+                let _ = writeln!(out, "No answer, nothing was changed: {NO_TERMINAL}.");
+                return Ok(1);
+            }
+        }
+    }
+    crate::store::create_private_dir(&setup.data_dir)?;
+    let _lock = InstallLock::take(setup, true)?;
+    let mut report = Vec::new();
+    let (plan, agent_report, backups) =
+        apply_with_retries(setup, options, &answers, &current, plan, &mut report)?;
+    let _ = writeln!(out, "\n{}", paint(color, "1", "Report:"));
+    for dir in &backups {
+        let _ = writeln!(
+            out,
+            "  Backups of the files changed: {}",
+            setup.show(&format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR))
+        );
+    }
+    for (kind, lines) in &agent_report {
+        let _ = writeln!(out, "\n{}:", kind.display_name());
+        if lines.is_empty() {
+            let _ = writeln!(out, "  already up to date");
+        }
+        for line in lines {
+            let _ = writeln!(out, "  {}", setup.show(line));
+        }
+    }
+    for line in &report {
+        let _ = writeln!(out, "  {}", setup.show(line));
+    }
+    if !plan.conflicts.is_empty() {
+        let _ = writeln!(out);
+    }
+    print_conflicts(out, &plan.conflicts);
+    Ok(exit(&plan.conflicts))
+}
+
+/// The answers of `install --refresh`: every choice as it is now, per harness where install's
+/// answers are shared (the own memory, the develop server); a memory tool found since the last
+/// install is not newly named read-only.
+fn refresh_answers(setup: &Setup, current: &Current, harnesses: Vec<Kind>) -> Answers {
+    let others = other_defaults(&InstallOptions::default(), current, &harnesses);
+    let chosen = |name: &String| {
+        current
+            .other_choices
+            .as_ref()
+            .is_some_and(|choices| choices.read_only.contains(name))
+    };
+    let (read_only, unchosen): (Vec<String>, Vec<String>) =
+        others.read_only.into_iter().partition(chosen);
+    let on = |state: &PartState| *state != PartState::Missing;
+    let develop_as_is = harnesses
+        .iter()
+        .map(|kind| {
+            let develop = match kind {
+                Kind::ClaudeCode => current.develop_registered,
+                Kind::OpenCode => {
+                    let (state, enabled) = crate::opencode::install::inspect(setup).develop_server;
+                    on(&state) && enabled
+                }
+                Kind::Codex => {
+                    let (state, enabled) = crate::codex::install::inspect(setup).develop_server;
+                    on(&state) && enabled
+                }
+                Kind::Cursor => on(&crate::cursor::install::inspect(setup).develop_server),
+                Kind::CodeWhale => {
+                    let (state, enabled) = crate::codewhale::install::inspect(setup).develop_server;
+                    on(&state) && enabled
+                }
+            };
+            (*kind, develop)
+        })
+        .collect();
+    Answers {
+        language: current.config.language.unwrap_or_default(),
+        model: current
+            .config
+            .model
+            .clone()
+            .unwrap_or_else(|| models::BUILTIN.to_string()),
+        import: false,
+        auto_memory_off: false,
+        own_memory_as_is: vec![
+            (Kind::ClaudeCode, current.auto_memory_off),
+            (Kind::Codex, !current.codex_memories_on),
+            (Kind::CodeWhale, !current.codewhale_memory_on),
+        ],
+        summaries: current.config.summaries.enabled,
+        develop: false,
+        develop_as_is,
+        read_only,
+        kept: others.kept.into_iter().chain(unchosen).collect(),
+        disable_other: others.disable,
+        import_other: false,
+        harnesses,
+    }
+}
+
 /// Applies the agents' file changes of `plan` (each harness's state recorded as it goes) and
 /// install's auto-memory record. Every file written is recorded in `journal` with its text
 /// before (for a rollback); `bases` are the fingerprints the plan's texts were computed from.
@@ -3777,9 +3993,10 @@ fn apply_agents(
             .insert("exe".into(), json!(setup.exe.display().to_string()));
         match kind {
             Kind::ClaudeCode => {
-                kind_state
-                    .meta
-                    .insert("auto_memory_off".into(), json!(answers.auto_memory_off));
+                kind_state.meta.insert(
+                    "auto_memory_off".into(),
+                    json!(answers.own_memory_off(Kind::ClaudeCode)),
+                );
                 kind_state.save(setup)?;
                 let settings = setup.paths.settings.clone();
                 apply_changes(
@@ -3826,9 +4043,10 @@ fn apply_agents(
                 )?;
             }
             Kind::Codex => {
-                kind_state
-                    .meta
-                    .insert("auto_memory_off".into(), json!(answers.auto_memory_off));
+                kind_state.meta.insert(
+                    "auto_memory_off".into(),
+                    json!(answers.own_memory_off(Kind::Codex)),
+                );
                 kind_state.save(setup)?;
                 let config = setup.codex.config_file.clone();
                 apply_changes(
@@ -3883,9 +4101,10 @@ fn apply_agents(
                 )?;
             }
             Kind::CodeWhale => {
-                kind_state
-                    .meta
-                    .insert("auto_memory_off".into(), json!(answers.auto_memory_off));
+                kind_state.meta.insert(
+                    "auto_memory_off".into(),
+                    json!(answers.own_memory_off(Kind::CodeWhale)),
+                );
                 kind_state.save(setup)?;
                 let config = setup.codewhale.config_file.clone();
                 apply_changes(
