@@ -168,7 +168,9 @@ Unit tests that need more than one module's helpers sit beside their module as
     `$DSH_HOME/AGENTS.md`; notes: `session-log-deepseek` on in every layer (privacy),
     `mcp-manager` servers named like ours, the `sdk-minimal` profile without instruction files);
     `dsh/sessions.rs` the reader of `<root>/<project key>/<session>/session.v4.jsonl[.zstd]`
-    (`ruzstd` frame by frame, a torn last frame ends the read; project = the header's `cwd`;
+    (`ruzstd` frame by frame into one buffer, at most `MAX_DECODED` = 128 MiB, a torn last frame
+    ends the read; project = the header's `cwd`; a fork's (`isSeeded`) events up to its last
+    `session/end-seed` with `inherited: true` are its parent's and left out;
     human `user/message` turns grouped by `turn/start`, injected ones left out; sub-agent and
     `_no-cwd` sessions without turns; another version skipped as empty, not failed; unit id
     `dsh-<uuid>`; `written_since` + `ended_by_connection` for the daemon's end of a connection);

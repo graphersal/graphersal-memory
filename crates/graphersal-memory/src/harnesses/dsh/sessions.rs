@@ -19,6 +19,13 @@
 //!   indexing records as empty (not failed) until the file changes. A sub-agent's session
 //!   (`origin: "subagent"`) and a session without a working directory (`_no-cwd/`: no project
 //!   to file it under) have no turns.
+//! - **Forks**: a session forked from another (header `isSeeded: true`; dsh's fork command and
+//!   `SessionStore.fork`, `packages/api/session-controller/src/commands.ts`,
+//!   `packages/core/session/src/index.ts`) starts with a copy of its parent's events, ended by
+//!   a `session/end-seed` event with `inherited: true` (`buildForkSeed`,
+//!   `packages/core/session/src/fork.ts`; the last such marker is the fork's own cut,
+//!   `packages/core/session/src/types.ts` `session/end-seed`). Everything up to that marker is
+//!   the parent's, indexed with the parent's session: left out here (turns and memory writes).
 //! - **Turns**: a human message (`user/message` with `source.kind` `user`) starts a turn; more
 //!   human messages within the same dsh turn (the preceding `turn/start`) join it; injected
 //!   messages (other source kinds) are not the user's words. `assistant/message` text parts are
@@ -45,7 +52,7 @@ pub const V4_PLAIN: &str = "session.v4.jsonl";
 /// The only header `version` read.
 pub const VERSION: u64 = 4;
 /// The most bytes a session file is decoded to.
-pub const MAX_DECODED: usize = 512 * 1024 * 1024;
+pub const MAX_DECODED: usize = 128 * 1024 * 1024;
 /// The most bytes of an uncompressed file read for its header line.
 const MAX_HEADER: u64 = 1024 * 1024;
 /// The zstd frame magic number, little-endian.
@@ -142,45 +149,43 @@ pub fn decode_frames(bytes: &[u8], max_frames: usize) -> Result<Vec<u8>, String>
     let mut frames = 0;
     while !rest.is_empty() && frames < max_frames {
         let mut source = rest;
-        let room = MAX_DECODED.saturating_sub(out.len());
-        let frame = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            decode_frame(&mut decoder, &mut source, room)
+        let before = out.len();
+        let whole = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            decode_frame(&mut decoder, &mut source, &mut out)
         }))
-        .unwrap_or(Ok(None));
-        match frame? {
-            Some(frame) => {
-                out.extend_from_slice(&frame);
-                rest = source;
-                frames += 1;
-            }
-            None => break,
+        .unwrap_or(Ok(false));
+        if !whole? {
+            out.truncate(before);
+            break;
         }
+        rest = source;
+        frames += 1;
     }
     Ok(out)
 }
 
-/// One frame from the start of `source` (advanced past it); `None` when it is torn or
-/// corrupt, an error when it decodes to more than `room` bytes.
+/// One frame from the start of `source` (advanced past it), appended to `out`; `false` when
+/// it is torn or corrupt (what it appended is the caller's to take back), an error when `out`
+/// would grow past [`MAX_DECODED`] bytes.
 fn decode_frame(
     decoder: &mut ruzstd::decoding::FrameDecoder,
     source: &mut &[u8],
-    room: usize,
-) -> Result<Option<Vec<u8>>, String> {
+    out: &mut Vec<u8>,
+) -> Result<bool, String> {
     use ruzstd::decoding::BlockDecodingStrategy;
     if decoder.reset(&mut *source).is_err() {
-        return Ok(None);
+        return Ok(false);
     }
-    let mut frame = Vec::new();
     loop {
         let Ok(done) =
             decoder.decode_blocks(&mut *source, BlockDecodingStrategy::UptoBytes(1 << 20))
         else {
-            return Ok(None);
+            return Ok(false);
         };
         if let Some(chunk) = decoder.collect() {
-            frame.extend_from_slice(&chunk);
+            out.extend_from_slice(&chunk);
         }
-        if frame.len() > room {
+        if out.len() > MAX_DECODED {
             return Err(format!(
                 "decodes to more than {} MiB",
                 MAX_DECODED / (1024 * 1024)
@@ -195,9 +200,9 @@ fn decode_frame(
         decoder.get_calculated_checksum(),
     ) && stored != computed
     {
-        return Ok(None);
+        return Ok(false);
     }
-    Ok(Some(frame))
+    Ok(true)
 }
 
 /// The decoded JSON Lines of a session file.
@@ -323,6 +328,21 @@ impl Turns {
     }
 }
 
+/// How many of a fork's event lines (after the header) are its parent's: up to and including
+/// the last `session/end-seed` with `inherited: true`; 0 without one.
+fn seed_cut(lines: &[&[u8]]) -> usize {
+    const MARKER: &[u8] = b"session/end-seed";
+    lines
+        .iter()
+        .rposition(|line| {
+            line.windows(MARKER.len()).any(|w| w == MARKER)
+                && serde_json::from_slice::<Value>(line).is_ok_and(|event| {
+                    event["type"] == "session/end-seed" && event["data"]["inherited"] == true
+                })
+        })
+        .map_or(0, |at| at + 1)
+}
+
 /// Parses a session file's decoded lines; [`Skip`] for a header this reader does not know.
 pub fn parse(bytes: &[u8]) -> Result<Transcript, Skip> {
     let complete = match bytes.iter().rposition(|byte| *byte == b'\n') {
@@ -338,10 +358,11 @@ pub fn parse(bytes: &[u8]) -> Result<Transcript, Skip> {
     if out.partial_tail {
         out.skipped_lines += 1;
     }
-    let mut lines = complete
+    let lines: Vec<&[u8]> = complete
         .split(|byte| *byte == b'\n')
-        .filter(|line| !line.iter().all(u8::is_ascii_whitespace));
-    let Some(first) = lines.next() else {
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .collect();
+    let Some((first, lines)) = lines.split_first() else {
         return Ok(out); // nothing complete yet
     };
     let header = serde_json::from_slice::<Value>(first).unwrap_or(Value::Null);
@@ -359,6 +380,13 @@ pub fn parse(bytes: &[u8]) -> Result<Transcript, Skip> {
     if header["origin"] == "subagent" {
         return Ok(out);
     }
+    let lines = if header["isSeeded"] == true {
+        let cut = seed_cut(lines);
+        out.records += cut;
+        &lines[cut..]
+    } else {
+        lines
+    };
     let mut turns = Turns::default();
     for line in lines {
         let Ok(event @ Value::Object(_)) = serde_json::from_slice::<Value>(line) else {
@@ -666,6 +694,77 @@ mod tests {
         assert_eq!(t.records, 17, "the unknown event is read and skipped");
         assert_eq!(t.skipped_lines, 0);
         assert!(!t.partial_tail);
+    }
+
+    #[test]
+    fn a_fork_leaves_out_its_parents_events() {
+        // As dsh's fork writes it (`buildForkSeed`; the snapshots under
+        // `snapshots/sdk/subagent-fork-in-process/`): the parent's events, the tagged
+        // `session/end-seed`, then the fork's own. This fork's parent was itself a fork, so the
+        // copied prefix holds an earlier tagged marker; the last one is the cut. An untagged
+        // marker later (a restore boundary) cuts nothing.
+        let mut head = header(Some("/w"));
+        head["isSeeded"] = json!(true);
+        head["parentSession"] = json!("session-parent");
+        let seed = |seq: i64| event(seq, "session/end-seed", json!({"inherited": true}));
+        let text = lines(&[
+            head.clone(),
+            event(1, "permission/preset", json!({"preset": "workspace-write"})),
+            event(2, "turn/start", json!({"turn": 1})),
+            user(3, "user", "Grandparent question."),
+            event(
+                4,
+                "turn/end",
+                json!({"turn": 1, "reason": {"kind": "completed"}}),
+            ),
+            seed(5),
+            event(6, "turn/start", json!({"turn": 2})),
+            user(7, "user", "Parent question."),
+            call(
+                8,
+                2,
+                "mcp__graphersal-memory__remember",
+                json!({"slug": "parents", "summary": "The parent's memory"}),
+            ),
+            assistant(9, 2, "Parent answer."),
+            event(
+                10,
+                "turn/end",
+                json!({"turn": 2, "reason": {"kind": "completed"}}),
+            ),
+            seed(11),
+            event(12, "turn/start", json!({"turn": 3})),
+            user(13, "user", "Fork question."),
+            call(
+                14,
+                3,
+                "mcp__graphersal-memory__remember",
+                json!({"slug": "forks", "summary": "The fork's memory"}),
+            ),
+            assistant(15, 3, "Fork answer."),
+            event(
+                16,
+                "turn/end",
+                json!({"turn": 3, "reason": {"kind": "completed"}}),
+            ),
+            event(17, "session/end-seed", json!({})),
+            event(18, "turn/start", json!({"turn": 4})),
+            user(19, "user", "After a restore."),
+        ]);
+        let t = parse(text.as_bytes()).unwrap();
+        let users: Vec<&str> = t.turns.iter().map(|turn| turn.user.as_str()).collect();
+        assert_eq!(users, vec!["Fork question.", "After a restore."]);
+        assert_eq!(t.turns[0].assistant, "Fork answer.");
+        assert_eq!(t.title, "Fork question.");
+        let slugs: Vec<&str> = t.memory_writes.iter().map(|w| w.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["forks"]);
+        assert_eq!(t.records, 20, "every line is still read");
+        // The same events without `isSeeded`: nothing is left out.
+        let plain = text.replacen("\"isSeeded\":true", "\"isSeeded\":false", 1);
+        assert_ne!(plain, text);
+        let t = parse(plain.as_bytes()).unwrap();
+        assert_eq!(t.turns.len(), 4);
+        assert_eq!(t.memory_writes.len(), 2);
     }
 
     #[test]
