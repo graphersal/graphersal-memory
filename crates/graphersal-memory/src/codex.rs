@@ -335,6 +335,11 @@ impl Harness for Codex {
         "to give the agent a file, paste it into ~/.codex/AGENTS.md or a project's AGENTS.md"
     }
 
+    #[cfg(test)]
+    fn user_files(&self, home: &Path) {
+        fixture::user_files(home);
+    }
+
     fn has_sessions(&self) -> bool {
         self.paths.sessions.is_dir()
     }
@@ -775,6 +780,33 @@ impl crate::harness::Headless for HeadlessRun {
             "`codex exec` reports tokens but no cost, so the budget could not stop a run on a \
              paid model.",
         ))
+    }
+}
+
+/// What the conformance tests (`crate::conformance_tests`) and the install tests start from: a
+/// home with Codex's configuration as a user has it (their own entries, comments, rules).
+#[cfg(test)]
+pub(crate) mod fixture {
+    use std::path::Path;
+
+    /// The user's own Codex configuration: comments, top-level keys, a project table, an MCP server
+    /// of another program; their own AGENTS.md and a hook of theirs.
+    pub(crate) const CODEX_CONFIG: &str = "# my Codex settings\nmodel = \"gpt-5.5\"\napproval_policy = \"on-request\"\n\n[mcp_servers.other]\ncommand = \"npx\"\nargs = [\"-y\", \"other\"]  # keep\n\n[projects.\"/w/app\"]\ntrust_level = \"trusted\"\n";
+
+    pub(crate) fn user_files(home: &Path) {
+        let dir = home.join(".codex");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), CODEX_CONFIG).unwrap();
+        std::fs::write(
+            dir.join("AGENTS.md"),
+            "# My Codex rules\n\nTabs, not spaces.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("hooks.json"),
+            "{\n  \"hooks\": {\n    \"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"say done\"}]}]\n  }\n}\n",
+        )
+        .unwrap();
     }
 }
 

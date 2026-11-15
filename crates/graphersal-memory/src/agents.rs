@@ -240,6 +240,10 @@ pub trait Harness {
     fn export_hint(&self) -> &'static str {
         "to give the agent a file, add its path to `instructions` in the agent's configuration"
     }
+    /// Writes the harness's configuration as a user has it into `home` (their own entries,
+    /// comments, rules): what the conformance tests (`crate::conformance_tests`) start from.
+    #[cfg(test)]
+    fn user_files(&self, home: &Path);
     /// Whether its sessions are on this machine (its transcripts directory, database or
     /// registry).
     fn has_sessions(&self) -> bool;

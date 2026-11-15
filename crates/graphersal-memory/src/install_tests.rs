@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use crate::agents::Kind;
 use crate::cli::Profile as ProfileKind;
 use crate::client::McpClient;
+use crate::cursor::fixture::CURSOR_RULE;
 use crate::import::{self, Caller, ImportState};
 use crate::install::{self, ClaudePaths, InstallOptions, Setup, UninstallOptions};
 use crate::language::Language;
@@ -217,26 +218,6 @@ pub(crate) fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 
 pub(crate) fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap()
-}
-
-/// A home with Claude Code files in an unusual but valid formatting.
-pub(crate) fn existing_home(home: &Path) {
-    std::fs::write(
-        home.join(".claude.json"),
-        "{\"numStartups\": 3, \"theme\":\"dark\",\n \"mcpServers\": {\"other\": {\"command\":\"x\",\"args\":[]}}}\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(home.join(".claude")).unwrap();
-    std::fs::write(
-        home.join(".claude").join("settings.json"),
-        "{\n    \"model\": \"opus\",\n    \"hooks\": {\n        \"SessionStart\": [\n            {\"hooks\": [{\"type\": \"command\", \"command\": \"echo mine\"}]}\n        ]\n    }\n}",
-    )
-    .unwrap();
-    std::fs::write(
-        home.join(".claude").join("CLAUDE.md"),
-        "# My rules\n\nBe brief.",
-    )
-    .unwrap();
 }
 
 #[test]
@@ -959,7 +940,7 @@ fn an_untouched_block_of_an_earlier_version_is_updated_and_uninstalled_cleanly()
     memory.close();
 }
 
-fn refresh() -> InstallOptions {
+pub(crate) fn refresh() -> InstallOptions {
     InstallOptions {
         refresh: true,
         ..yes()
@@ -1514,24 +1495,6 @@ fn opencode_uninstall() -> UninstallOptions {
         harnesses: Some(vec![Kind::OpenCode]),
         ..UninstallOptions::default()
     }
-}
-
-/// A home with an opencode configuration in JSONC (comments, a trailing comma), the user's own
-/// AGENTS.md and plugin.
-fn existing_opencode_home(home: &Path) {
-    let dir = home.join(".config/opencode");
-    std::fs::create_dir_all(dir.join("plugins")).unwrap();
-    std::fs::write(
-        dir.join("opencode.jsonc"),
-        "{\n  // my settings\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"model\": \"opencode/big-pickle\",\n  \"mcp\": {\n    \"other\": {\"type\": \"local\", \"command\": [\"x\"]}, /* keep */\n  },\n}\n",
-    )
-    .unwrap();
-    std::fs::write(dir.join("AGENTS.md"), "# My opencode rules\n").unwrap();
-    std::fs::write(
-        dir.join("plugins/mine.js"),
-        "export const Mine = async () => ({})\n",
-    )
-    .unwrap();
 }
 
 fn opencode_setup(home: &Path, data: &Path) -> Setup {
@@ -2159,26 +2122,6 @@ fn codex_uninstall() -> UninstallOptions {
     }
 }
 
-/// The user's own Codex configuration: comments, top-level keys, a project table, an MCP server
-/// of another program; their own AGENTS.md and a hook of theirs.
-const CODEX_CONFIG: &str = "# my Codex settings\nmodel = \"gpt-5.5\"\napproval_policy = \"on-request\"\n\n[mcp_servers.other]\ncommand = \"npx\"\nargs = [\"-y\", \"other\"]  # keep\n\n[projects.\"/w/app\"]\ntrust_level = \"trusted\"\n";
-
-fn existing_codex_home(home: &Path) {
-    let dir = home.join(".codex");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("config.toml"), CODEX_CONFIG).unwrap();
-    std::fs::write(
-        dir.join("AGENTS.md"),
-        "# My Codex rules\n\nTabs, not spaces.\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("hooks.json"),
-        "{\n  \"hooks\": {\n    \"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"say done\"}]}]\n  }\n}\n",
-    )
-    .unwrap();
-}
-
 #[test]
 fn codex_install_then_uninstall_leaves_existing_files_byte_identical() {
     let home = TempDir::new("cx-rt-home");
@@ -2539,21 +2482,6 @@ fn cursor_uninstall() -> UninstallOptions {
         harnesses: Some(vec![Kind::Cursor]),
         ..UninstallOptions::default()
     }
-}
-
-/// The user's own `~/.cursor`: an `mcp.json` with a comment and a server of another program, a
-/// `hooks.json` with a hook of theirs, a user rule file of theirs (the documented formats,
-/// cursor.com/docs/mcp, /docs/hooks, /docs/rules).
-const CURSOR_MCP: &str = "{\n  // my servers\n  \"mcpServers\": {\n    \"other\": {\n      \"command\": \"npx\",\n      \"args\": [\"-y\", \"other\"]\n    }\n  }\n}\n";
-const CURSOR_HOOKS: &str = "{\n  \"version\": 1,\n  \"hooks\": {\n    \"afterFileEdit\": [{ \"command\": \"./hooks/format.sh\" }]\n  }\n}\n";
-const CURSOR_RULE: &str = "---\nalwaysApply: true\n---\n\nReply in a concise style.\n";
-
-fn existing_cursor_home(home: &Path) {
-    let dir = home.join(".cursor");
-    std::fs::create_dir_all(dir.join("rules")).unwrap();
-    std::fs::write(dir.join("mcp.json"), CURSOR_MCP).unwrap();
-    std::fs::write(dir.join("hooks.json"), CURSOR_HOOKS).unwrap();
-    std::fs::write(dir.join("rules/concise.mdc"), CURSOR_RULE).unwrap();
 }
 
 #[test]
@@ -5436,21 +5364,6 @@ fn codewhale_uninstall() -> UninstallOptions {
     }
 }
 
-/// The user's own CodeWhale configuration: comments, a provider table, their own
-/// `always_load` list in a `[tools]` section; an MCP server of another program; their own
-/// AGENTS.md.
-const CODEWHALE_CONFIG: &str = "# my CodeWhale settings\nprovider = \"deepseek\"\n\n[providers.deepseek]\nmodel = \"deepseek-v4\"\n\n[tools]\n# loaded up front\nalways_load = [\n  \"web_search\",\n]\n";
-
-const CODEWHALE_MCP: &str = "{\n  \"timeouts\": {\"connect_timeout\": 30},\n  \"servers\": {\n    \"git\": {\"command\": \"mcp-git\", \"args\": [], \"env\": {}}\n  }\n}\n";
-
-fn existing_codewhale_home(home: &Path) {
-    let dir = home.join(".codewhale");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("config.toml"), CODEWHALE_CONFIG).unwrap();
-    std::fs::write(dir.join("mcp.json"), CODEWHALE_MCP).unwrap();
-    std::fs::write(dir.join("AGENTS.md"), "# My rules\n\nTabs, not spaces.\n").unwrap();
-}
-
 #[test]
 fn codewhale_install_then_uninstall_leaves_existing_files_byte_identical() {
     let home = TempDir::new("cw-rt-home");
@@ -5833,4 +5746,29 @@ fn codewhale_native_memory_is_imported_once_and_read_only() {
     assert_eq!(code, 0, "{out}");
     assert!(!out.contains("CodeWhale's memory: imported"), "{out}");
     memory.close();
+}
+
+/// Claude Code's user files (`crate::claude_code::fixture`).
+pub(crate) fn existing_home(home: &Path) {
+    crate::claude_code::fixture::user_files(home);
+}
+
+/// opencode's user files (`crate::opencode::fixture`).
+pub(crate) fn existing_opencode_home(home: &Path) {
+    crate::opencode::fixture::user_files(home);
+}
+
+/// Codex's user files (`crate::codex::fixture`).
+pub(crate) fn existing_codex_home(home: &Path) {
+    crate::codex::fixture::user_files(home);
+}
+
+/// Cursor's user files (`crate::cursor::fixture`).
+pub(crate) fn existing_cursor_home(home: &Path) {
+    crate::cursor::fixture::user_files(home);
+}
+
+/// CodeWhale's user files (`crate::codewhale::fixture`).
+pub(crate) fn existing_codewhale_home(home: &Path) {
+    crate::codewhale::fixture::user_files(home);
 }

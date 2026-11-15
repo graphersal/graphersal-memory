@@ -454,6 +454,11 @@ impl Harness for OpenCode {
         Some(self)
     }
 
+    #[cfg(test)]
+    fn user_files(&self, home: &Path) {
+        fixture::user_files(home);
+    }
+
     fn has_sessions(&self) -> bool {
         self.paths.db.is_file()
     }
@@ -935,6 +940,31 @@ impl crate::harness::Headless for HeadlessRun {
 
     fn bench_answer(&self, output: &crate::harness::Output, _command: &[String]) -> Option<Value> {
         Some(normalize_run_output(&output.stdout))
+    }
+}
+
+/// What the conformance tests (`crate::conformance_tests`) and the install tests start from: a
+/// home with opencode's configuration as a user has it (their own entries, comments, rules).
+#[cfg(test)]
+pub(crate) mod fixture {
+    use std::path::Path;
+
+    /// A home with an opencode configuration in JSONC (comments, a trailing comma), the user's own
+    /// AGENTS.md and plugin.
+    pub(crate) fn user_files(home: &Path) {
+        let dir = home.join(".config").join("opencode");
+        std::fs::create_dir_all(dir.join("plugins")).unwrap();
+        std::fs::write(
+            dir.join("opencode.jsonc"),
+            "{\n  // my settings\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"model\": \"opencode/big-pickle\",\n  \"mcp\": {\n    \"other\": {\"type\": \"local\", \"command\": [\"x\"]}, /* keep */\n  },\n}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "# My opencode rules\n").unwrap();
+        std::fs::write(
+            dir.join("plugins").join("mine.js"),
+            "export const Mine = async () => ({})\n",
+        )
+        .unwrap();
     }
 }
 
