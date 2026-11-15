@@ -130,7 +130,10 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     rule block `RULE_BLOCK` with its fingerprinted begin line), the state and backups in
     `<data dir>/install/`, `uninstall` (restore an untouched file from its backup, else remove our
     parts structurally; a backup that holds our parts is never put back, `backup_holds_ours`),
-    `inspect`/`status_lines`/`doctor`; `InstallLock` (`<data dir>/install/install.lock`: one
+    `inspect`/`status_lines`/`doctor`; `refresh` (`install --refresh`, run by `upgrade`: the
+    installed harnesses' parts brought to this version, `refresh_answers` = every choice as it
+    is, per harness through `Answers::own_memory_as_is`/`develop_as_is`; no import, settings
+    file or download); `InstallLock` (`<data dir>/install/install.lock`: one
     install or uninstall at a time); `Ours` (`Setup::ours`: our MCP entries and hooks by the
     program's name, this binary or one a state file recorded; `split_program` reads a command's
     program word); `apply_with_retries` (plan again right before writing, refuse read-only files,
@@ -156,8 +159,9 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `GRAPHERSAL_MEMORY_UPDATE_CHECK`), how the binary was installed (`Method`, `method_of`: the
     installers' directory, cargo's, other), `manual_commands`, `check_json` (the UI's
     `GET /api/ui/update`) and `upgrade` (`run` with a `Machine`: the release's `install.sh` /
-    `install.ps1` with `--version`/`--dir`, or `cargo install --version`; then `daemon restart`
-    and `--version` through the new binary; plan first, `--check`, `--dry-run`, `--yes`);
+    `install.ps1` with `--version`/`--dir`, or `cargo install --version`; then `daemon restart`,
+    `install --refresh --yes` and `--version` through the new binary; plan first, `--check`,
+    `--dry-run`, `--yes`; `manual_commands` end with the same two);
   - `src/winshell.rs`: Windows shells: `all_shell_words` (the bare name when `PATH` resolves
     it to this binary, else the forward-slash path, else the directory's 8.3 short path, for each
     argument too; lookups injected), `short_path` (`GetShortPathNameW`, the crate's second

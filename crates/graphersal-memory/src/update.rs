@@ -16,8 +16,9 @@
 //! - **`upgrade`** ([`run`]): delegates the replacement to what installed the binary: the
 //!   release's own `install.sh` / `install.ps1` (they verify the archive against `SHA256SUMS`
 //!   and replace a running binary safely) with `--version` and `--dir`, or `cargo install
-//!   graphersal-memory --locked --force --version <v>`; then `daemon restart` through the new
-//!   binary and its `--version`. It shows the plan and asks first (`--yes`), `--check` only
+//!   graphersal-memory --locked --force --version <v>`; then, through the new binary, `daemon
+//!   restart`, `install --refresh --yes` (the parts install wrote brought to the new version,
+//!   every choice kept) and `--version`. It shows the plan and asks first (`--yes`), `--check` only
 //!   reports, `--dry-run` stops after the plan.
 
 use std::io::{BufRead, Write};
@@ -315,7 +316,8 @@ fn quoted(path: &Path, windows: bool) -> String {
 }
 
 /// The commands that replace the binary by hand (the same `upgrade` runs), then restart the
-/// daemon: each ready to copy into the platform's shell.
+/// daemon and bring the installed parts to the new version: each ready to copy into the
+/// platform's shell.
 pub fn manual_commands(method: &Method, windows: bool) -> Vec<String> {
     let mut commands = Vec::new();
     match (method, windows) {
@@ -338,6 +340,7 @@ pub fn manual_commands(method: &Method, windows: bool) -> Vec<String> {
         )),
     }
     commands.push("graphersal-memory daemon restart".to_string());
+    commands.push("graphersal-memory install --refresh".to_string());
     commands
 }
 
@@ -564,6 +567,12 @@ pub fn run(
         program: options.exe.clone(),
         args: vec!["daemon".into(), "restart".into()],
     };
+    // Through the new binary: the parts install wrote (the rule block, the MCP entries, the
+    // hooks) brought to the new version, every choice kept.
+    let refresh = Step {
+        program: options.exe.clone(),
+        args: vec!["install".into(), "--refresh".into(), "--yes".into()],
+    };
     let version = Step {
         program: options.exe.clone(),
         args: vec!["--version".into()],
@@ -581,7 +590,13 @@ pub fn run(
     }
     let _ = writeln!(out, "  {n}. {}", replace.shown());
     let _ = writeln!(out, "  {}. {}", n + 1, restart.shown());
-    let _ = writeln!(out, "  {}. {}", n + 2, version.shown());
+    let _ = writeln!(
+        out,
+        "  {}. {} (the installed parts to the new version)",
+        n + 2,
+        refresh.shown()
+    );
+    let _ = writeln!(out, "  {}. {}", n + 3, version.shown());
     if matches!(options.method, Method::Cargo(_)) {
         let _ = writeln!(out, "\n  cargo builds from source: a few minutes.");
     }
@@ -620,6 +635,14 @@ pub fn run(
     machine
         .run(&restart)
         .map_err(|err| format!("upgraded, but the daemon did not restart: {err}"))?;
+    let _ = writeln!(out);
+    machine.run(&refresh).map_err(|err| {
+        format!(
+            "upgraded to {latest}, but the installed parts were not all brought to it ({err}; \
+             the output above says why); fix what it names, then run `graphersal-memory install \
+             --refresh`, or `graphersal-memory doctor` to check the setup"
+        )
+    })?;
     machine.run(&version)?;
     let _ = writeln!(
         out,
@@ -777,7 +800,8 @@ mod tests {
             manual_commands(&Method::Cargo(dir.clone()), false),
             [
                 "cargo install graphersal-memory --locked --force",
-                "graphersal-memory daemon restart"
+                "graphersal-memory daemon restart",
+                "graphersal-memory install --refresh"
             ]
         );
         assert_eq!(
@@ -885,7 +909,9 @@ mod tests {
         );
         assert_eq!(machine.runs[1].args, ["daemon", "restart"]);
         assert_eq!(machine.runs[1].program, options.exe);
-        assert_eq!(machine.runs[2].args, ["--version"]);
+        assert_eq!(machine.runs[2].args, ["install", "--refresh", "--yes"]);
+        assert_eq!(machine.runs[2].program, options.exe);
+        assert_eq!(machine.runs[3].args, ["--version"]);
         assert!(machine.prepared.is_empty());
         assert!(
             !options.scratch.exists(),
@@ -982,6 +1008,22 @@ mod tests {
         let (result, _) = upgrade(&options, "99.0.0", &mut failing, "");
         assert!(result.unwrap_err().contains("unchanged"));
         assert_eq!(failing.runs.len(), 1);
+        // A refresh that does not finish (a conflict): upgraded, and the way on is named.
+        let mut refresh_fails = Recorded {
+            fail_run: Some(3),
+            ..Recorded::default()
+        };
+        let (result, out) = upgrade(&options, "99.0.0", &mut refresh_fails, "");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("upgraded to 99.0.0") && err.contains("install --refresh"),
+            "{err}"
+        );
+        assert_eq!(
+            refresh_fails.runs[2].args,
+            ["install", "--refresh", "--yes"]
+        );
+        assert_eq!(refresh_fails.runs.len(), 3, "{out}");
         // The latest release unknown: an error.
         let mut out = Vec::new();
         let err = run(

@@ -101,7 +101,9 @@ graphersal-memory upgrade
 It asks GitHub for the latest release, shows what it will do and asks before doing it. It upgrades
 the way the binary was installed: through the release's own installer into the same directory
 (the archive checked against `SHA256SUMS`), or with `cargo install` when it came from cargo. Then
-it restarts the daemon; open agent sessions reconnect to the new one by themselves.
+it restarts the daemon (open agent sessions reconnect to the new one by themselves) and brings
+what install wrote into your harnesses (the rule block, the MCP entries, the hooks) to the new
+version, keeping every choice you made.
 `graphersal-memory upgrade --check` only says whether a newer release is out, `--dry-run` shows
 the plan, `--yes` does not ask. Your configuration and memories stay as they are.
 
@@ -111,11 +113,13 @@ By hand, the same way you installed:
 curl -fsSL https://github.com/graphersal/graphersal-memory/releases/latest/download/install.sh | sh
 # or: cargo install graphersal-memory --locked --force
 graphersal-memory daemon restart
+graphersal-memory install --refresh
 ```
 
 ```powershell
 irm https://github.com/graphersal/graphersal-memory/releases/latest/download/install.ps1 | iex
 graphersal-memory daemon restart
+graphersal-memory install --refresh
 ```
 
 Installed both ways? Then there are two binaries (`~/.local/bin` and `~/.cargo/bin`) and the

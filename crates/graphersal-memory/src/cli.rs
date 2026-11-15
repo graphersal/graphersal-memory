@@ -103,6 +103,14 @@ pub enum Command {
         /// What to do about other memory tools found beside graphersal-memory.
         #[command(flatten)]
         other: OtherMemoryArgs,
+        /// After an upgrade by hand: bring what install wrote (rule block, MCP entries, hooks),
+        /// in the harnesses it is installed in, up to this version; every choice stays, nothing
+        /// else changes (`upgrade` runs it by itself).
+        #[arg(long, conflicts_with_all = [
+            "harness", "language", "model", "no_import", "keep_auto_memory", "enable_develop",
+            "summaries", "other_read_only", "keep_other", "disable_other", "enable_other",
+        ])]
+        refresh: bool,
     },
     /// Remove exactly what `install` added; your own settings stay untouched.
     Uninstall {
@@ -657,7 +665,8 @@ mod tests {
                 keep_auto_memory: false,
                 enable_develop: false,
                 summaries: false,
-                other: OtherMemoryArgs::default()
+                other: OtherMemoryArgs::default(),
+                refresh: false
             }
         );
         assert_eq!(
@@ -803,7 +812,8 @@ mod tests {
                 keep_auto_memory: false,
                 enable_develop: true,
                 summaries: false,
-                other: OtherMemoryArgs::default()
+                other: OtherMemoryArgs::default(),
+                refresh: false
             }
         );
         assert_eq!(
@@ -1153,6 +1163,35 @@ mod tests {
                 && at("codewhale") < at("all"),
             "{help}"
         );
+    }
+
+    #[test]
+    fn install_refresh_parses_alone_and_is_in_the_help() {
+        match parse(&["install", "--refresh", "--yes"]).unwrap().command {
+            Command::Install {
+                refresh: true,
+                yes: true,
+                ..
+            } => {}
+            other => panic!("{other:?}"),
+        }
+        for flag in [
+            &["--harness", "codex"][..],
+            &["--language", "any"],
+            &["--enable-develop"],
+            &["--disable-other", "x"],
+        ] {
+            let mut args = vec!["install", "--refresh"];
+            args.extend(flag);
+            assert!(parse(&args).is_err(), "{flag:?}");
+        }
+        let help = Cli::command()
+            .find_subcommand("install")
+            .unwrap()
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--refresh"), "{help}");
     }
 
     #[test]

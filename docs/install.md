@@ -58,7 +58,8 @@ The upgrade, through the release's installer (it was installed with it):
   1. download https://github.com/graphersal/graphersal-memory/releases/download/v0.3.0/install.sh
   2. sh /tmp/graphersal-memory-upgrade-4242/install.sh --version v0.3.0 --dir /Users/you/.local/bin
   3. /Users/you/.local/bin/graphersal-memory daemon restart
-  4. /Users/you/.local/bin/graphersal-memory --version
+  4. /Users/you/.local/bin/graphersal-memory install --refresh --yes (the installed parts to the new version)
+  5. /Users/you/.local/bin/graphersal-memory --version
 
 Upgrade now? [y/N]
 ```
@@ -72,7 +73,16 @@ How it upgrades follows where the binary is:
 | anywhere else | the release's installer with `--dir` set to that directory |
 
 The installers verify the archive against the release's `SHA256SUMS` and replace a running binary
-safely. A failed step leaves the installed version as it was. `--check` only reports (with the
+safely. A failed step leaves the installed version as it was.
+
+Step 4 runs the new binary's `install --refresh`: what install wrote into the harnesses it is
+installed in (the rule block, the MCP entries, the hooks, the rule file) is brought to the new
+version. Every choice stays as it is: no harness is added, the harness's own memory, the develop
+server and other memory tools stay on or off as they are, a memory tool found since the last
+install is not named in the rule block, and nothing is imported, downloaded or written into
+`config.json`. A part you edited by hand stays a conflict and is reported, as with `install`.
+After an upgrade by hand (the installer or `cargo install`), run `graphersal-memory install
+--refresh` yourself; `--dry-run` shows the plan first. `--check` only reports (with the
 commands to run by hand), `--dry-run` stops after the plan, `--yes` does not ask (needed without
 a terminal). `GRAPHERSAL_MEMORY_BASE_URL` points the check and the installer download at a mirror.
 
