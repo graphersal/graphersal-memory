@@ -563,7 +563,8 @@ Unit tests that need more than one module's helpers sit beside their module as
   store gets the new catalog at its next start. Test a body change with the round trips in
   `src/runtime/mcp_tests.rs`; descriptions stay short (they are paid on every agent turn).
 - `docs/`: the user-facing documentation (why, how it works, A/B method, privacy, harnesses,
-  install, roadmap, the Cursor live check); `docs/images/`: the README's screenshots (a demo
+  install, roadmap, the Cursor live check) and `docs/adding-a-harness.md` (the checklist for a
+  new harness); `docs/images/`: the README's screenshots (a demo
   project with invented memories, light and dark).
 
 ## Commands
