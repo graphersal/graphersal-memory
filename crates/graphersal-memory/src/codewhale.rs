@@ -557,6 +557,10 @@ impl Harness for CodeWhale {
         state != crate::install::PartState::Missing && enabled
     }
 
+    fn has_sessions(&self) -> bool {
+        self.paths.sessions.is_dir()
+    }
+
     fn other_memory(&self) -> Option<&dyn crate::coexist::OtherMemory> {
         Some(self)
     }

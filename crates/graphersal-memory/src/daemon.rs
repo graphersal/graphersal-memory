@@ -1343,41 +1343,45 @@ impl Daemon {
         }
         drop(reader);
         drop(writer);
-        if handshake.harness == crate::agents::Kind::CodeWhale.id()
-            && handshake.profile == crate::cli::Profile::Use
+        if handshake.profile == crate::cli::Profile::Use
+            && let Some(kind) = crate::agents::Kind::from_id(&handshake.harness)
         {
-            self.end_codewhale_sessions(&handshake.project, opened);
+            self.end_sessions_with_connection(kind, &handshake.project, opened);
         }
     }
 
-    /// The end of a CodeWhale `use` connection opened at `opened` (seconds) for the project at
-    /// `root`: CodeWhale keeps its MCP servers for its whole run and kills them when it exits,
-    /// before our shim can send the session end (seen live with v0.10.2), so the daemon queues
-    /// the indexing itself, with that project's CodeWhale sessions written since then marked
-    /// ended (`crate::codewhale::sessions::written_since`). CodeWhale's home comes from this
-    /// process's environment.
-    fn end_codewhale_sessions(self: &Arc<Self>, root: &str, opened: u64) {
+    /// The end of a `use` connection of a harness whose sessions end with it
+    /// (`SessionSource::ended_by_connection`: CodeWhale keeps its MCP servers for its whole run
+    /// and kills them when it exits, before our shim can send the session end, seen live with
+    /// v0.10.2), opened at `opened` (seconds) for the project at `root`: the daemon queues the
+    /// indexing itself, with that project's sessions written since then marked ended. Where
+    /// the sessions are comes from this process's environment.
+    fn end_sessions_with_connection(
+        self: &Arc<Self>,
+        kind: crate::agents::Kind,
+        root: &str,
+        opened: u64,
+    ) {
         if root.is_empty() {
             return;
         }
+        let reader = crate::harnesses::sessions(kind);
         let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-        let Ok(paths) = crate::codewhale::CodeWhalePaths::resolve(&env) else {
+        let Some(dir) = reader.ended_by_connection(&env) else {
             return;
         };
-        let mut request =
-            sessions::Request::for_harness(crate::agents::Kind::CodeWhale, &paths.sessions);
+        let mut request = sessions::Request::for_harness(kind, &dir);
         request
             .ended
-            .extend(crate::codewhale::sessions::written_since(
-                &paths.sessions,
-                Path::new(root),
-                opened,
-            ));
+            .extend(reader.written_since(&dir, Path::new(root), opened));
         if request.ended.is_empty() {
             return;
         }
         if let Err(err) = self.queue_indexing(request) {
-            log(&format!("cannot queue CodeWhale's ended sessions: {err}"));
+            log(&format!(
+                "cannot queue {}'s ended sessions: {err}",
+                kind.display_name()
+            ));
         }
     }
 

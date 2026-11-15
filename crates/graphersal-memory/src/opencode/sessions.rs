@@ -666,6 +666,32 @@ fn build(
     out
 }
 
+/// opencode's sessions (`crate::sessions::SessionSource`): the units of its database.
+pub struct Sessions;
+
+impl crate::sessions::SessionSource for Sessions {
+    fn units(&self, dir: &Path) -> Result<Vec<Unit>, String> {
+        units(dir)
+    }
+
+    /// The opencode session id of `<db>#<id>`.
+    fn unit_id(&self, file: &Path) -> String {
+        match split_unit(file) {
+            Some((_, id)) => id,
+            None => file
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        }
+    }
+
+    fn read(&self, file: &Path, _data_dir: &Path) -> Result<(Transcript, String), String> {
+        let (db, id) = split_unit(file)
+            .ok_or_else(|| format!("{} is not an opencode session", file.display()))?;
+        Ok((read(&db, &id)?, format!("opencode:{id}")))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

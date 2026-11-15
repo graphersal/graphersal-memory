@@ -4,6 +4,7 @@
 
 use crate::agents::{Harness, Kind};
 use crate::install::Setup;
+use crate::sessions::SessionSource;
 
 /// The harness of `kind` with the files of `setup`.
 pub fn of(setup: &Setup, kind: Kind) -> Box<dyn Harness> {
@@ -13,5 +14,17 @@ pub fn of(setup: &Setup, kind: Kind) -> Box<dyn Harness> {
         Kind::Codex => Box::new(setup.codex_agent()),
         Kind::Cursor => Box::new(setup.cursor_agent()),
         Kind::CodeWhale => Box::new(setup.codewhale_agent()),
+    }
+}
+
+/// The sessions of `kind`, as the indexing reads them: without a setup (the daemon indexes
+/// with a request's directory).
+pub fn sessions(kind: Kind) -> &'static dyn SessionSource {
+    match kind {
+        Kind::ClaudeCode => &crate::sessions::ClaudeSessions,
+        Kind::OpenCode => &crate::opencode::sessions::Sessions,
+        Kind::Codex => &crate::codex::sessions::Sessions,
+        Kind::Cursor => &crate::cursor::sessions::Sessions,
+        Kind::CodeWhale => &crate::codewhale::sessions::Sessions,
     }
 }

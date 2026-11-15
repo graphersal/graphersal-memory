@@ -65,13 +65,7 @@ pub fn plan(setup: &Setup, harness: &str, cwd: &Path, project: &Path) -> Plan {
     }
     let requests = kinds
         .iter()
-        .filter(|kind| match kind {
-            Kind::ClaudeCode => setup.paths.projects.is_dir(),
-            Kind::OpenCode => setup.opencode.db.is_file(),
-            Kind::Codex => setup.codex.sessions.is_dir(),
-            Kind::Cursor => setup.cursor.registry.is_file(),
-            Kind::CodeWhale => setup.codewhale.sessions.is_dir(),
-        })
+        .filter(|kind| setup.agent_of(**kind).has_sessions())
         .map(|kind| Request::for_harness(*kind, setup.agent_of(*kind).projects_dir()))
         .collect();
     let mut dirs = vec![cwd.to_path_buf()];
@@ -147,13 +141,9 @@ pub fn end_since(plan: &Plan, since: Option<u64>, enqueue: &mut Enqueue<'_>) -> 
     let mut plan = plan.clone();
     if let Some(since) = since {
         for request in &mut plan.requests {
-            if request.harness != Kind::CodeWhale {
-                continue;
-            }
+            let reader = crate::harnesses::sessions(request.harness);
             for dir in &plan.dirs {
-                for path in
-                    crate::codewhale::sessions::written_since(&request.projects_dir, dir, since)
-                {
+                for path in reader.written_since(&request.projects_dir, dir, since) {
                     request.ended.insert(path);
                 }
             }

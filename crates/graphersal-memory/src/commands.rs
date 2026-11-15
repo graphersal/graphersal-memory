@@ -794,7 +794,7 @@ fn run_projects(
 }
 
 /// Connections of the product's own calls: through the daemon, `use` profile.
-fn daemon_connector(
+pub(crate) fn daemon_connector(
     setup: &Setup,
 ) -> impl FnMut(&str) -> Result<Box<dyn Caller>, String> + Send + 'static {
     let location = DaemonLocation {
@@ -1054,16 +1054,12 @@ pub fn session_harnesses(setup: &Setup) -> Vec<crate::agents::Kind> {
     let detected: Vec<_> = setup
         .detected()
         .into_iter()
-        .filter(|kind| match kind {
-            crate::agents::Kind::OpenCode => setup.opencode.db.is_file(),
-            crate::agents::Kind::Codex => setup.codex.sessions.is_dir(),
-            crate::agents::Kind::Cursor => setup.cursor.registry.is_file(),
-            crate::agents::Kind::CodeWhale => setup.codewhale.sessions.is_dir(),
-            crate::agents::Kind::ClaudeCode => true,
+        .filter(|kind| {
+            *kind == crate::agents::Kind::default() || setup.agent_of(*kind).has_sessions()
         })
         .collect();
     if detected.is_empty() {
-        vec![crate::agents::Kind::ClaudeCode]
+        vec![crate::agents::Kind::default()]
     } else {
         detected
     }
@@ -1331,78 +1327,26 @@ fn run_hook(
     if std::env::var(summaries::HOOK_ENV).is_ok_and(|v| v == "off") {
         return 0;
     }
-    // Claude Code's hooks run by Cursor (its third-party hooks): the Cursor hooks do Cursor's
-    // part. The input is read here to tell (a harness closes stdin after writing it).
     let input = hook::read_input(stdin);
-    if harness == Harness::ClaudeCode && hook::is_cursor_input(&String::from_utf8_lossy(&input)) {
-        let _ = writeln!(
-            stderr,
-            "graphersal-memory hook: run by Cursor for Claude Code's settings; nothing to do \
-             (graphersal-memory's own Cursor hooks handle Cursor: `graphersal-memory install \
-             --harness cursor`)"
-        );
+    let Some(kind) = harness.kinds().and_then(|kinds| kinds.first().copied()) else {
         return 0;
-    }
-    // CodeWhale has no hooks of ours: the MCP connection does their work.
-    if harness == Harness::Codewhale {
-        let _ = writeln!(
-            stderr,
-            "graphersal-memory hook: CodeWhale needs no hook (the MCP server's connection does \
-             the session start and end); nothing to do"
-        );
-        return 0;
-    }
-    let stdin = std::io::Cursor::new(input);
+    };
     match setup_with(cli, false) {
         Ok(setup) => {
-            let connect = daemon_connector(&setup);
-            let location = setup_location(&setup);
-            let enqueue: hook::Enqueue =
-                Box::new(move |request: sessions::Request| enqueue_request(&location, &request));
-            if harness == Harness::Cursor {
-                return hook::run_cursor_with_context(
-                    event,
-                    setup.cursor.registry.clone(),
-                    std::env::var("CURSOR_PROJECT_DIR").ok(),
-                    Some(enqueue),
-                    Some(start_fetch(&setup, crate::agents::Kind::Cursor)),
-                    stdin,
-                    stdout,
-                    stderr,
-                );
+            let agent = setup.agent_of(kind);
+            match agent.hook() {
+                Some(handler) => handler.run(&setup, event, input, stdout, stderr),
+                // A harness without hooks of ours: the MCP connection does their work.
+                None => {
+                    let _ = writeln!(
+                        stderr,
+                        "graphersal-memory hook: {} needs no hook (the MCP server's connection \
+                         does the session start and end); nothing to do",
+                        agent.display_name()
+                    );
+                    0
+                }
             }
-            if harness == Harness::Codex {
-                return hook::run_codex(
-                    event,
-                    setup.codex.sessions.clone(),
-                    Some(enqueue),
-                    stdin,
-                    stdout,
-                    stderr,
-                );
-            }
-            if harness == Harness::Opencode {
-                return hook::run_opencode(
-                    event,
-                    setup.opencode.db.clone(),
-                    Some(enqueue),
-                    stdin,
-                    stdout,
-                    stderr,
-                );
-            }
-            let fetch = start_fetch(&setup, crate::agents::Kind::ClaudeCode);
-            hook::run_with_context(
-                event,
-                Ok(setup.paths.clone()),
-                setup.data_dir.clone(),
-                Box::new(connect),
-                Some(enqueue),
-                Some(fetch),
-                stdin,
-                stdout,
-                stderr,
-            )
         }
         Err(err) => {
             let _ = writeln!(stderr, "graphersal-memory hook: {err}");
@@ -1416,7 +1360,7 @@ fn run_hook(
 /// harnesses (installed, else the hook's `harness`) were synced for the conflict check
 /// (`crate::instructions`; nothing is sent when they are unchanged, a failure only leaves the
 /// counts as they were).
-fn start_fetch(setup: &Setup, harness: crate::agents::Kind) -> hook::StartFetch {
+pub(crate) fn start_fetch(setup: &Setup, harness: crate::agents::Kind) -> hook::StartFetch {
     let location = setup_location(setup);
     let setup = setup.clone();
     Box::new(move |dir: Option<&Path>, max: usize| {
@@ -1741,6 +1685,12 @@ fn session_events(
 }
 
 /// Queues an indexing request in the daemon (starting it).
+/// What a hook queues: the indexing request, to this setup's daemon.
+pub(crate) fn hook_enqueue(setup: &Setup) -> hook::Enqueue {
+    let location = setup_location(setup);
+    Box::new(move |request: sessions::Request| enqueue_request(&location, &request))
+}
+
 fn enqueue_request(location: &DaemonLocation, request: &sessions::Request) -> Result<(), String> {
     taken(&shim::request(location, &request.to_control())?)
 }

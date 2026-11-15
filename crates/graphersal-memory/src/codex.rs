@@ -273,6 +273,28 @@ impl crate::agents::OwnMemory for Codex {
     }
 }
 
+impl crate::agents::HookHandler for Codex {
+    /// Its rollout queued (active at the start, ended at the end); the start line becomes model
+    /// context.
+    fn run(
+        &self,
+        setup: &crate::install::Setup,
+        event: crate::hook::HookEvent,
+        input: Vec<u8>,
+        stdout: &mut dyn std::io::Write,
+        stderr: &mut dyn std::io::Write,
+    ) -> u8 {
+        crate::hook::run_codex(
+            event,
+            self.paths.sessions.clone(),
+            Some(crate::commands::hook_enqueue(setup)),
+            std::io::Cursor::new(input),
+            stdout,
+            stderr,
+        )
+    }
+}
+
 impl Harness for Codex {
     fn kind(&self) -> Kind {
         Kind::Codex
@@ -302,6 +324,14 @@ impl Harness for Codex {
     /// Codex runs our hooks only once the user trusts them in `/hooks`.
     fn action_needed(&self, setup: &crate::install::Setup) -> Option<String> {
         (!install::inspect(setup).hooks_trusted).then(install::hook_approval_line)
+    }
+
+    fn hook(&self) -> Option<&dyn crate::agents::HookHandler> {
+        Some(self)
+    }
+
+    fn has_sessions(&self) -> bool {
+        self.paths.sessions.is_dir()
     }
 
     fn other_memory(&self) -> Option<&dyn crate::coexist::OtherMemory> {
