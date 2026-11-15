@@ -96,6 +96,11 @@ impl Harness for ClaudeCode {
         self.paths.projects.is_dir()
     }
 
+    #[cfg(test)]
+    fn user_files(&self, home: &Path) {
+        fixture::user_files(home);
+    }
+
     fn hook(&self) -> Option<&dyn HookHandler> {
         Some(self)
     }
@@ -267,6 +272,33 @@ impl crate::harness::Headless for ClaudeHeadless {
 
     fn default_command(&self) -> Option<&'static str> {
         Some(crate::config::DEFAULT_HARNESS_COMMAND)
+    }
+}
+
+/// What the conformance tests (`crate::conformance_tests`) and the install tests start from: a
+/// home with Claude Code's configuration as a user has it (their own entries, comments, rules).
+#[cfg(test)]
+pub(crate) mod fixture {
+    use std::path::Path;
+
+    /// A home with Claude Code files in an unusual but valid formatting.
+    pub(crate) fn user_files(home: &Path) {
+        std::fs::write(
+            home.join(".claude.json"),
+            "{\"numStartups\": 3, \"theme\":\"dark\",\n \"mcpServers\": {\"other\": {\"command\":\"x\",\"args\":[]}}}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(
+            home.join(".claude").join("settings.json"),
+            "{\n    \"model\": \"opus\",\n    \"hooks\": {\n        \"SessionStart\": [\n            {\"hooks\": [{\"type\": \"command\", \"command\": \"echo mine\"}]}\n        ]\n    }\n}",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".claude").join("CLAUDE.md"),
+            "# My rules\n\nBe brief.",
+        )
+        .unwrap();
     }
 }
 

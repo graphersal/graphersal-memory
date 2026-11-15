@@ -22,6 +22,8 @@ mod coexist;
 mod coexist_tests;
 mod commands;
 mod config;
+#[cfg(test)]
+mod conformance_tests;
 mod cursor;
 mod daemon;
 mod download;

@@ -562,6 +562,11 @@ impl Harness for CodeWhale {
          AGENTS.md"
     }
 
+    #[cfg(test)]
+    fn user_files(&self, home: &Path) {
+        fixture::user_files(home);
+    }
+
     fn has_sessions(&self) -> bool {
         self.paths.sessions.is_dir()
     }
@@ -749,6 +754,28 @@ impl crate::harness::Headless for HeadlessRun {
             "the bench does not run through CodeWhale yet (planned).",
             NO_BENCH,
         ))
+    }
+}
+
+/// What the conformance tests (`crate::conformance_tests`) and the install tests start from: a
+/// home with CodeWhale's configuration as a user has it (their own entries, comments, rules).
+#[cfg(test)]
+pub(crate) mod fixture {
+    use std::path::Path;
+
+    /// The user's own CodeWhale configuration: comments, a provider table, their own
+    /// `always_load` list in a `[tools]` section; an MCP server of another program; their own
+    /// AGENTS.md.
+    pub(crate) const CODEWHALE_CONFIG: &str = "# my CodeWhale settings\nprovider = \"deepseek\"\n\n[providers.deepseek]\nmodel = \"deepseek-v4\"\n\n[tools]\n# loaded up front\nalways_load = [\n  \"web_search\",\n]\n";
+
+    pub(crate) const CODEWHALE_MCP: &str = "{\n  \"timeouts\": {\"connect_timeout\": 30},\n  \"servers\": {\n    \"git\": {\"command\": \"mcp-git\", \"args\": [], \"env\": {}}\n  }\n}\n";
+
+    pub(crate) fn user_files(home: &Path) {
+        let dir = home.join(".codewhale");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), CODEWHALE_CONFIG).unwrap();
+        std::fs::write(dir.join("mcp.json"), CODEWHALE_MCP).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "# My rules\n\nTabs, not spaces.\n").unwrap();
     }
 }
 

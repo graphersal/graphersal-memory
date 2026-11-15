@@ -258,6 +258,11 @@ impl Harness for Cursor {
          under ~/.cursor/rules (a .mdc file with `alwaysApply: true`)"
     }
 
+    #[cfg(test)]
+    fn user_files(&self, home: &Path) {
+        fixture::user_files(home);
+    }
+
     fn has_sessions(&self) -> bool {
         self.paths.registry.is_file()
     }
@@ -385,6 +390,31 @@ impl crate::harness::Headless for HeadlessRun {
             "Cursor's CLI reports no cost, so the budget could not stop the run, and it reads \
              your ~/.cursor (MCP servers, hooks) with no way to isolate a run.",
         ))
+    }
+}
+
+/// What the conformance tests (`crate::conformance_tests`) and the install tests start from: a
+/// home with Cursor's configuration as a user has it (their own entries, comments, rules).
+#[cfg(test)]
+pub(crate) mod fixture {
+    use std::path::Path;
+
+    /// The user's own `~/.cursor`: an `mcp.json` with a comment and a server of another program, a
+    /// `hooks.json` with a hook of theirs, a user rule file of theirs (the documented formats,
+    /// cursor.com/docs/mcp, /docs/hooks, /docs/rules).
+    pub(crate) const CURSOR_MCP: &str = "{\n  // my servers\n  \"mcpServers\": {\n    \"other\": {\n      \"command\": \"npx\",\n      \"args\": [\"-y\", \"other\"]\n    }\n  }\n}\n";
+
+    pub(crate) const CURSOR_HOOKS: &str = "{\n  \"version\": 1,\n  \"hooks\": {\n    \"afterFileEdit\": [{ \"command\": \"./hooks/format.sh\" }]\n  }\n}\n";
+
+    pub(crate) const CURSOR_RULE: &str =
+        "---\nalwaysApply: true\n---\n\nReply in a concise style.\n";
+
+    pub(crate) fn user_files(home: &Path) {
+        let dir = home.join(".cursor");
+        std::fs::create_dir_all(dir.join("rules")).unwrap();
+        std::fs::write(dir.join("mcp.json"), CURSOR_MCP).unwrap();
+        std::fs::write(dir.join("hooks.json"), CURSOR_HOOKS).unwrap();
+        std::fs::write(dir.join("rules").join("concise.mdc"), CURSOR_RULE).unwrap();
     }
 }
 
