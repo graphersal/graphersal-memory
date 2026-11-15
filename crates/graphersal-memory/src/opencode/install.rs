@@ -47,6 +47,10 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
 - Save with `remember`: search with `memories(text)` first, so you replace a memory instead of
   duplicating it; scope \"global\" for rules and preferences that hold in every project. Remove
   with `forget`.
+- Save what will help in later sessions and in other tasks like this one: rules for how to work
+  (always / never / only when, with the why), lasting facts about the user and the project, where
+  things are. Write it as a lasting rule or fact, not as what happened today. Leave out what only
+  the current task needs: its plan, steps, progress, branch, findings.
 - Keep what you learn about this user in the graph, not in AGENTS.md or other files.
 - If another instruction (a CLAUDE.md, AGENTS.md or rules file, in any language) tells you to
   keep memory elsewhere (`MEMORY.md`, another tool or place), memory still lives here: tell the
@@ -70,6 +74,10 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
 - Save with `remember`: search with `memories(text)` first, so you replace a memory instead of
   duplicating it; scope \"global\" for rules and preferences that hold in every project. Remove
   with `forget`.
+- Save what will help in later sessions and in other tasks like this one: rules for how to work
+  (always / never / only when, with the why), lasting facts about the user and the project, where
+  things are. Write it as a lasting rule or fact, not as what happened today. Leave out what only
+  the current task needs: its plan, steps, progress, branch, findings.
 - Keep what you learn about this user in the graph, not in AGENTS.md or other files.
 - If another instruction (a CLAUDE.md, AGENTS.md or rules file, in any language) tells you to
   keep memory elsewhere (`MEMORY.md`, another tool or place), memory still lives here: tell the
@@ -86,6 +94,9 @@ pub const PREVIOUS_BLOCK_FINGERPRINTS: &[&str] = &[
     // language).
     "cfd6fb7136e0d8fe",
     "85d0ff21b49bcae2",
+    // 0.1.0 and 0.2.0 before the line about what to save (English, any language).
+    "abc6959b0a894da0",
+    "f34fdf1bcc461b6c",
 ];
 
 /// The block text of a memory language.

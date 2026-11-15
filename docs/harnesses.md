@@ -18,8 +18,9 @@ transcripts, and whether it has hooks.
 | Cursor | install, rule file, hooks, past sessions the hooks report (no summaries or bench through Cursor; not yet checked with a live Cursor) | a member of `mcpServers` in `~/.cursor/mcp.json`, edited in place with a backup | a rule file of our own, `~/.cursor/rules/graphersal-memory.mdc` (`alwaysApply: true`) | the transcripts its hooks name (`transcript_path`), read-only | sessionStart / sessionEnd in `~/.cursor/hooks.json` |
 | CodeWhale (preview) | install, rule block, past sessions, the import of its own memory, opt-in summaries (no bench through CodeWhale yet; run live once, on macOS) | members of `servers` (or `mcpServers`) in `~/.codewhale/mcp.json`, edited in place with a backup; our tools in `[tools] always_load` of `~/.codewhale/config.toml` | a marked block in `~/.codewhale/AGENTS.md` (or the global file CodeWhale loads) | its saved sessions (`~/.codewhale/sessions/<id>.json`), read-only | none: the MCP connection marks the start and end |
 
-The rule block tells the agent how to use the memory tools and which memory language to use; it
-holds none of your memories. The memories that always apply reach the agent through the start
+The rule block tells the agent how to use the memory tools, what is worth saving (what later
+sessions and similar tasks need, not the current task's plan or progress) and which memory
+language to use; it holds none of your memories. The memories that always apply reach the agent through the start
 context (below). Where a harness has no hooks, synchronisation runs from the MCP server itself or
 on demand.
 

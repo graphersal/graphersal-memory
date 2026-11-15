@@ -15,6 +15,7 @@ use crate::cli::Profile as ProfileKind;
 use crate::client::McpClient;
 use crate::import::{self, Caller, ImportState};
 use crate::install::{self, ClaudePaths, InstallOptions, Setup, UninstallOptions};
+use crate::language::Language;
 use crate::mcp::{self, StoreRuntime};
 use crate::mcp_tests::TempDir;
 use crate::{hook, registry, store};
@@ -855,6 +856,64 @@ fn every_earlier_block_text_is_known_and_the_current_one_is_not_among_them() {
         .unwrap()
         .unwrap();
     assert!(found.intact && found.known && !found.current);
+}
+
+/// A current rule block text as 0.1.0 and 0.2.0 wrote it: without the line about what to save.
+fn without_what_to_save(text: &str) -> String {
+    let start = text
+        .find("- Save what will help")
+        .expect("the line about what to save");
+    let end = start
+        + text[start..]
+            .find("findings.\n")
+            .expect("the end of the line about what to save")
+        + "findings.\n".len();
+    format!("{}{}", &text[..start], &text[end..])
+}
+
+#[test]
+fn the_blocks_before_the_line_about_what_to_save_are_known_with_or_without_read_only_tools() {
+    type Find = fn(&str, Language, &[String]) -> Result<Option<install::FoundBlock>, String>;
+    type Rule = fn(Language) -> &'static str;
+    let harnesses: [(&str, Rule, Find); 5] = [
+        ("claude-code", install::rule_block, install::find_block_with),
+        (
+            "opencode",
+            crate::opencode::install::rule_block,
+            crate::opencode::install::find_block_with,
+        ),
+        (
+            "codex",
+            crate::codex::install::rule_block,
+            crate::codex::install::find_block_with,
+        ),
+        (
+            "cursor",
+            crate::cursor::install::rule_block,
+            crate::cursor::install::find_block_with,
+        ),
+        (
+            "codewhale",
+            crate::codewhale::install::rule_block,
+            crate::codewhale::install::find_block_with,
+        ),
+    ];
+    let tools = ["memory-keeper".to_string()];
+    for (name, rule, find) in harnesses {
+        for language in [Language::English, Language::Any] {
+            let old = without_what_to_save(rule(language));
+            for read_only in [&[][..], &tools[..]] {
+                let block = install::wrap_block(&crate::coexist::rule_with(&old, read_only));
+                let found = find(&format!("# Mine\n\n{block}"), language, read_only)
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    found.intact && found.known && !found.current,
+                    "{name} {language:?} read-only {read_only:?}: {found:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

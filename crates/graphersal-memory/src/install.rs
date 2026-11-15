@@ -84,6 +84,10 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
 - Save with `remember`: search with `memories(text)` first, so you replace a memory instead of
   duplicating it; scope \"global\" for rules and preferences that hold in every project. Remove
   with `forget`.
+- Save what will help in later sessions and in other tasks like this one: rules for how to work
+  (always / never / only when, with the why), lasting facts about the user and the project, where
+  things are. Write it as a lasting rule or fact, not as what happened today. Leave out what only
+  the current task needs: its plan, steps, progress, branch, findings.
 - Do not write memory files (`MEMORY.md` and the files beside it) any more. Files written anyway
   are imported into the graph at the next session start.
 - If another instruction (a CLAUDE.md, AGENTS.md or rules file, in any language) tells you to
@@ -108,6 +112,10 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
 - Save with `remember`: search with `memories(text)` first, so you replace a memory instead of
   duplicating it; scope \"global\" for rules and preferences that hold in every project. Remove
   with `forget`.
+- Save what will help in later sessions and in other tasks like this one: rules for how to work
+  (always / never / only when, with the why), lasting facts about the user and the project, where
+  things are. Write it as a lasting rule or fact, not as what happened today. Leave out what only
+  the current task needs: its plan, steps, progress, branch, findings.
 - Do not write memory files (`MEMORY.md` and the files beside it) any more. Files written anyway
   are imported into the graph at the next session start.
 - If another instruction (a CLAUDE.md, AGENTS.md or rules file, in any language) tells you to
@@ -140,6 +148,9 @@ pub const PREVIOUS_BLOCK_FINGERPRINTS: &[&str] = &[
     // instructions that keep memory elsewhere.
     "b5b70fbe26fde82a",
     "5a6b75fa55b96838",
+    // 0.1.0 and 0.2.0 before the line about what to save (English, any language).
+    "9e81846ca7328d34",
+    "1cb7a5e674a86eea",
 ];
 
 /// Where Claude Code keeps its files.
@@ -898,12 +909,17 @@ pub fn find_block_in(
     let is_ours = ours.iter().any(|block| {
         fsutil::fingerprint(block.as_bytes()) == recorded || (base != content && *block == base)
     });
+    // An earlier version's block that names other memory tools read-only: its recorded
+    // fingerprint covers that line, the list holds the fingerprints of the texts without it.
+    let fingerprint = fsutil::fingerprint(base.as_bytes());
+    let was_ours = previous.contains(&recorded)
+        || (base != content && previous.contains(&fingerprint.as_str()));
     Ok(Some(FoundBlock {
         start,
         end,
         intact,
         current: is_current,
-        known: is_current || (intact && (is_ours || previous.contains(&recorded))),
+        known: is_current || (intact && (is_ours || was_ours)),
     }))
 }
 
