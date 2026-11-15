@@ -21,7 +21,7 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects`, `start-context` and the
     hidden `hook` work on Claude Code, opencode, Codex, Cursor and CodeWhale (no hooks: `hook --harness codewhale` does nothing) (`Setup` from the environment, with the model download
     `Source`; `bench_options` for `bench`; `DaemonSource` reads the memories for the export);
-    `ui` runs the browser UI (`crate::ui`); `export` without `--to-files` says it is planned and exits with code 2
+    `ui` runs the browser UI (`crate::ui`); `upgrade` runs `crate::update::run`; `export` without `--to-files` says it is planned and exits with code 2
     (`--harness codex` and `--harness cursor` work wherever `claude-code` and `opencode` do;
     a Claude Code hook whose input is Cursor's, `cursor_version`, does nothing); the
     wizard is interactive when stdin and stdout are terminals;
@@ -150,6 +150,14 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     form (`command` + `args`, no shell), the other harnesses' commands the `plain` words when
     there are; `is_our_hook` recognises every form (quoted, plain, bare, PowerShell, exec);
     `git_bash_findings`/`git_bash_status` for `doctor`/`status` on Windows;
+  - `src/update.rs`: the latest release (`latest`: the redirect of `<releases>/latest`,
+    `GRAPHERSAL_MEMORY_BASE_URL` else GitHub; `version_from_location`), the UI's daily check
+    (`check_cached`, state `<data dir>/update-check.json`; `check_enabled`: `updates.check`,
+    `GRAPHERSAL_MEMORY_UPDATE_CHECK`), how the binary was installed (`Method`, `method_of`: the
+    installers' directory, cargo's, other), `manual_commands`, `check_json` (the UI's
+    `GET /api/ui/update`) and `upgrade` (`run` with a `Machine`: the release's `install.sh` /
+    `install.ps1` with `--version`/`--dir`, or `cargo install --version`; then `daemon restart`
+    and `--version` through the new binary; plan first, `--check`, `--dry-run`, `--yes`);
   - `src/winshell.rs`: Windows shells: `all_shell_words` (the bare name when `PATH` resolves
     it to this binary, else the forward-slash path, else the directory's 8.3 short path, for each
     argument too; lookups injected), `short_path` (`GetShortPathNameW`, the crate's second
@@ -307,7 +315,8 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     held open so the daemon stays (reconnects, starting a daemon unless `shim::may_start` says no), `/api/ui/*` answered itself (`status` with the
     `status`/`doctor` lines from `commands::ui_report`, `projects`, `start-context` (the control
     line with `project_id` + `entries`), `settings` GET/POST of `memory.start_context_chars`
-    only, `heartbeat`), every other `/api/` relayed (`crate::relay`), static files: the
+    only, `update` (`crate::update::check_cached`: the top bar's "Version X available" and the
+    Overview's upgrade commands), `heartbeat`), every other `/api/` relayed (`crate::relay`), static files: the
     profile's (`crate::ui_assets`) first, then the embedded playground (`Ui::embedded`, its
     `index.html` with `/memory-ui/boot.js` added);
   - `src/relay.rs`: the relay frame (opening `{"protocol", "relay": "http", "port", "method",
@@ -564,7 +573,10 @@ started by hand (`workflow_dispatch`).
 7. **Small public surface.** There is no library API yet. Command-line flags and output formats
    are user-facing contracts, so add them deliberately.
 8. **No telemetry.** Network access only for what the user asked for: model download, install
-   or update, and summaries through the user's own harness after consent.
+   or update (`upgrade`), and summaries through the user's own harness after consent. The one
+   exception (user decision, 2026-11-15): the browser UI's update check, one request to GitHub's
+   `releases/latest` at most once a day, off with `updates.check: false` or
+   `GRAPHERSAL_MEMORY_UPDATE_CHECK=off`, documented in `docs/privacy.md`.
 9. **Dependencies**: add a crate only with a reason. Declare it in `[workspace.dependencies]` and
    reference it with `workspace = true`.
 10. Commits follow Conventional Commits.

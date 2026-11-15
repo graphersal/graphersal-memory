@@ -562,6 +562,12 @@ export function problemsText(count) {
   return `${count} setup ${count === 1 ? 'problem' : 'problems'}`;
 }
 
+/** The top bar's update notice, or '' when there is nothing newer (or the check is off). */
+export function updateText(update) {
+  if (!update || update.enabled === false || update.newer !== true || !update.latest) return '';
+  return `Version ${update.latest} available`;
+}
+
 /** The daemon's state in a few words. */
 export function daemonText(status) {
   const daemon = status && status.daemon;

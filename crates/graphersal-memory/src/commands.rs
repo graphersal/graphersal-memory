@@ -35,6 +35,7 @@ pub fn planned_feature(command: &Command) -> &'static str {
         Command::Status | Command::Doctor | Command::Hook { .. } => {
             "the install for an agent harness"
         }
+        Command::Upgrade { .. } => "upgrading to the latest release",
         Command::Projects { .. } => "project identity",
         Command::StartContext { .. } => "the start context",
         Command::Import { .. } => "the import of the file memory",
@@ -55,6 +56,7 @@ pub fn command_name(command: &Command) -> &'static str {
         Command::Uninstall { .. } => "uninstall",
         Command::Status => "status",
         Command::Doctor => "doctor",
+        Command::Upgrade { .. } => "upgrade",
         Command::Mcp { .. } => "mcp",
         Command::Daemon { .. } => "daemon",
         Command::Ui { .. } => "ui",
@@ -369,6 +371,18 @@ pub fn run_cli(
             version_as,
         } => run_daemon(cli, *idle, *foreground, version_as.as_deref(), stdout).map(|()| 0),
         Command::Status => status(cli, stdout).map(|()| 0),
+        Command::Upgrade {
+            check,
+            dry_run,
+            yes,
+        } => run_upgrade(
+            cli,
+            *check,
+            *dry_run,
+            *yes,
+            &mut BufReader::new(stdin),
+            &mut stdout,
+        ),
         Command::Bench {
             action,
             arms,
@@ -2261,6 +2275,43 @@ pub fn run(command: &Command, stderr: &mut dyn std::io::Write) -> u8 {
     // A closed or failing stderr must not turn into a panic; the exit code still tells the story.
     let _ = writeln!(stderr, "{}", not_implemented_message(command));
     EXIT_NOT_IMPLEMENTED
+}
+
+/// `upgrade`: the latest release through what installed this binary (`crate::update`).
+fn run_upgrade(
+    cli: &Cli,
+    check: bool,
+    dry_run: bool,
+    yes: bool,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn Write,
+) -> Result<u8, String> {
+    let (data_dir, _) = dirs(cli)?;
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let home = crate::store::home_dir(&env)?;
+    let exe =
+        std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
+    let releases = crate::update::releases_url(&env);
+    let options = crate::update::Options {
+        check_only: check,
+        yes,
+        dry_run,
+        interactive: terminal(),
+        method: crate::update::method_of(&exe, &home, &env, cfg!(windows)),
+        exe,
+        releases: releases.clone(),
+        data_dir,
+        scratch: std::env::temp_dir()
+            .join(format!("graphersal-memory-upgrade-{}", std::process::id())),
+        windows: cfg!(windows),
+    };
+    crate::update::run(
+        &options,
+        &|| crate::update::latest(&releases),
+        &mut crate::update::RealMachine,
+        input,
+        out,
+    )
 }
 
 #[cfg(test)]

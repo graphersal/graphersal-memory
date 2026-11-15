@@ -90,6 +90,39 @@ graphersal-memory install
 
 and restart running agent sessions.
 
+## Upgrade
+
+```sh
+graphersal-memory upgrade
+```
+
+(New after 0.2.0: with 0.2.0, upgrade by hand, below.)
+
+It asks GitHub for the latest release, shows what it will do and asks before doing it. It upgrades
+the way the binary was installed: through the release's own installer into the same directory
+(the archive checked against `SHA256SUMS`), or with `cargo install` when it came from cargo. Then
+it restarts the daemon; open agent sessions reconnect to the new one by themselves.
+`graphersal-memory upgrade --check` only says whether a newer release is out, `--dry-run` shows
+the plan, `--yes` does not ask. Your configuration and memories stay as they are.
+
+By hand, the same way you installed:
+
+```sh
+curl -fsSL https://github.com/graphersal/graphersal-memory/releases/latest/download/install.sh | sh
+# or: cargo install graphersal-memory --locked --force
+graphersal-memory daemon restart
+```
+
+```powershell
+irm https://github.com/graphersal/graphersal-memory/releases/latest/download/install.ps1 | iex
+graphersal-memory daemon restart
+```
+
+Installed both ways? Then there are two binaries (`~/.local/bin` and `~/.cargo/bin`) and the
+first on your `PATH` runs; `which -a graphersal-memory` shows both. The browser UI tells you when
+a newer release is out (it asks GitHub at most once a day; `"updates": {"check": false}` in
+`config.json` switches that off).
+
 ## What `install` asks and changes
 
 `install` is a short wizard in the terminal. Enter takes the default, and nothing changes before
@@ -209,7 +242,8 @@ you rely on it.
   user can open; there are no network ports.
 - **No telemetry.** Nothing is reported anywhere.
 - **The network is used only for what you ask for**: the embedding model download in `install`,
-  the UI's libraries from public CDNs, and installing the binary.
+  the UI's libraries from public CDNs, installing or upgrading the binary, and one exception you
+  can switch off: the browser UI asks GitHub for the latest release at most once a day.
 - **Model calls only with consent.** Summaries and `bench` run through your own harness on your
   own account (never an API key or a service of ours), after a cost estimate; summaries have a
   monthly cap ($5 by default).
@@ -270,6 +304,7 @@ What comes next: [docs/roadmap.md](docs/roadmap.md).
 | `summaries estimate\|status\|enable\|disable` | session summaries: cost estimate, spend, on, off |
 | `start-context` | print exactly what every session of this project starts with |
 | `projects list\|merge` | the projects the memory knows; move a repository's memories after it moved |
+| `upgrade` | upgrade to the latest release (`--check`: only say whether one is out) |
 | `daemon stop\|restart` | stop the background daemon, or restart it after installing a new binary |
 
 The harness starts `graphersal-memory mcp` itself, which starts a small background daemon on
@@ -282,6 +317,7 @@ directory, among them:
 | `summaries.monthly_budget_usd`, `summaries.harness_command` | `5`, `claude -p --model sonnet` |
 | `daemon.idle` | `"2h"` |
 | `store.checkpoint_after`, `store.keep_history` | `"16MiB"` of journal, 30 days of history |
+| `updates.check` | `true`: the browser UI asks GitHub for the latest release at most once a day |
 
 How it works inside (processes, stores, the start context, conflicts):
 [docs/how-it-works.md](docs/how-it-works.md).

@@ -62,6 +62,7 @@ mod tomledit;
 mod transcript;
 mod ui;
 mod ui_assets;
+mod update;
 mod winshell;
 
 use std::process::ExitCode;
