@@ -52,6 +52,7 @@
 //!   to export old ones. Cursor has no file memory to write back into: the export of
 //!   `uninstall` writes readable Markdown files into `~/graphersal-memory-export/cursor/`.
 
+pub mod hook;
 pub mod install;
 pub mod other;
 pub mod sessions;
@@ -199,7 +200,7 @@ impl crate::agents::HookHandler for Cursor {
         stdout: &mut dyn std::io::Write,
         stderr: &mut dyn std::io::Write,
     ) -> u8 {
-        crate::hook::run_cursor_with_context(
+        hook::run_cursor_with_context(
             event,
             self.paths.registry.clone(),
             std::env::var("CURSOR_PROJECT_DIR").ok(),

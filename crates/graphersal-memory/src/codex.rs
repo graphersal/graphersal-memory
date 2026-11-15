@@ -47,6 +47,7 @@
 //!   could write back into: the export of `uninstall` writes readable Markdown files into
 //!   `~/graphersal-memory-export/codex/`.
 
+pub mod hook;
 pub mod install;
 pub mod other;
 pub mod sessions;
@@ -284,7 +285,7 @@ impl crate::agents::HookHandler for Codex {
         stdout: &mut dyn std::io::Write,
         stderr: &mut dyn std::io::Write,
     ) -> u8 {
-        crate::hook::run_codex(
+        hook::run_codex(
             event,
             self.paths.sessions.clone(),
             Some(crate::commands::hook_enqueue(setup)),

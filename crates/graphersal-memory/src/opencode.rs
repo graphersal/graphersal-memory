@@ -53,6 +53,7 @@
 //!   memory: the export of `uninstall` writes readable Markdown files into
 //!   `~/graphersal-memory-export/opencode/` instead ([`OpenCode::memory_dir`]).
 
+pub mod hook;
 pub mod install;
 pub mod other;
 pub mod sessions;
@@ -412,7 +413,7 @@ impl crate::agents::HookHandler for OpenCode {
         stdout: &mut dyn std::io::Write,
         stderr: &mut dyn std::io::Write,
     ) -> u8 {
-        crate::hook::run_opencode(
+        hook::run_opencode(
             event,
             self.paths.db.clone(),
             Some(crate::commands::hook_enqueue(setup)),
