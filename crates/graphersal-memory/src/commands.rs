@@ -83,17 +83,18 @@ pub fn not_implemented_message(command: &Command) -> String {
 
 /// The message for a harness choice a command does not take.
 fn harness_not_implemented(command: &str, harness: Harness) -> String {
-    let name = match harness {
-        Harness::ClaudeCode => "claude-code",
-        Harness::Opencode => "opencode",
-        Harness::All => "all",
-        Harness::Codex => "codex",
-        Harness::Cursor => "cursor",
-        Harness::Codewhale => "codewhale",
-    };
+    let ids: Vec<&str> = crate::agents::Kind::ALL
+        .iter()
+        .map(|kind| kind.id())
+        .collect();
+    let (last, rest) = ids
+        .split_last()
+        .map_or(("", &[][..]), |(last, rest)| (*last, rest));
     format!(
-        "graphersal-memory {command} --harness {name}: not supported; it takes the harnesses one \
-         at a time: claude-code, opencode, codex, cursor or codewhale."
+        "graphersal-memory {command} --harness {}: not supported; it takes the harnesses one at a \
+         time: {} or {last}.",
+        harness.id(),
+        rest.join(", ")
     )
 }
 
@@ -228,11 +229,7 @@ pub fn run_cli(
             project,
         } => {
             let kind = match harness {
-                Harness::ClaudeCode => crate::agents::Kind::ClaudeCode,
-                Harness::Opencode => crate::agents::Kind::OpenCode,
-                Harness::Codex => crate::agents::Kind::Codex,
-                Harness::Cursor => crate::agents::Kind::Cursor,
-                Harness::Codewhale => crate::agents::Kind::CodeWhale,
+                Harness::One(kind) => *kind,
                 other => {
                     let _ = writeln!(stderr, "{}", harness_not_implemented(name, *other));
                     return EXIT_NOT_IMPLEMENTED;
@@ -682,22 +679,7 @@ pub fn export_target(agent: &dyn crate::agents::Harness) -> String {
 
 /// What to do with an export for a harness without file memory.
 pub fn export_note(agent: &dyn crate::agents::Harness) -> String {
-    let how = match agent.kind() {
-        crate::agents::Kind::Codex => {
-            "to give the agent a file, paste it into ~/.codex/AGENTS.md or a project's AGENTS.md"
-        }
-        crate::agents::Kind::Cursor => {
-            "to give the agent a file, paste it into a project's AGENTS.md or into a rule file \
-             under ~/.cursor/rules (a .mdc file with `alwaysApply: true`)"
-        }
-        crate::agents::Kind::CodeWhale => {
-            "to give the agent a file, paste it into ~/.codewhale/AGENTS.md or a project's \
-             AGENTS.md"
-        }
-        _ => {
-            "to give the agent a file, add its path to `instructions` in the agent's configuration"
-        }
-    };
+    let how = agent.export_hint();
     format!(
         "{} has no file memory: the export is plain Markdown (per project MEMORY.md and one file \
          per memory, the global ones in {}). It is not loaded automatically; {how}. \

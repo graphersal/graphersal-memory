@@ -330,6 +330,10 @@ impl Harness for Codex {
         Some(self)
     }
 
+    fn export_hint(&self) -> &'static str {
+        "to give the agent a file, paste it into ~/.codex/AGENTS.md or a project's AGENTS.md"
+    }
+
     fn has_sessions(&self) -> bool {
         self.paths.sessions.is_dir()
     }

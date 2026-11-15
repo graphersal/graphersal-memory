@@ -270,7 +270,7 @@ pub enum Command {
     /// planned.
     Export {
         /// The harness to export for.
-        #[arg(long, value_enum, default_value_t = Harness::ClaudeCode)]
+        #[arg(long, value_enum, default_value_t = Harness::DEFAULT)]
         harness: Harness,
         /// Show what would be written without writing anything.
         #[arg(long)]
@@ -306,7 +306,7 @@ pub enum Command {
         event: crate::hook::HookEvent,
         /// The harness that runs the hook (Claude Code's, Codex's or Cursor's hooks, opencode's
         /// plugin).
-        #[arg(long, value_enum, default_value_t = Harness::ClaudeCode)]
+        #[arg(long, value_enum, default_value_t = Harness::DEFAULT)]
         harness: Harness,
     },
 }
@@ -576,35 +576,58 @@ fn parse_idle(text: &str) -> Result<std::time::Duration, String> {
     crate::daemon::parse_duration(text)
 }
 
-/// An AI agent harness graphersal-memory can be installed into.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+/// An AI agent harness graphersal-memory can be installed into, or every one: the values are
+/// `Kind::ALL`'s ids (`crate::harnesses` lists the harnesses) and `all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
-    /// Claude Code.
-    ClaudeCode,
-    /// opencode (1.x or 2.x: `opencode --version` says which).
-    Opencode,
-    /// OpenAI Codex CLI.
-    Codex,
-    /// Cursor (the editor's agent).
-    Cursor,
-    /// CodeWhale (the terminal agent, formerly DeepSeek TUI; preview).
-    Codewhale,
-    /// Every supported harness (install: those whose program is found on this machine;
-    /// uninstall: those it is installed in).
+    /// One harness.
+    One(crate::agents::Kind),
+    /// Every supported harness.
     All,
 }
 
+impl ValueEnum for Harness {
+    fn value_variants<'a>() -> &'a [Self] {
+        static VARIANTS: std::sync::OnceLock<Vec<Harness>> = std::sync::OnceLock::new();
+        VARIANTS.get_or_init(|| {
+            crate::agents::Kind::ALL
+                .into_iter()
+                .map(Harness::One)
+                .chain([Harness::All])
+                .collect()
+        })
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(match self {
+            Harness::One(kind) => {
+                clap::builder::PossibleValue::new(kind.id()).help(kind.cli_help())
+            }
+            Harness::All => clap::builder::PossibleValue::new("all").help(
+                "Every supported harness (install: those whose program is found on this machine; \
+                 uninstall: those it is installed in)",
+            ),
+        })
+    }
+}
+
 impl Harness {
-    /// The supported harnesses this choice names (`None` for a planned one).
+    /// The default harness.
+    pub const DEFAULT: Harness = Harness::One(crate::agents::Kind::ClaudeCode);
+
+    /// The supported harnesses this choice names.
     pub fn kinds(self) -> Option<Vec<crate::agents::Kind>> {
-        use crate::agents::Kind;
+        Some(match self {
+            Harness::One(kind) => vec![kind],
+            Harness::All => crate::agents::Kind::ALL.to_vec(),
+        })
+    }
+
+    /// Its value on the command line.
+    pub fn id(self) -> &'static str {
         match self {
-            Harness::ClaudeCode => Some(vec![Kind::ClaudeCode]),
-            Harness::Opencode => Some(vec![Kind::OpenCode]),
-            Harness::Codex => Some(vec![Kind::Codex]),
-            Harness::All => Some(Kind::ALL.to_vec()),
-            Harness::Cursor => Some(vec![Kind::Cursor]),
-            Harness::Codewhale => Some(vec![Kind::CodeWhale]),
+            Harness::One(kind) => kind.id(),
+            Harness::All => "all",
         }
     }
 }
@@ -696,7 +719,7 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Uninstall {
-                harness: Some(Harness::Cursor),
+                harness: Some(Harness::One(crate::agents::Kind::Cursor)),
                 dry_run: true,
                 yes: false,
                 purge: false,
@@ -837,7 +860,7 @@ mod tests {
             parse(&["hook", "session-start"]).unwrap().command,
             Command::Hook {
                 event: crate::hook::HookEvent::SessionStart,
-                harness: Harness::ClaudeCode
+                harness: Harness::DEFAULT
             }
         );
         let help = Cli::command().render_long_help().to_string();
@@ -1227,7 +1250,7 @@ mod tests {
                 .command,
             Command::Hook {
                 event: crate::hook::HookEvent::SessionEnd,
-                harness: Harness::Opencode
+                harness: Harness::One(crate::agents::Kind::OpenCode)
             }
         );
         let help = Cli::command()
