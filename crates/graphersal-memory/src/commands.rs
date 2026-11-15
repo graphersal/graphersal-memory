@@ -379,6 +379,7 @@ pub fn run_cli(
             claude_dir,
             dry_run,
             yes,
+            harness_command,
         } => {
             if let Some(BenchAction::RuleChanges {
                 repeats,
@@ -407,6 +408,7 @@ pub fn run_cli(
                         claude_dir,
                         dry_run,
                         yes,
+                        harness_command: questions_harness,
                     }) => {
                         let (edit, edit_project) = match edit {
                             None => (None, None),
@@ -446,6 +448,7 @@ pub fn run_cli(
                             claude_dir: claude_dir.clone(),
                             dry_run: *dry_run,
                             yes: *yes,
+                            harness_command: questions_harness.clone(),
                         }
                     }
                     None | Some(BenchAction::RuleChanges { .. }) => BenchRequest {
@@ -460,6 +463,7 @@ pub fn run_cli(
                         claude_dir: claude_dir.clone(),
                         dry_run: *dry_run,
                         yes: *yes,
+                        harness_command: harness_command.clone(),
                     },
                 };
                 run_bench(cli, &request, &mut BufReader::new(stdin), &mut stdout)
@@ -1457,10 +1461,13 @@ pub struct BenchRequest {
     pub dry_run: bool,
     /// `--yes`.
     pub yes: bool,
+    /// `--harness-command` (else the settings' `summaries.harness_command`).
+    pub harness_command: Option<String>,
 }
 
 /// The bench options of `request` on this machine: the data directory, the sources (Claude
-/// Code's directory, or `--claude-dir`), this binary, the harness command of the settings.
+/// Code's directory, or `--claude-dir`), this binary, the harness command (`--harness-command`,
+/// else the settings').
 pub fn bench_options(
     data_dir: &Path,
     claude: ClaudePaths,
@@ -1487,7 +1494,11 @@ pub fn bench_options(
         codex,
         data_dir: data_dir.to_path_buf(),
         exe,
-        harness_command: settings.summaries.harness_command,
+        harness_command: match &request.harness_command {
+            Some(text) => crate::config::split_command(text)
+                .map_err(|err| format!("--harness-command: {err}"))?,
+            None => settings.summaries.harness_command,
+        },
     })
 }
 

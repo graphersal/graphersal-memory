@@ -26,10 +26,10 @@ impl Choice {
 }
 
 /// The width explanation lines are wrapped to (after the two-space indent).
-const WIDTH: usize = 86;
+pub const WIDTH: usize = 86;
 
 /// `text` broken into lines of at most `width` characters at spaces (a longer word stays whole).
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split(' ').filter(|w| !w.is_empty()) {

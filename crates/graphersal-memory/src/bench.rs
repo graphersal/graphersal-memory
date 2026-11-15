@@ -473,48 +473,92 @@ impl Estimate {
     }
 }
 
+/// The harness commands the bench runs through, as `--harness-command` takes them.
+const BENCH_HARNESSES: [&str; 3] = [
+    "claude -p",
+    "opencode run",
+    "codex exec --oss --local-provider lmstudio",
+];
+
 /// Refuses a harness that is neither Claude Code's `claude`, opencode's `opencode` nor Codex's
 /// `codex` with a local model (the arms are built with their flags and configuration). Codex
 /// reports tokens but no cost, so the budget could not stop a run on a paid model: only a
 /// local model (`--oss`, $0) is accepted.
+#[cfg(test)]
 pub fn check_harness(command: &[String]) -> Result<(), String> {
+    check_harness_in(command, None)
+}
+
+/// [`check_harness`], naming the settings file `config` (its full path) in the refusal.
+pub fn check_harness_in(command: &[String], config: Option<&Path>) -> Result<(), String> {
     let is_claude = command.first().is_some_and(|program| {
         Path::new(program)
             .file_stem()
             .is_some_and(|stem| stem == "claude")
     });
-    if crate::cursor::is_cursor_cli(command) {
-        return Err(format!(
-            "{}. The harness command is `{}`",
-            crate::cursor::NO_HEADLESS,
-            command.join(" ")
-        ));
-    }
-    if crate::codewhale::is_codewhale(command) {
-        return Err(format!(
-            "{}. The harness command is `{}`",
+    let (headline, why) = if crate::cursor::is_cursor_cli(command) {
+        (
+            "the bench does not run through Cursor's CLI.",
+            "Cursor's CLI reports no cost, so the budget could not stop the run, and it reads \
+             your ~/.cursor (MCP servers, hooks) with no way to isolate a run.",
+        )
+    } else if crate::codewhale::is_codewhale(command) {
+        (
+            "the bench does not run through CodeWhale yet (planned).",
             crate::codewhale::NO_BENCH,
-            command.join(" ")
-        ));
-    }
-    if crate::codex::is_codex(command) && !crate::codex::local_model(command) {
-        return Err(format!(
-            "bench through Codex needs a local model (for example `codex exec --oss \
-             --local-provider lmstudio`): `codex exec` reports tokens but no cost, so the budget \
-             could not stop the run; or use Claude Code's `claude -p` or opencode's `opencode \
-             run`. The harness command is `{}` (summaries.harness_command in config.json)",
-            command.join(" ")
-        ));
-    }
-    if is_claude || crate::opencode::is_opencode(command) || crate::codex::is_codex(command) {
-        Ok(())
+        )
+    } else if crate::codex::is_codex(command) && !crate::codex::local_model(command) {
+        (
+            "the bench through Codex needs a local model (`--oss`).",
+            "`codex exec` reports tokens but no cost, so the budget could not stop a run on a \
+             paid model.",
+        )
+    } else if is_claude || crate::opencode::is_opencode(command) || crate::codex::is_codex(command)
+    {
+        return Ok(());
     } else {
-        Err(format!(
-            "bench drives Claude Code's `claude -p`, opencode's `opencode run` or Codex's `codex \
-             exec --oss`; the harness command is `{}` (summaries.harness_command in config.json)",
-            command.join(" ")
-        ))
+        (
+            "the bench cannot run through this harness command.",
+            "The bench drives Claude Code's `claude -p`, opencode's `opencode run` or Codex's \
+             `codex exec --oss` with a local model.",
+        )
+    };
+    Err(harness_refusal(headline, why, command, config))
+}
+
+/// The refusal of a harness command: the headline, the command and where it is set, why, and
+/// the commands that run the bench instead, ready to copy.
+fn harness_refusal(headline: &str, why: &str, command: &[String], config: Option<&Path>) -> String {
+    let width = crate::prompt::WIDTH;
+    let set_in = match config {
+        Some(path) => {
+            let shown = path.display().to_string();
+            let shown = match crate::store::home_dir(&|name| std::env::var(name).ok()) {
+                Ok(home) => crate::install::tilde(&shown, &home),
+                Err(_) => shown,
+            };
+            format!("summaries.harness_command in {shown}")
+        }
+        None => "summaries.harness_command in config.json".to_string(),
+    };
+    let mut lines = vec![headline.to_string(), String::new()];
+    lines.push(format!("  harness command: {}", command.join(" ")));
+    lines.push(format!("  set in:          {set_in}"));
+    lines.push(String::new());
+    lines.extend(
+        crate::prompt::wrap(why, width)
+            .into_iter()
+            .map(|line| format!("  {line}")),
+    );
+    lines.push(String::new());
+    lines.push("Run the bench through one of these instead:".to_string());
+    lines.push(String::new());
+    for harness in BENCH_HARNESSES {
+        lines.push(format!(
+            "  graphersal-memory bench --harness-command \"{harness}\""
+        ));
     }
+    lines.join("\n")
 }
 
 /// Whether the run goes through opencode.
@@ -1013,7 +1057,10 @@ pub fn questions_command(
         let _ = writeln!(out, "Confirmed.");
         return Ok(0);
     }
-    check_harness(&options.harness_command)?;
+    check_harness_in(
+        &options.harness_command,
+        Some(&options.data_dir.join(crate::config::CONFIG_FILE)),
+    )?;
     let mut set = QuestionSet::load(&options.data_dir, &options.project)?
         .unwrap_or_else(|| QuestionSet::empty(&options.project));
     if options.interactive && ask_own_questions(options, &mut set, input, out) > 0 {
@@ -1173,7 +1220,10 @@ pub fn run(
     input: &mut dyn BufRead,
     out: &mut dyn Write,
 ) -> Result<u8, String> {
-    check_harness(&options.harness_command)?;
+    check_harness_in(
+        &options.harness_command,
+        Some(&options.data_dir.join(crate::config::CONFIG_FILE)),
+    )?;
     if options.arms.is_empty() {
         return Err("no arm to run (--arms none,files,graph)".to_string());
     }
