@@ -418,6 +418,50 @@ impl Harness for OpenCode {
         !install::inspect(setup).nothing_installed()
     }
 
+    fn develop_on(&self, setup: &crate::install::Setup) -> bool {
+        let (state, enabled) = install::inspect(setup).develop_server;
+        state != crate::install::PartState::Missing && enabled
+    }
+
+    fn has_plugin(&self) -> bool {
+        true
+    }
+
+    fn status_lines(&self, setup: &crate::install::Setup) -> Vec<String> {
+        install::status_lines(setup)
+    }
+
+    fn doctor(
+        &self,
+        setup: &crate::install::Setup,
+        _project: Option<&Path>,
+    ) -> Vec<crate::install::Finding> {
+        install::doctor(setup)
+    }
+
+    fn removal(
+        &self,
+        setup: &crate::install::Setup,
+        state: &crate::install::State,
+        develop_only: bool,
+        conflicts: &mut Vec<String>,
+    ) -> Result<Vec<(crate::install::Change, &'static str)>, String> {
+        install::removal(setup, state, develop_only, conflicts)
+    }
+
+    fn plan(
+        &self,
+        setup: &crate::install::Setup,
+        input: &crate::install::PlanInput<'_>,
+    ) -> Result<crate::install::HarnessPlan, String> {
+        let plan = install::plan(setup, input.language, input.read_only, input.develop)?;
+        Ok(crate::install::HarnessPlan::of(
+            plan.steps,
+            plan.changes,
+            plan.conflicts,
+        ))
+    }
+
     fn mcp_config_file(&self) -> &Path {
         &self.paths.config_file
     }

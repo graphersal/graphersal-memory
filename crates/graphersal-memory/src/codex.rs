@@ -236,6 +236,91 @@ impl Harness for Codex {
         !install::inspect(setup).nothing_installed()
     }
 
+    fn develop_on(&self, setup: &crate::install::Setup) -> bool {
+        let (state, enabled) = install::inspect(setup).develop_server;
+        state != crate::install::PartState::Missing && enabled
+    }
+
+    /// Codex runs our hooks only once the user trusts them in `/hooks`.
+    fn action_needed(&self, setup: &crate::install::Setup) -> Option<String> {
+        (!install::inspect(setup).hooks_trusted).then(install::hook_approval_line)
+    }
+
+    fn status_lines(&self, setup: &crate::install::Setup) -> Vec<String> {
+        install::status_lines(setup)
+    }
+
+    fn doctor(
+        &self,
+        setup: &crate::install::Setup,
+        _project: Option<&Path>,
+    ) -> Vec<crate::install::Finding> {
+        install::doctor(setup)
+    }
+
+    fn removal(
+        &self,
+        setup: &crate::install::Setup,
+        state: &crate::install::State,
+        develop_only: bool,
+        conflicts: &mut Vec<String>,
+    ) -> Result<Vec<(crate::install::Change, &'static str)>, String> {
+        install::removal(setup, state, develop_only, conflicts)
+    }
+
+    fn own_memory_restored(
+        &self,
+        _setup: &crate::install::Setup,
+        state: &crate::install::State,
+    ) -> Option<(PathBuf, String)> {
+        let config = &self.paths.config_file;
+        state
+            .file(config)
+            .is_some_and(|entry| entry.contains_key(install::MEMORIES_RECORD))
+            .then(|| {
+                (
+                    config.clone(),
+                    "Codex's memories: switched on again, as before install".to_string(),
+                )
+            })
+    }
+
+    /// With the record of the memories switch, which goes with the write of `config.toml`.
+    fn plan(
+        &self,
+        setup: &crate::install::Setup,
+        input: &crate::install::PlanInput<'_>,
+    ) -> Result<crate::install::HarnessPlan, String> {
+        let plan = install::plan(
+            setup,
+            input.language,
+            input.read_only,
+            input.develop,
+            input.own_memory_off,
+        )?;
+        let mut out = crate::install::HarnessPlan::of(plan.steps, plan.changes, plan.conflicts);
+        out.own_memory_off = Some(input.own_memory_off);
+        let config = self.paths.config_file.clone();
+        match plan.memories {
+            Some(true) => {
+                out.records.push((
+                    config,
+                    install::MEMORIES_RECORD,
+                    Some(serde_json::json!({"previous": true})),
+                ));
+                out.switched_off = Some(
+                    "Codex's memories: off (uninstall exports every memory as Markdown and \
+                     switches them on again)"
+                        .to_string(),
+                );
+                out.nothing_is_lost = Some(install::NOTHING_IS_LOST);
+            }
+            Some(false) => out.records.push((config, install::MEMORIES_RECORD, None)),
+            None => {}
+        }
+        Ok(out)
+    }
+
     fn mcp_config_file(&self) -> &Path {
         &self.paths.config_file
     }

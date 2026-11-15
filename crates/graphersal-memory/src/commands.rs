@@ -1241,15 +1241,9 @@ fn doctor(setup: &Setup, out: &mut dyn Write) -> u8 {
         if !kinds.contains(&kind) {
             continue;
         }
-        let findings = match kind {
-            Kind::ClaudeCode => install::claude_doctor(setup),
-            Kind::OpenCode => crate::opencode::install::doctor(setup),
-            Kind::Codex => crate::codex::install::doctor(setup),
-            Kind::Cursor => crate::cursor::install::doctor(setup),
-            Kind::CodeWhale => {
-                crate::codewhale::install::doctor(setup, current_project().as_deref())
-            }
-        };
+        let findings = setup
+            .agent_of(kind)
+            .doctor(setup, current_project().as_deref());
         sections.push((kind.display_name().to_string(), findings));
     }
     let others = crate::coexist::detect(setup, current_project().as_deref());
@@ -2118,27 +2112,18 @@ pub fn status_text_for(
             }
             sections.push(memory);
             let kinds = setup.installed();
-            let mut lines = Vec::new();
-            if kinds.is_empty() || kinds.contains(&crate::agents::Kind::ClaudeCode) {
-                lines.extend(install::status_lines(setup));
-            }
-            if kinds.contains(&crate::agents::Kind::OpenCode) {
-                lines.extend(crate::opencode::install::status_lines(setup));
-            }
-            if kinds.contains(&crate::agents::Kind::Codex) {
-                lines.extend(crate::codex::install::status_lines(setup));
-            }
-            if kinds.contains(&crate::agents::Kind::Cursor) {
-                lines.extend(crate::cursor::install::status_lines(setup));
-            }
-            if kinds.contains(&crate::agents::Kind::CodeWhale) {
-                lines.extend(crate::codewhale::install::status_lines(setup));
-            }
-            // Claude Code's own section is shown when nothing is installed: not listed again.
-            let shown = |kind: &crate::agents::Kind| {
-                kinds.contains(kind)
-                    || (kinds.is_empty() && *kind == crate::agents::Kind::ClaudeCode)
+            // Nothing installed: the default harness's section (what install sets up first).
+            let listed = if kinds.is_empty() {
+                vec![crate::agents::Kind::default()]
+            } else {
+                kinds.clone()
             };
+            let mut lines = Vec::new();
+            for kind in &listed {
+                lines.extend(setup.agent_of(*kind).status_lines(setup));
+            }
+            // A harness with its own section is not listed again.
+            let shown = |kind: &crate::agents::Kind| listed.contains(kind);
             let found: Vec<_> = setup
                 .detected()
                 .into_iter()
