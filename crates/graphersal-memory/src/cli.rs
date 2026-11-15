@@ -131,6 +131,19 @@ pub enum Command {
     Status,
     /// Check the installation and explain how to fix what is wrong.
     Doctor,
+    /// Upgrade to the latest release: through the release's installer, or cargo when it was
+    /// installed with cargo; then restart the daemon. Shows the plan and asks first.
+    Upgrade {
+        /// Only say whether a newer release is available, and how to upgrade.
+        #[arg(long, conflicts_with_all = ["dry_run", "yes"])]
+        check: bool,
+        /// Show the plan without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Serve MCP over stdio for one harness session (the harness starts this, not you).
     Mcp {
         /// Which MCP server this is: `use` (memory tools) or `develop` (structure tools).

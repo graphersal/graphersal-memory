@@ -42,6 +42,45 @@ From source, with Rust 1.88 or newer and a C compiler (for the bundled SQLite an
 cargo install --locked graphersal-memory
 ```
 
+## Upgrade
+
+`graphersal-memory upgrade` asks GitHub for the latest release (the redirect of
+`releases/latest`), prints the installed and the latest version, and the plan:
+
+```text
+graphersal-memory upgrade
+  installed: 0.2.0 (/Users/you/.local/bin/graphersal-memory)
+  latest:    0.3.0
+  notes:     https://github.com/graphersal/graphersal-memory/releases/tag/v0.3.0
+
+The upgrade, through the release's installer (it was installed with it):
+
+  1. download https://github.com/graphersal/graphersal-memory/releases/download/v0.3.0/install.sh
+  2. sh /tmp/graphersal-memory-upgrade-4242/install.sh --version v0.3.0 --dir /Users/you/.local/bin
+  3. /Users/you/.local/bin/graphersal-memory daemon restart
+  4. /Users/you/.local/bin/graphersal-memory --version
+
+Upgrade now? [y/N]
+```
+
+How it upgrades follows where the binary is:
+
+| Binary in | Upgrade through |
+|---|---|
+| `~/.local/bin` (Windows: `%LOCALAPPDATA%\Programs\graphersal-memory`) | the release's `install.sh` (Windows: `install.ps1` through PowerShell) of that version, into the same directory |
+| `$CARGO_HOME/bin` or `~/.cargo/bin` | `cargo install graphersal-memory --locked --force --version <latest>` (builds from source; on Windows the running `.exe` is moved aside to `graphersal-memory.old.exe` first) |
+| anywhere else | the release's installer with `--dir` set to that directory |
+
+The installers verify the archive against the release's `SHA256SUMS` and replace a running binary
+safely. A failed step leaves the installed version as it was. `--check` only reports (with the
+commands to run by hand), `--dry-run` stops after the plan, `--yes` does not ask (needed without
+a terminal). `GRAPHERSAL_MEMORY_BASE_URL` points the check and the installer download at a mirror.
+
+The browser UI shows "Version X available" in its top bar when a newer release is out; the
+Overview then shows the command and the manual commands with a Copy button. It asks GitHub at
+most once a day (`<data dir>/update-check.json` keeps the answer); `"updates": {"check": false}`
+in `config.json` or `GRAPHERSAL_MEMORY_UPDATE_CHECK=off` switches the check off.
+
 ## What install and uninstall show
 
 These are real outputs, captured on 2026-11-12 by running `graphersal-memory` (a release build

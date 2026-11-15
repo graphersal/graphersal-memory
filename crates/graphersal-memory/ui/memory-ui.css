@@ -14,6 +14,14 @@
 .mem-topbar .mem-daemon { white-space: nowrap; }
 .mem-topbar-problems { border: 0; background: none; padding: 0; font: inherit; font-size: 12.5px; color: var(--warn); cursor: pointer; white-space: nowrap; }
 .mem-topbar-problems:hover { text-decoration: underline; }
+.mem-topbar-update { border: 0; background: none; padding: 0; font: inherit; font-size: 12.5px; color: var(--accent, #2f6fde); cursor: pointer; white-space: nowrap; }
+.mem-topbar-update:hover { text-decoration: underline; }
+.mem-topbar-update .show-narrow { display: none; }
+@media (max-width: 760px) { .mem-topbar-update .show-narrow { display: inline; } }
+.mem-update { border: 1px solid var(--accent, #2f6fde); border-radius: 10px; padding: 12px 16px; margin: 16px 0; }
+.mem-update h3 { margin-top: 0; }
+.mem-command { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+.mem-command code { flex: 1; min-width: 0; overflow-x: auto; white-space: pre; padding: 6px 8px; border-radius: 6px; background: var(--surface-2, rgba(127,127,127,.12)); font-size: 12.5px; }
 .mem-topbar-error { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 24em; cursor: help; }
 .mem-daemon { color: var(--ok); font-size: 12.5px; }
 .mem-daemon.bad, .bad { color: var(--danger); }

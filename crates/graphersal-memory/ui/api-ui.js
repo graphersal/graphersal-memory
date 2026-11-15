@@ -47,6 +47,13 @@ export function getStartContext(project) {
   return call(`/api/ui/start-context?project=${encodeURIComponent(project || '')}`);
 }
 
+/** Whether a newer release is published (the UI server asks GitHub at most once a day, unless
+ * `updates.check` is false) and how to upgrade: {current, latest, newer, enabled, upgrade, manual,
+ * release_notes, switch_off, error}. */
+export function getUpdate() {
+  return call('/api/ui/update');
+}
+
 /** The start context budget. */
 export function getSettings() {
   return call('/api/ui/settings');

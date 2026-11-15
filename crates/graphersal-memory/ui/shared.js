@@ -6,7 +6,7 @@
 
 import { reactive, ref, computed, h } from 'vue';
 import * as model from './model.js';
-import { getProjects, getStatus } from './api-ui.js';
+import { getProjects, getStatus, getUpdate } from './api-ui.js';
 
 const STORE_KEY = 'graphersal-memory.ui.project';
 
@@ -17,6 +17,8 @@ export const state = reactive({
   loaded: false,
   status: null,
   statusError: '',
+  /** The update check (`/api/ui/update`), once per page load; null until known. */
+  update: null,
   /** Bumped after every write: tabs reload what they show. */
   version: 0,
 });
@@ -38,6 +40,7 @@ export function init() {
       state.selection = model.validSelection(stored === null ? model.ALL : stored, state.projects);
       state.loaded = true;
       refreshStatus();
+      getUpdate().then((update) => { state.update = update; }, () => { state.update = null; });
     })();
   }
   return loading;

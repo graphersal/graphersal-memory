@@ -666,10 +666,34 @@ fn ui_api(
                 Err(err) => Reply::error(400, &err),
             }
         }
-        (_, "heartbeat" | "status" | "projects" | "start-context" | "settings") => Reply::error(
-            405,
-            &format!("{method} /api/ui/{rest} is not offered (GET reads, POST writes)"),
-        ),
+        ("GET", "update") => {
+            let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+            let configured = crate::config::Config::load(data_dir)
+                .ok()
+                .and_then(|config| config.update_check);
+            let enabled = crate::update::check_enabled(&env, configured);
+            let releases = crate::update::releases_url(&env);
+            let check = crate::update::check_cached(
+                data_dir,
+                enabled,
+                std::time::SystemTime::now(),
+                &|| crate::update::latest(&releases),
+            );
+            let method = match (std::env::current_exe(), crate::store::home_dir(&env)) {
+                (Ok(exe), Ok(home)) => crate::update::method_of(&exe, &home, &env, cfg!(windows)),
+                _ => crate::update::Method::Other(PathBuf::from(".")),
+            };
+            Reply::json(
+                200,
+                &crate::update::check_json(&check, &method, cfg!(windows)),
+            )
+        }
+        (_, "heartbeat" | "status" | "projects" | "start-context" | "settings" | "update") => {
+            Reply::error(
+                405,
+                &format!("{method} /api/ui/{rest} is not offered (GET reads, POST writes)"),
+            )
+        }
         _ => Reply::error(404, &format!("unknown endpoint /api/ui/{rest}")),
     }
 }
@@ -839,6 +863,66 @@ mod tests {
             &mut std::io::empty(),
         );
         assert_eq!(post.status, 405);
+    }
+
+    #[test]
+    fn the_update_check_answers_from_its_kept_state_or_not_at_all() {
+        let dir = crate::mcp_tests::TempDir::new("ui-update");
+        let shared = shared(dir.path());
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let headers = [
+            ("Host", "127.0.0.1:4100"),
+            ("Authorization", &*format!("Bearer {}", "ab".repeat(32))),
+        ];
+        let body = |reply: Reply| -> Value {
+            assert_eq!(
+                reply.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            serde_json::from_slice(&reply.body).unwrap()
+        };
+        // A check kept a minute ago: answered from it (no request), a newer release shown with
+        // the commands to copy.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(
+            data.join(crate::update::STATE_FILE),
+            json!({"checked_at": now - 60, "latest": "99.0.0", "error": null}).to_string(),
+        )
+        .unwrap();
+        let update = body(get(&shared, "/api/ui/update", &headers));
+        assert_eq!(update["enabled"], true, "{update}");
+        assert_eq!(update["latest"], "99.0.0");
+        assert_eq!(update["newer"], true);
+        assert_eq!(update["current"], crate::update::CURRENT);
+        assert_eq!(update["upgrade"], "graphersal-memory upgrade");
+        assert!(
+            update["manual"].as_array().is_some_and(|m| m.len() == 2),
+            "{update}"
+        );
+        assert!(
+            update["release_notes"]
+                .as_str()
+                .unwrap()
+                .ends_with("/tag/v99.0.0")
+        );
+        // updates.check false: nothing asked, nothing shown.
+        std::fs::write(
+            data.join(crate::config::CONFIG_FILE),
+            r#"{"version": 1, "updates": {"check": false}}"#,
+        )
+        .unwrap();
+        let off = body(get(&shared, "/api/ui/update", &headers));
+        assert_eq!(
+            (off["enabled"].clone(), off["newer"].clone()),
+            (json!(false), json!(false))
+        );
+        assert!(off["latest"].is_null(), "{off}");
     }
 
     #[test]

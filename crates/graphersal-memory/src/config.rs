@@ -25,6 +25,9 @@
 //! such as `"30d"`, or `"forever"`; default 30 days, `0` = forever) is how far back the daemon
 //! keeps the store's history (older snapshots and WAL are pruned, `crate::maintenance`).
 //!
+//! `updates.check` (default `true`) lets `graphersal-memory ui` ask GitHub for the latest release
+//! at most once a day (`crate::update`); `false`, or `GRAPHERSAL_MEMORY_UPDATE_CHECK=off`, never.
+//!
 //! A missing file means the defaults; `install` writes one with the defaults when there is none,
 //! so its shape is visible. Precedence for every setting: the command-line flag, then the
 //! environment variable, then this file, then the built-in default. Unknown keys are kept and
@@ -42,7 +45,7 @@ pub const CONFIG_FILE: &str = "config.json";
 const FORMAT: u64 = 1;
 
 /// The keys this version knows, as dotted paths.
-const KNOWN: [&str; 16] = [
+const KNOWN: [&str; 18] = [
     "version",
     "memory",
     "memory.language",
@@ -59,6 +62,8 @@ const KNOWN: [&str; 16] = [
     "store",
     "store.checkpoint_after",
     "store.keep_history",
+    "updates",
+    "updates.check",
 ];
 
 /// The default harness command of the summaries.
@@ -155,6 +160,9 @@ pub struct Config {
     pub checkpoint_after: Option<u64>,
     /// `store.keep_history`, when the file sets it: `Some(None)` keeps everything.
     pub keep_history: Option<Option<Duration>>,
+    /// `updates.check`, when the file sets it (`false`: the UI never asks for the latest
+    /// release; `crate::update`).
+    pub update_check: Option<bool>,
     /// Keys this version does not know (dotted paths).
     pub unknown: Vec<String>,
 }
@@ -256,6 +264,16 @@ impl Config {
                 config.keep_history = Some(parse_keep(keep).map_err(|err| {
                     format!("store.keep_history: {err} (examples: 30, \"30d\", \"forever\")")
                 })?);
+            }
+        }
+        if let Some(updates) = object.get("updates") {
+            let updates = updates.as_object().ok_or("'updates' must be an object")?;
+            if let Some(check) = updates.get("check") {
+                config.update_check = Some(
+                    check
+                        .as_bool()
+                        .ok_or("'updates.check' must be true or false")?,
+                );
             }
         }
         let mut unknown = Vec::new();

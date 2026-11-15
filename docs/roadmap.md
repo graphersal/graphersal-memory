@@ -23,6 +23,8 @@ thought of is welcome there.
 
 ## Next
 
+- **`upgrade` and the update notice** (built, in the next release): `graphersal-memory upgrade`
+  through the installer or cargo, and "Version X available" in the browser UI.
 - **CodeWhale beyond the preview**: a memory written through it, Linux and Windows
   ([codewhale-live-check.md](codewhale-live-check.md)), and `bench` through `codewhale exec`.
 - **Verify what is built but not yet run live**: Cursor with a live login

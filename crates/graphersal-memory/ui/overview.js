@@ -46,7 +46,15 @@ export default {
       if (s.running) return `indexing now (${report.indexed || 0} of ${report.found || 0} found)`;
       return report.active ? `${report.active} still running` : '';
     });
-    return { counts, start, error, busy, bar, problems, indexing, state, model, load, selectionName, go: (tab) => props.api.navigate(tab) };
+    const copied = ref('');
+    async function copy(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        copied.value = text;
+        setTimeout(() => { if (copied.value === text) copied.value = ''; }, 2000);
+      } catch (err) { /* no clipboard access: the command stays selectable */ }
+    }
+    return { counts, start, error, busy, bar, problems, indexing, state, model, load, selectionName, copied, copy, go: (tab) => props.api.navigate(tab) };
   },
   template: `
   <div class="mem-tab">
@@ -89,6 +97,17 @@ export default {
       </section>
     </div>
     <p v-else-if="busy" class="muted">Loading…</p>
+    <section v-if="model.updateText(state.update)" class="mem-update" aria-live="polite">
+      <h3>{{ model.updateText(state.update) }}</h3>
+      <p>You have {{ state.update.current }}. <a v-if="state.update.release_notes" :href="state.update.release_notes" target="_blank" rel="noopener noreferrer">What's new in {{ state.update.latest }}</a></p>
+      <p>Upgrade in a terminal (it shows the plan and asks first):</p>
+      <div class="mem-command"><code>{{ state.update.upgrade }}</code><button class="btn small" type="button" @click="copy(state.update.upgrade)">{{ copied === state.update.upgrade ? 'Copied' : 'Copy' }}</button></div>
+      <details>
+        <summary>Or by hand</summary>
+        <div v-for="command in state.update.manual" :key="command" class="mem-command"><code>{{ command }}</code><button class="btn small" type="button" @click="copy(command)">{{ copied === command ? 'Copied' : 'Copy' }}</button></div>
+      </details>
+      <p class="muted">The UI asks GitHub for the latest release at most once a day. To switch that off: {{ state.update.switch_off }}.</p>
+    </section>
     <section class="mem-health">
       <h3>Health</h3>
       <p>{{ model.daemonText(state.status) }}<span v-if="state.status"> · graphersal-memory {{ state.status.version }}</span><span v-if="api.info && api.info.version" class="muted"> · Graphersal engine {{ api.info.version }}</span></p>
