@@ -1122,6 +1122,14 @@ impl HarnessPlan {
     }
 }
 
+/// Whether Claude Code's develop server is registered (an entry of ours).
+pub(crate) fn claude_develop_on(setup: &Setup) -> bool {
+    let user_config = read_json(&setup.paths.user_config, &mut Vec::new());
+    setup
+        .ours()
+        .entry(&user_config["mcpServers"][DEVELOP_SERVER])
+}
+
 /// When install switched Claude Code's auto-memory off (its state records it): the settings
 /// file uninstall switches it back in, and the report line (back to how it was while it is
 /// still off; a value the user set since install stays).
@@ -1216,16 +1224,9 @@ pub(crate) fn read_text(path: &Path) -> Result<Option<String>, String> {
 /// `err` (about one agent's file) with the way out: fix that file and run the command again, or
 /// leave that agent out with `--harness` (naming the other agents of `kinds`).
 pub(crate) fn way_out(err: &str, kinds: &[Kind], command: &str, verb: &str) -> String {
-    let owner = kinds.iter().find(|kind| {
-        let agent_dir = |kind: &Kind| match kind {
-            Kind::ClaudeCode => vec![".claude"],
-            Kind::OpenCode => vec!["opencode"],
-            Kind::Codex => vec![".codex", "codex"],
-            Kind::Cursor => vec![".cursor"],
-            Kind::CodeWhale => vec![".codewhale", ".deepseek", ".agents"],
-        };
-        agent_dir(kind).iter().any(|dir| err.contains(dir))
-    });
+    let owner = kinds
+        .iter()
+        .find(|kind| kind.dir_names().iter().any(|dir| err.contains(dir)));
     let others: Vec<&str> = kinds
         .iter()
         .filter(|kind| Some(*kind) != owner)
@@ -3366,8 +3367,12 @@ pub fn install(
             &format!("conflict: {}", setup.show(conflict)),
         ));
     }
-    let codex_approval = answers.harnesses.contains(&Kind::Codex)
-        && !crate::codex::install::inspect(setup).hooks_trusted;
+    // What the user still has to do in a harness (Codex: trust the hooks).
+    let actions: Vec<String> = answers
+        .harnesses
+        .iter()
+        .filter_map(|kind| setup.agent_of(*kind).action_needed(setup))
+        .collect();
     // The first harness whose own memory the plan switches off says that nothing is lost.
     if let Some(sentence) = plan.harnesses.iter().find_map(|(_, h)| h.nothing_is_lost) {
         must_read.push(sentence.to_string());
@@ -3392,15 +3397,14 @@ pub fn install(
         for (key, value) in recap(setup, &answers, &current, &plan) {
             let _ = writeln!(console.out(), "  {key}: {value}");
         }
-        if !must_read.is_empty() || codex_approval {
+        if !must_read.is_empty() || !actions.is_empty() {
             let _ = writeln!(console.out());
         }
         for line in &must_read {
             let _ = writeln!(console.out(), "  {line}");
         }
-        if codex_approval {
-            let line =
-                crate::prompt::action_needed(color, &crate::codex::install::hook_approval_line());
+        for action in &actions {
+            let line = crate::prompt::action_needed(color, action);
             let _ = writeln!(console.out(), "  {line}");
         }
         let _ = writeln!(console.out());
@@ -3715,8 +3719,7 @@ pub fn install(
             conflicts: &plan.conflicts,
             up_to_date: all_changes(&plan).next().is_none() && plan.conflicts.is_empty(),
             harnesses: &answers.harnesses,
-            codex_approval: answers.harnesses.contains(&Kind::Codex)
-                && !crate::codex::install::inspect(setup).hooks_trusted,
+            actions: &actions,
         },
         color,
     );
@@ -3857,28 +3860,9 @@ fn refresh_answers(setup: &Setup, current: &Current, harnesses: Vec<Kind>) -> An
     };
     let (read_only, unchosen): (Vec<String>, Vec<String>) =
         others.read_only.into_iter().partition(chosen);
-    let on = |state: &PartState| *state != PartState::Missing;
     let develop_as_is = harnesses
         .iter()
-        .map(|kind| {
-            let develop = match kind {
-                Kind::ClaudeCode => current.develop_registered,
-                Kind::OpenCode => {
-                    let (state, enabled) = crate::opencode::install::inspect(setup).develop_server;
-                    on(&state) && enabled
-                }
-                Kind::Codex => {
-                    let (state, enabled) = crate::codex::install::inspect(setup).develop_server;
-                    on(&state) && enabled
-                }
-                Kind::Cursor => on(&crate::cursor::install::inspect(setup).develop_server),
-                Kind::CodeWhale => {
-                    let (state, enabled) = crate::codewhale::install::inspect(setup).develop_server;
-                    on(&state) && enabled
-                }
-            };
-            (*kind, develop)
-        })
+        .map(|kind| (*kind, setup.agent_of(*kind).develop_on(setup)))
         .collect();
     Answers {
         language: current.config.language.unwrap_or_default(),
@@ -4383,8 +4367,8 @@ struct InstallReport<'a> {
     /// Nothing in the agents' files needed a change.
     up_to_date: bool,
     harnesses: &'a [Kind],
-    /// Codex's hooks still need the user's approval.
-    codex_approval: bool,
+    /// What the user still has to do in a harness (`Harness::action_needed`).
+    actions: &'a [String],
 }
 
 /// The report: the backups once, a section per agent and one for the memory, then the "Next
@@ -4427,8 +4411,14 @@ fn print_install_report(
             names_of(report.harnesses)
         );
     }
-    let opencode = report.harnesses.contains(&Kind::OpenCode);
-    let hooks = report.harnesses.iter().any(|k| *k != Kind::OpenCode);
+    let opencode = report
+        .harnesses
+        .iter()
+        .any(|k| setup.agent_of(*k).has_plugin());
+    let hooks = report
+        .harnesses
+        .iter()
+        .any(|k| !setup.agent_of(*k).has_plugin());
     let parts = match (hooks, opencode) {
         (true, true) => "the MCP server, hooks and plugin",
         (false, true) => "the MCP server and plugin",
@@ -4438,11 +4428,8 @@ fn print_install_report(
         "Restart running {} sessions to load {parts}.",
         names_of(report.harnesses)
     )];
-    if report.codex_approval {
-        steps.push(crate::prompt::action_needed(
-            color,
-            &crate::codex::install::hook_approval_line(),
-        ));
+    for action in report.actions {
+        steps.push(crate::prompt::action_needed(color, action));
     }
     let _ = writeln!(out, "\n{}", crate::prompt::SEPARATOR);
     let _ = writeln!(out, "{}", paint(color, "1", "Next steps"));

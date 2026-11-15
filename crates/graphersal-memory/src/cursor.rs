@@ -219,6 +219,10 @@ impl Harness for Cursor {
         !install::inspect(setup).nothing_installed()
     }
 
+    fn develop_on(&self, setup: &crate::install::Setup) -> bool {
+        install::inspect(setup).develop_server != crate::install::PartState::Missing
+    }
+
     fn status_lines(&self, setup: &crate::install::Setup) -> Vec<String> {
         install::status_lines(setup)
     }

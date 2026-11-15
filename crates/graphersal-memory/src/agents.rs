@@ -61,6 +61,17 @@ impl Kind {
         }
     }
 
+    /// The directory names of its files, to tell which harness an error is about.
+    pub fn dir_names(self) -> &'static [&'static str] {
+        match self {
+            Kind::ClaudeCode => &[".claude"],
+            Kind::OpenCode => &["opencode"],
+            Kind::Codex => &[".codex", "codex"],
+            Kind::Cursor => &[".cursor"],
+            Kind::CodeWhale => &[".codewhale", ".deepseek", ".agents"],
+        }
+    }
+
     /// The name people know.
     pub fn display_name(self) -> &'static str {
         match self {
@@ -103,6 +114,17 @@ pub trait Harness {
         develop_only: bool,
         conflicts: &mut Vec<String>,
     ) -> Result<Vec<(Change, &'static str)>, String>;
+    /// Whether its develop server is registered and on, as it is now.
+    fn develop_on(&self, setup: &Setup) -> bool;
+    /// What the user still has to do in the harness for the install to work fully (Codex:
+    /// trust the hooks), as one line; `None` when nothing.
+    fn action_needed(&self, _setup: &Setup) -> Option<String> {
+        None
+    }
+    /// Whether it gets a session plugin rather than hooks (opencode).
+    fn has_plugin(&self) -> bool {
+        false
+    }
     /// Its lines of `status`: each part of ours and its state.
     fn status_lines(&self, setup: &Setup) -> Vec<String>;
     /// Its findings of `doctor` (`project`: the current directory's, for checks of a project's
@@ -251,6 +273,10 @@ impl Harness for ClaudeCode {
 
     fn own_memory_restored(&self, setup: &Setup, state: &State) -> Option<(PathBuf, String)> {
         crate::install::claude_own_memory_restored(setup, state)
+    }
+
+    fn develop_on(&self, setup: &Setup) -> bool {
+        crate::install::claude_develop_on(setup)
     }
 
     fn status_lines(&self, setup: &Setup) -> Vec<String> {
