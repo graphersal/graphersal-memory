@@ -2687,7 +2687,7 @@ fn plan_other_memory(
             (ServerState::On, true) => {
                 let change = change_for(list, &server.file)?;
                 let text = change.after.clone().unwrap_or_default();
-                match crate::coexist::disable_edit(server, &text)
+                match crate::coexist::disable_edit(setup, server, &text)
                     .map_err(|e| in_file(&server.file, e))?
                 {
                     Some((new, record)) => {
@@ -2708,7 +2708,7 @@ fn plan_other_memory(
                         "{} ({place}): cannot be switched off in place; kept as it is (by hand: \
                          {})",
                         server.name,
-                        crate::coexist::off_by_hand(server)
+                        crate::coexist::off_by_hand(setup, server)
                     )),
                 }
             }

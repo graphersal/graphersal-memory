@@ -212,8 +212,13 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     transcript's span; `Returning` from the import records), `Choices`
     (`<data dir>/install/other-memory.json`: read-only and kept tools), the rule block's
     `read_only_line` (`rule_with`, `strip_read_only` so a block naming other tools stays ours),
-    `disable_edit`/`restore_edit` per harness (Claude Code and Cursor: entry removed and kept in
-    the record `OFF_RECORD`; opencode `enabled`/`disabled`; Codex `enabled = false`),
+    the `OtherMemory` trait each harness implements (`Harness::other_memory`: `server_sources`
+    (`ServerSource`), `built_in` (`notable`), `plugins`, `instruction_files` (collected user
+    level first, then the project's, in the registry's order), `disable_edit`, `off_by_hand`;
+    in `<harness>/other.rs`, Claude Code's at the end of `coexist.rs` until its module), the
+    shared `remove_entry`/`flag_entry`, `disable_edit`/`restore_edit` (Claude Code and Cursor:
+    entry removed and kept in the record `OFF_RECORD`; opencode `enabled`/`disabled`; Codex
+    `enabled = false`; CodeWhale `"disabled": true`),
     `status_lines`/`doctor_findings` (notes, never problems or ACTION NEEDED);
     `other_import`: the reference memory server's JSONL and Basic Memory's notes as global
     memories `kg-*`/`basic-*` through a connection without a project, item fingerprints in

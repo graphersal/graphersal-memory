@@ -200,6 +200,10 @@ pub trait Harness {
     ) -> Option<Box<dyn NativeMemory>> {
         None
     }
+    /// What it tells about other memory beside graphersal-memory (M15).
+    fn other_memory(&self) -> Option<&dyn crate::coexist::OtherMemory> {
+        None
+    }
     /// Whether it gets a session plugin rather than hooks (opencode).
     fn has_plugin(&self) -> bool {
         false
@@ -359,6 +363,10 @@ impl Harness for ClaudeCode {
     }
 
     fn own_memory(&self) -> Option<&dyn OwnMemory> {
+        Some(self)
+    }
+
+    fn other_memory(&self) -> Option<&dyn crate::coexist::OtherMemory> {
         Some(self)
     }
 

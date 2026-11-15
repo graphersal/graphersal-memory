@@ -60,6 +60,7 @@
 
 pub mod install;
 pub mod memory;
+pub mod other;
 pub mod sessions;
 
 use std::path::{Path, PathBuf};
@@ -554,6 +555,10 @@ impl Harness for CodeWhale {
     fn develop_on(&self, setup: &crate::install::Setup) -> bool {
         let (state, enabled) = install::inspect(setup).develop_server;
         state != crate::install::PartState::Missing && enabled
+    }
+
+    fn other_memory(&self) -> Option<&dyn crate::coexist::OtherMemory> {
+        Some(self)
     }
 
     fn status_lines(&self, setup: &crate::install::Setup) -> Vec<String> {

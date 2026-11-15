@@ -48,6 +48,7 @@
 //!   `~/graphersal-memory-export/codex/`.
 
 pub mod install;
+pub mod other;
 pub mod sessions;
 
 use std::path::{Path, PathBuf};
@@ -301,6 +302,10 @@ impl Harness for Codex {
     /// Codex runs our hooks only once the user trusts them in `/hooks`.
     fn action_needed(&self, setup: &crate::install::Setup) -> Option<String> {
         (!install::inspect(setup).hooks_trusted).then(install::hook_approval_line)
+    }
+
+    fn other_memory(&self) -> Option<&dyn crate::coexist::OtherMemory> {
+        Some(self)
     }
 
     fn status_lines(&self, setup: &crate::install::Setup) -> Vec<String> {
