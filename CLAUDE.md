@@ -38,10 +38,18 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     hook"), the MCP configuration file, its
     servers key and entry shape, settings and instruction files, the sessions location, the
     export directories, the auto-memory key, the headless command; `is_our_entry` for both entry
-    shapes) and `ClaudeCode`; `Setup::detected` (a harness's program found: `Setup::program`,
+    shapes); `Setup::detected` (a harness's program found: `Setup::program`,
     `PATH` plus known install locations), `leftovers` (configuration without the program:
     reported, never offered) and `installed` (what status, doctor and uninstall work on). The
     harness refactor (moving every per-harness branch behind the trait) is under way;
+  - `src/claude_code.rs` + `src/claude_code/`: Claude Code, a harness module like the others:
+    `ClaudeCode` (its `Harness`, `HookHandler` and `OwnMemory` parts, `GLOBAL_RULES_FILE`),
+    `ClaudeHeadless`; `claude_code/install.rs` its install parts (the rule block texts and
+    `PREVIOUS_BLOCK_FINGERPRINTS`, `ClaudePaths`, the block helpers, `claude_plan`, the
+    structural `claude_removal`, `inspect`, `status_lines`, `claude_doctor`, the Git Bash checks;
+    `crate::install` re-exports them under their old paths), `claude_code/other.rs` its
+    `OtherMemory`, `claude_code/sessions.rs` its `SessionSource`. Its file-memory import stays
+    `crate::import`, its transcript parser `crate::transcript`, its hook `crate::hook`;
   - `src/harnesses.rs`: the registry, the one place that names every harness (`of`: the
     `Harness` of a `Kind`, which `Setup::agent_of` returns; `driver`: the setup-free parts of a
     `Kind`, its `sessions::SessionSource` for the daemon's indexing and its
@@ -238,7 +246,8 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     plus the start context (`run_with_context`, `StartFetch` from the daemon's `start_context`
     control line after the import; `claude_start_output`: one JSON object with
     `hookSpecificOutput.additionalContext`, capped by `CLAUDE_CODE_CONTEXT_CHARS`; the plain line
-    when there is none), always exit 0; `GRAPHERSAL_MEMORY_HOOK=off` makes it do nothing; `run_opencode` for
+    when there is none), always exit 0; `GRAPHERSAL_MEMORY_HOOK=off` makes it do nothing; `run_opencode` (in
+    `opencode/hook.rs`, like `codex/hook.rs` and `cursor/hook.rs`, on hook.rs's `run_queued*`) for
     opencode's plugin (`--harness opencode`: no import, `<db>#<id>` active/ended); `run_codex`
     for Codex's hooks (`--harness codex`: no import, the rollout `transcript_path`
     active/ended, the start line becomes model context); `run_cursor` for Cursor's hooks
