@@ -25,9 +25,15 @@ many generated questions are asked besides your own, generated when the project 
 `0` asks only your own), `--repeats R` (1), `--budget USD` (3), `--project
 ROOT` (default: the git root of the current directory), `--claude-dir DIR` (read the memory
 files, instruction files and transcripts from another Claude Code directory, for example a copy;
-the harness keeps its own), `--yes` (do not ask), `--dry-run`. The harness command is
-`summaries.harness_command` in `config.json` (`claude -p --model sonnet` by default); `bench`
-drives only `claude` for now.
+the harness keeps its own), `--yes` (do not ask), `--dry-run`, `--harness-command COMMAND`. The
+harness command is `--harness-command`, else `summaries.harness_command` in `config.json`
+(`claude -p --model sonnet` by default); `bench` drives Claude Code's `claude -p`, opencode's
+`opencode run` and Codex's `codex exec --oss` with a local model. A command it cannot drive is
+refused before anything runs, with the commands that work, ready to copy:
+
+```sh
+graphersal-memory bench --harness-command "claude -p"
+```
 
 Each run writes `report.md` and `report.json` to `bench/<timestamp>/` in the data directory, with
 the sandboxes it used (the copy of the store is deleted after the run), and prints a summary. The

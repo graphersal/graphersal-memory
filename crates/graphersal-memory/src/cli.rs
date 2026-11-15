@@ -177,8 +177,8 @@ pub enum Command {
         heartbeat_timeout: Option<std::time::Duration>,
     },
     /// Measure whether the memory helps: the built-in A/B on your own data (through
-    /// `summaries.harness_command`: Claude Code's `claude -p`, opencode's `opencode run` or
-    /// Codex's `codex exec --oss` with a local model).
+    /// --harness-command, else `summaries.harness_command`: Claude Code's `claude -p`,
+    /// opencode's `opencode run` or Codex's `codex exec --oss` with a local model).
     #[command(args_conflicts_with_subcommands = true)]
     Bench {
         /// `questions`: generate, review or add to the question set only.
@@ -213,6 +213,10 @@ pub enum Command {
         /// Do not ask: accept the estimate and an unconfirmed question set.
         #[arg(long, short = 'y')]
         yes: bool,
+        /// Run through this harness command instead of summaries.harness_command, for
+        /// example "claude -p", "opencode run" or "codex exec --oss --local-provider lmstudio".
+        #[arg(long, value_name = "COMMAND")]
+        harness_command: Option<String>,
     },
     /// Import the harness's file memory (MEMORY.md and the memory files; new and changed files
     /// only), or with --sessions its past sessions.
@@ -400,6 +404,10 @@ pub enum BenchAction {
         /// Do not ask.
         #[arg(long, short = 'y')]
         yes: bool,
+        /// Run through this harness command instead of summaries.harness_command, for
+        /// example "claude -p", "opencode run" or "codex exec --oss --local-provider lmstudio".
+        #[arg(long, value_name = "COMMAND")]
+        harness_command: Option<String>,
     },
 }
 
@@ -685,7 +693,8 @@ mod tests {
                 project: None,
                 claude_dir: None,
                 dry_run: true,
-                yes: false
+                yes: false,
+                harness_command: None
             }
         );
     }
@@ -899,6 +908,32 @@ mod tests {
         }
         assert!(parse(&["bench", "--questions", "61"]).is_err());
         assert!(parse(&["bench", "--budget", "-1"]).is_err());
+    }
+
+    #[test]
+    fn bench_takes_a_harness_command() {
+        match parse(&["bench", "--harness-command", "claude -p"])
+            .unwrap()
+            .command
+        {
+            Command::Bench {
+                harness_command, ..
+            } => assert_eq!(harness_command.as_deref(), Some("claude -p")),
+            other => panic!("{other:?}"),
+        }
+        match parse(&["bench", "questions", "--harness-command", "opencode run"])
+            .unwrap()
+            .command
+        {
+            Command::Bench {
+                action:
+                    Some(BenchAction::Questions {
+                        harness_command, ..
+                    }),
+                ..
+            } => assert_eq!(harness_command.as_deref(), Some("opencode run")),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

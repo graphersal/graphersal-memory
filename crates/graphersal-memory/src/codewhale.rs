@@ -84,11 +84,10 @@ pub const CONNECT_TIMEOUT_SECS: u64 = 60;
 /// summaries through them cost nothing.
 pub const LOCAL_PROVIDERS: [&str; 5] = ["ollama", "vllm", "sglang", "ds4", "lm-studio"];
 
-/// Why the bench does not run through CodeWhale.
-pub const NO_BENCH: &str = "the bench through CodeWhale (`codewhale exec`) is planned: its runs \
-    with tools are saved as sessions in your CodeWhale home, and a run in a home of its own \
-    would need a copy of your provider credentials. Run the bench through Claude Code's \
-    `claude -p` (--harness-command)";
+/// Why the bench does not run through CodeWhale (yet).
+pub const NO_BENCH: &str = "CodeWhale saves every run that uses tools as a session in your \
+    CodeWhale home, and a run in a home of its own would need a copy of your provider \
+    credentials.";
 
 /// The tool names CodeWhale shows the model for our `use` server's functions.
 pub fn tool_names() -> Vec<String> {

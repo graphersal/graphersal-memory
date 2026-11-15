@@ -689,6 +689,82 @@ fn bench_refuses_what_it_cannot_run() {
 }
 
 #[test]
+fn a_codewhale_command_is_refused_with_commands_to_copy_and_the_flag_replaces_it() {
+    let machine = Machine::new();
+    std::fs::write(
+        machine.data.path().join(crate::config::CONFIG_FILE),
+        r#"{"version": 1, "summaries": {"harness_command": "codewhale exec"}}"#,
+    )
+    .unwrap();
+    let options_with = |harness_command: Option<&str>| {
+        let request = crate::commands::BenchRequest {
+            questions_only: false,
+            edit: None,
+            review: false,
+            arms: vec![BenchArm::None, BenchArm::Files, BenchArm::Graph],
+            questions: 3,
+            repeats: 1,
+            budget: 3.0,
+            project: None,
+            claude_dir: None,
+            dry_run: false,
+            yes: true,
+            harness_command: harness_command.map(str::to_string),
+        };
+        crate::commands::bench_options(
+            machine.data.path(),
+            machine.claude(),
+            crate::opencode::OpenCodePaths::of_home(machine.home.path()),
+            crate::codex::CodexPaths::of_home(machine.home.path()),
+            PathBuf::from("/opt/gm/bin/graphersal-memory"),
+            PROJECT.to_string(),
+            &request,
+        )
+    };
+
+    // The settings' command: refused before anything runs, every command ready to copy.
+    let options = options_with(None).unwrap();
+    assert_eq!(options.harness_command, ["codewhale", "exec"]);
+    let mut harness = DryRun::default();
+    let mut out = Vec::new();
+    let err = bench::run(&options, &mut harness, &mut "".as_bytes(), &mut out).unwrap_err();
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(
+        lines[0], "the bench does not run through CodeWhale yet (planned).",
+        "{err}"
+    );
+    assert!(
+        lines.contains(&"  harness command: codewhale exec"),
+        "{err}"
+    );
+    // The settings file by its path (with `~` when under the home directory).
+    assert!(
+        lines.iter().any(|line| line.starts_with("  set in:")
+            && line.contains("summaries.harness_command in ")
+            && line.ends_with(crate::config::CONFIG_FILE)),
+        "{err}"
+    );
+    for command in [
+        "claude -p",
+        "opencode run",
+        "codex exec --oss --local-provider lmstudio",
+    ] {
+        let line = format!("  graphersal-memory bench --harness-command \"{command}\"");
+        assert!(lines.contains(&line.as_str()), "{err}");
+    }
+    assert!(harness.calls.is_empty());
+
+    // --harness-command replaces it; a command that does not split is refused.
+    let options = options_with(Some("claude -p --model 'son net'")).unwrap();
+    assert_eq!(
+        options.harness_command,
+        ["claude", "-p", "--model", "son net"]
+    );
+    let err = options_with(Some("claude 'x")).unwrap_err();
+    assert!(err.starts_with("--harness-command:"), "{err}");
+}
+
+#[test]
 fn verdicts_and_usage_parse() {
     let verdict = bench::parse_verdict(&json!({"structured_output":
         {"score": 4, "confident_wrong": true, "note": " ok "}}))

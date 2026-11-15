@@ -252,7 +252,7 @@ not imported yet, and names a fix for each problem (exit code 1 when it found on
 
 The summaries and `bench` run your harness command (`summaries.harness_command` in
 `config.json`, `claude -p --model sonnet` by default; opencode's command when it is installed
-alone, see below). With `claude` `bench` builds
+alone, see below; `bench --harness-command COMMAND` for one run). With `claude` `bench` builds
 builds each arm from Claude Code's flags (`--strict-mcp-config --mcp-config`, `--setting-sources
 ""` with `--settings`, `--tools`, `--allowedTools`, `--append-system-prompt-file`,
 `--no-session-persistence`, `--json-schema`, `--max-budget-usd`), so it needs a recent Claude
@@ -784,6 +784,8 @@ estimate against the monthly budget, except with a local provider named in the c
 (`codewhale exec --provider ollama`, also `vllm`, `sglang`, `ds4`, `lm-studio`), which counts $0.
 `bench` refuses a CodeWhale command for now: runs with tools are saved as sessions in your
 CodeWhale home, and a run in a home of its own would need a copy of your provider credentials.
+With summaries through CodeWhale, run the bench through another harness:
+`graphersal-memory bench --harness-command "claude -p"`.
 
 ## Windows
 
