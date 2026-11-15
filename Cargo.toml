@@ -56,6 +56,11 @@ toml = { version = "1", default-features = false, features = ["parse", "serde", 
 # (graphersal-cli) uses, so the engine's HTTP boundary types are converted the way they are
 # tested there. graphersal-serve itself has no HTTP library on purpose.
 tiny_http = "0.12"
+# Reading DeepSeek Harness's sessions: dsh keeps each session as `session.v4.jsonl.zstd`, a
+# concatenation of zstd frames whose last one can be torn mid-write. A pure-Rust decoder (no C
+# library, no build script), read frame by frame so a torn last frame stops the read cleanly;
+# its encoder builds the tests' fixtures offline. MSRV 1.87, below ours.
+ruzstd = "0.9"
 
 [profile.release]
 # One codegen unit, as the engine's own release builds use.

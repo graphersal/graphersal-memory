@@ -30,6 +30,7 @@ ring = { workspace = true }
 rusqlite = { workspace = true }
 toml = { workspace = true }
 tiny_http = { workspace = true }
+ruzstd = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 uds_windows = { workspace = true }

@@ -10,6 +10,10 @@ pub mod codex;
 #[cfg(test)]
 pub(crate) mod conformance_tests;
 pub mod cursor;
+// DeepSeek Harness: only its session reader so far, used by its tests until the registry
+// names it (its `Kind`, paths and `Harness` come with the next step).
+#[cfg(test)]
+pub mod dsh;
 pub mod headless;
 pub mod opencode;
 use std::path::Path;
