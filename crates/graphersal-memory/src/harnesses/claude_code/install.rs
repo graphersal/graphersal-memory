@@ -13,9 +13,9 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::harnesses::agent::{Harness, Kind};
-use crate::harnesses::claude_code::import::ImportState;
 use crate::install::language::Language;
 use crate::install::*;
+use crate::memory::import::ImportState;
 use crate::{fsutil, install::jsonedit};
 
 /// The text of the managed rule block (between its marker lines) with the English memory
@@ -1061,12 +1061,10 @@ pub fn claude_doctor(setup: &Setup) -> Vec<Finding> {
         ));
     }
     match ImportState::load(&setup.data_dir).and_then(|state| {
-        Ok(crate::harnesses::claude_code::import::totals(
-            &crate::harnesses::claude_code::import::plan(
-                crate::harnesses::claude_code::import::scan(&setup.paths().projects)?,
-                &state,
-            ),
-        ))
+        Ok(crate::memory::import::totals(&crate::memory::import::plan(
+            crate::harnesses::claude_code::import::scan(&setup.paths().projects)?,
+            &state,
+        )))
     }) {
         Ok((_, _, new, changed, _)) if new + changed > 0 => findings.push(problem(
             format!(

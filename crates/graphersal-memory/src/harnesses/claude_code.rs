@@ -125,6 +125,10 @@ impl Harness for ClaudeCode {
         Some(self)
     }
 
+    fn memory_dirs(&self) -> Result<Vec<crate::memory::import::MemoryDir>, String> {
+        import::scan(&self.paths.projects)
+    }
+
     fn start_hook_installed(&self, _setup: &Setup) -> bool {
         install::claude_start_hook_installed(&self.paths)
     }

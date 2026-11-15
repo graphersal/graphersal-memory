@@ -1168,8 +1168,7 @@ const SPAN_SLACK: u64 = 120;
 /// header in `MEMORY.md`, or imported files changed while no session of the project ran (only
 /// changes after the oldest transcript count: older sessions are gone).
 pub fn writers(setup: &Setup) -> Vec<Writer> {
-    let Ok(state) = crate::harnesses::claude_code::import::ImportState::load(&setup.data_dir)
-    else {
+    let Ok(state) = crate::memory::import::ImportState::load(&setup.data_dir) else {
         return Vec::new();
     };
     let mut by_dir: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
@@ -1179,7 +1178,9 @@ pub fn writers(setup: &Setup) -> Vec<Writer> {
             by_dir.entry(dir.to_path_buf()).or_default().push(path);
         }
     }
-    let Ok(dirs) = crate::harnesses::claude_code::import::scan(&setup.paths().projects) else {
+    let Ok(dirs) =
+        crate::memory::import::file_memory_dirs(setup, &crate::harnesses::agent::Kind::ALL)
+    else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -1216,8 +1217,7 @@ pub fn writers(setup: &Setup) -> Vec<Writer> {
 
 /// The files whose import brought back a memory (from the import's records).
 pub fn returning(setup: &Setup) -> Vec<Returning> {
-    let Ok(state) = crate::harnesses::claude_code::import::ImportState::load(&setup.data_dir)
-    else {
+    let Ok(state) = crate::memory::import::ImportState::load(&setup.data_dir) else {
         return Vec::new();
     };
     state
@@ -1254,7 +1254,7 @@ pub fn detect(setup: &Setup, project: Option<&Path>) -> Findings {
         plugins: plugins(setup),
         writers: writers(setup),
         returning: returning(setup),
-        ignored: crate::harnesses::claude_code::import::ImportState::load(&setup.data_dir)
+        ignored: crate::memory::import::ImportState::load(&setup.data_dir)
             .map(|state| state.ignored().to_vec())
             .unwrap_or_default(),
         servers,

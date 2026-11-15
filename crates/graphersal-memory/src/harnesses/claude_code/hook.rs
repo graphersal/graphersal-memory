@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::harnesses::claude_code::import::ImportState;
 use crate::harnesses::claude_code::install::ClaudePaths;
 use crate::memory::hook::*;
 use crate::memory::import::{self, Connect};
@@ -69,7 +68,12 @@ pub fn work(
     let mut outcome = Outcome::default();
     let mut imported = 0;
     if let Some(dir) = session_dir {
-        let (count, notes) = import_project(dir, dir, paths, data_dir, connect, deadline);
+        let memory_dir = paths
+            .projects
+            .join(super::import::claude_slug(&dir.display().to_string()))
+            .join("memory");
+        let (count, notes) =
+            crate::memory::import::import_project(&memory_dir, dir, data_dir, connect, deadline);
         imported = count;
         outcome.notes.extend(notes);
     }
@@ -88,69 +92,6 @@ pub fn work(
         outcome.line = Some(line);
     }
     outcome
-}
-
-/// Imports the new and changed memory files Claude Code keeps for the sessions started in
-/// `dir` (`<projects>/<slug of dir>/memory`), as memories of the project of `session_dir`: how
-/// many were imported, and notes on what failed (and on changed files whose memory was edited
-/// in graphersal-memory, which keep the edit). Nothing when the directory does not exist.
-pub fn import_project(
-    dir: &Path,
-    session_dir: &Path,
-    paths: &ClaudePaths,
-    data_dir: &Path,
-    connect: &mut Connect<'_>,
-    deadline: Instant,
-) -> (usize, Vec<String>) {
-    let memory_dir = paths
-        .projects
-        .join(crate::harnesses::claude_code::import::claude_slug(
-            &dir.display().to_string(),
-        ))
-        .join("memory");
-    if !memory_dir.is_dir() {
-        return (0, Vec::new());
-    }
-    match sync(&memory_dir, session_dir, data_dir, connect, deadline) {
-        Ok(report) => {
-            let mut notes = report.problems;
-            // A changed file whose memory was edited here: said once, the edit was kept.
-            notes.extend(report.kept_edited);
-            if report.timed_out {
-                notes.push(
-                    "the import stopped at the time limit; the rest follows next time".into(),
-                );
-            }
-            (report.created + report.updated, notes)
-        }
-        Err(err) => (0, vec![err]),
-    }
-}
-
-/// Imports the new and changed files of one memory directory.
-fn sync(
-    memory_dir: &Path,
-    session_dir: &Path,
-    data_dir: &Path,
-    connect: &mut Connect<'_>,
-    deadline: Instant,
-) -> Result<crate::harnesses::claude_code::import::ImportReport, String> {
-    let done =
-        crate::harnesses::claude_code::import::with_lock(data_dir, Duration::from_secs(2), || {
-            let project = crate::runtime::mcp::project_key(None, session_dir);
-            let dir = crate::harnesses::claude_code::import::read_dir(memory_dir, Some(project));
-            let mut state = ImportState::load(data_dir)?;
-            let plans = crate::harnesses::claude_code::import::plan(vec![dir], &state);
-            Ok::<_, String>(crate::harnesses::claude_code::import::apply(
-                &plans,
-                connect,
-                &mut state,
-                data_dir,
-                Some(deadline),
-            ))
-        })?;
-    // `None`: another hook or import runs right now; it imports the same files.
-    done.unwrap_or_else(|| Ok(crate::harnesses::claude_code::import::ImportReport::default()))
 }
 
 /// Runs a hook with the time limit: never fails, always returns exit code 0 (without the

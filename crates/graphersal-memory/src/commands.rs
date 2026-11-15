@@ -11,9 +11,9 @@ use crate::cli::{
     QuestionsEdit, SummariesAction,
 };
 use crate::config::{self, Config};
-use crate::harnesses::claude_code::import::ImportState;
 use crate::harnesses::claude_code::install::ClaudePaths;
 use crate::install::{self, InstallOptions, Setup, UninstallOptions};
+use crate::memory::import::ImportState;
 use crate::memory::import::{self, Caller};
 use crate::runtime::daemon::{self, DaemonOptions};
 use crate::runtime::shim::{self, DaemonLocation, ShimOptions};
@@ -793,12 +793,11 @@ pub fn run_import(
     out: &mut dyn Write,
 ) -> Result<u8, String> {
     let state = ImportState::load(&setup.data_dir)?;
-    let plans = crate::harnesses::claude_code::import::plan(
-        crate::harnesses::claude_code::import::scan(&setup.paths().projects)?,
+    let plans = crate::memory::import::plan(
+        crate::memory::import::file_memory_dirs(setup, &crate::harnesses::agent::Kind::ALL)?,
         &state,
     );
-    let (with_project, skipped, new, changed, unchanged) =
-        crate::harnesses::claude_code::import::totals(&plans);
+    let (with_project, skipped, new, changed, unchanged) = crate::memory::import::totals(&plans);
     let _ = writeln!(
         out,
         "{} memory director{} under {}: {new} new, {changed} changed, {unchanged} unchanged \
@@ -839,21 +838,18 @@ pub fn run_import(
         let _ = writeln!(out, "Nothing to import.");
         return Ok(0);
     }
-    let report = crate::harnesses::claude_code::import::with_lock(
-        &setup.data_dir,
-        Duration::from_secs(60),
-        || {
+    let report =
+        crate::memory::import::with_lock(&setup.data_dir, Duration::from_secs(60), || {
             let mut state = ImportState::load(&setup.data_dir)?;
-            Ok::<_, String>(crate::harnesses::claude_code::import::apply(
+            Ok::<_, String>(crate::memory::import::apply(
                 &plans,
                 connect,
                 &mut state,
                 &setup.data_dir,
                 None,
             ))
-        },
-    )?
-    .ok_or("another import is running; try again later")??;
+        })?
+        .ok_or("another import is running; try again later")??;
     let _ = writeln!(out, "{}", install::import_summary(&report));
     for line in install::import_conflict_lines(&report) {
         let _ = writeln!(out, "{line}");
@@ -888,37 +884,31 @@ pub fn ignore_import(
     out: &mut dyn Write,
 ) -> Result<u8, String> {
     let path = absolute(path);
-    let _ = crate::harnesses::claude_code::import::with_lock(
-        &setup.data_dir,
-        Duration::from_secs(60),
-        || {
-            let mut state = ImportState::load(&setup.data_dir)?;
-            let changed = if ignore {
-                state.ignore(&path)
-            } else {
-                state.unignore(&path)
-            };
-            if changed {
-                state.save(&setup.data_dir)?;
-            }
-            let shown = setup.show(&path.display().to_string());
-            let line = match (ignore, changed) {
-                (true, true) => format!(
-                    "{shown}: not imported any more (the memories already imported from it stay; \
+    let _ = crate::memory::import::with_lock(&setup.data_dir, Duration::from_secs(60), || {
+        let mut state = ImportState::load(&setup.data_dir)?;
+        let changed = if ignore {
+            state.ignore(&path)
+        } else {
+            state.unignore(&path)
+        };
+        if changed {
+            state.save(&setup.data_dir)?;
+        }
+        let shown = setup.show(&path.display().to_string());
+        let line = match (ignore, changed) {
+            (true, true) => format!(
+                "{shown}: not imported any more (the memories already imported from it stay; \
                  `graphersal-memory import --unignore {shown}` imports it again)"
-                ),
-                (true, false) => format!("{shown}: ignored already"),
-                (false, true) => {
-                    format!(
-                        "{shown}: imported again from the next import (`graphersal-memory import`)"
-                    )
-                }
-                (false, false) => format!("{shown}: was not ignored"),
-            };
-            let _ = writeln!(out, "{line}");
-            Ok::<_, String>(())
-        },
-    )?
+            ),
+            (true, false) => format!("{shown}: ignored already"),
+            (false, true) => {
+                format!("{shown}: imported again from the next import (`graphersal-memory import`)")
+            }
+            (false, false) => format!("{shown}: was not ignored"),
+        };
+        let _ = writeln!(out, "{line}");
+        Ok::<_, String>(())
+    })?
     .ok_or("another import is running; try again later")?;
     Ok(0)
 }

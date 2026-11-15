@@ -51,10 +51,10 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::harnesses::agent::{Harness, Kind};
-use crate::harnesses::claude_code::import::{DirPlan, ImportState};
 use crate::install::language::Language;
 use crate::install::prompt::{Choice, Console, paint};
 use crate::memory::import::Connect;
+use crate::memory::import::{DirPlan, ImportState};
 use crate::{fsutil, memory::export};
 
 /// The name of the `use` server in Claude Code.
@@ -1075,7 +1075,7 @@ struct Current {
 /// The start context Claude Code's memory files give once imported: per project its pinned,
 /// feedback and user memories, rendered with `budget`; the project with the most of them.
 pub fn start_preview(
-    imports: &[crate::harnesses::claude_code::import::DirPlan],
+    imports: &[crate::memory::import::DirPlan],
     budget: usize,
 ) -> crate::memory::start_context::StartContext {
     imports
@@ -1142,12 +1142,11 @@ impl Current {
             }
             natives.extend(harness.native_memory(setup, project));
         }
-        let imports = crate::harnesses::claude_code::import::plan(
-            crate::harnesses::claude_code::import::scan(agent.projects_dir())?,
+        let imports = crate::memory::import::plan(
+            crate::memory::import::file_memory_dirs(setup, &Kind::ALL)?,
             &ImportState::load(&setup.data_dir)?,
         );
-        let (with_project, _, new, changed, _) =
-            crate::harnesses::claude_code::import::totals(&imports);
+        let (with_project, _, new, changed, _) = crate::memory::import::totals(&imports);
         let start_preview = start_preview(&imports, config.start_context_chars());
         let start_blocked = start_context_blocked(&config);
         let others = crate::install::coexist::detect(setup, project);
@@ -2329,12 +2328,11 @@ fn plan_other_memory(
 /// The import step of Claude Code's file memory.
 fn plan_import(setup: &Setup, answers: &Answers) -> Result<(Step, Vec<DirPlan>), String> {
     let import_state = ImportState::load(&setup.data_dir)?;
-    let imports = crate::harnesses::claude_code::import::plan(
-        crate::harnesses::claude_code::import::scan(&setup.paths().projects)?,
+    let imports = crate::memory::import::plan(
+        crate::memory::import::file_memory_dirs(setup, &crate::harnesses::agent::Kind::ALL)?,
         &import_state,
     );
-    let (with_project, skipped, new, changed, unchanged) =
-        crate::harnesses::claude_code::import::totals(&imports);
+    let (with_project, skipped, new, changed, unchanged) = crate::memory::import::totals(&imports);
     let mut lines = vec![format!(
         "{} memory director{} under {}: {new} new and {changed} changed memory files to import, \
          {unchanged} unchanged",
@@ -2963,26 +2961,23 @@ pub fn install(
 
     // The import goes through the memory functions (the daemon serves the store).
     let mut failures = 0;
-    let (_, _, new, changed, _) = crate::harnesses::claude_code::import::totals(&plan.imports);
+    let (_, _, new, changed, _) = crate::memory::import::totals(&plan.imports);
     if !claude {
         // opencode has no file memory to import.
     } else if !answers.import {
         report.push("import: not now (--no-import)".to_string());
     } else if new + changed > 0 {
-        let done = crate::harnesses::claude_code::import::with_lock(
-            &setup.data_dir,
-            Duration::from_secs(60),
-            || {
+        let done =
+            crate::memory::import::with_lock(&setup.data_dir, Duration::from_secs(60), || {
                 let mut import_state = ImportState::load(&setup.data_dir)?;
-                Ok::<_, String>(crate::harnesses::claude_code::import::apply(
+                Ok::<_, String>(crate::memory::import::apply(
                     &plan.imports,
                     connect,
                     &mut import_state,
                     &setup.data_dir,
                     None,
                 ))
-            },
-        )?;
+            })?;
         match done {
             Some(result) => {
                 let result = result?;
@@ -3628,7 +3623,7 @@ fn recap(
     };
     lines.push(("Embedding model", model));
     if current.file_memory_in(&answers.harnesses) {
-        let (_, _, new, changed, _) = crate::harnesses::claude_code::import::totals(&plan.imports);
+        let (_, _, new, changed, _) = crate::memory::import::totals(&plan.imports);
         lines.push((
             "File memory",
             if !answers.import {
@@ -3852,7 +3847,7 @@ fn print_install_report(
 }
 
 /// One line about an import.
-pub fn import_summary(report: &crate::harnesses::claude_code::import::ImportReport) -> String {
+pub fn import_summary(report: &crate::memory::import::ImportReport) -> String {
     let mut line = format!(
         "imported {} memor{} ({} new, {} updated) into {} project{}; {} unchanged",
         report.created + report.updated,
@@ -3907,9 +3902,7 @@ pub fn import_summary(report: &crate::harnesses::claude_code::import::ImportRepo
 /// The lines after an import's summary: its projects' open memory conflicts, the files that
 /// still hold a superseded memory, each named with its file, and the changed files whose
 /// memory was edited in graphersal-memory (empty when there are none).
-pub fn import_conflict_lines(
-    report: &crate::harnesses::claude_code::import::ImportReport,
-) -> Vec<String> {
+pub fn import_conflict_lines(report: &crate::memory::import::ImportReport) -> Vec<String> {
     let mut lines = Vec::new();
     if !report.conflicts.is_empty() {
         lines.push(format!(

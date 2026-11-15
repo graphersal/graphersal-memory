@@ -12,11 +12,11 @@ use serde_json::{Value, json};
 
 use crate::cli::Profile as ProfileKind;
 use crate::harnesses::agent::Kind;
-use crate::harnesses::claude_code::import::ImportState;
 use crate::harnesses::cursor::fixture::CURSOR_RULE;
 use crate::install::language::Language;
 use crate::install::{self, InstallOptions, Setup, UninstallOptions};
 use crate::memory::import::Caller;
+use crate::memory::import::ImportState;
 use crate::runtime::client::McpClient;
 use crate::runtime::mcp::{self, StoreRuntime};
 use crate::runtime::mcp_tests::TempDir;
@@ -1422,10 +1422,10 @@ fn importing_an_export_gives_the_same_memories_back() {
     let exported_dir =
         crate::harnesses::agent::Harness::memory_dir(elsewhere.agent(), &project_dir);
     let project = Some(project_dir.display().to_string());
-    let before = crate::harnesses::claude_code::import::read_dir(&original_dir, project.clone());
-    let after = crate::harnesses::claude_code::import::read_dir(&exported_dir, project);
+    let before = crate::memory::import::read_dir(&original_dir, project.clone());
+    let after = crate::memory::import::read_dir(&exported_dir, project);
     assert!(after.problems.is_empty(), "{:?}", after.problems);
-    let key = |f: &crate::harnesses::claude_code::import::MemoryFile| {
+    let key = |f: &crate::memory::import::MemoryFile| {
         (
             f.slug.clone(),
             f.kind.clone(),
@@ -1443,7 +1443,7 @@ fn importing_an_export_gives_the_same_memories_back() {
     assert_eq!(a, b);
     // The listed memories keep their index line and order too.
     for slug in ["graph-first", "release-plan"] {
-        let find = |dir: &crate::harnesses::claude_code::import::MemoryDir| {
+        let find = |dir: &crate::memory::import::MemoryDir| {
             let f = dir.files.iter().find(|f| f.slug == slug).unwrap();
             (f.title.clone(), f.hook.clone(), f.order)
         };
@@ -3245,7 +3245,7 @@ fn the_shim_and_the_hook_import_the_same_files_once() {
     let memory = Memory::open(data.path());
     let project = project_dir.display().to_string();
     let plan = crate::memory::session_sync::plan(&setup, "claude-code", &project_dir, &project_dir);
-    assert!(plan.claude.is_some());
+    assert!(!plan.memory_dirs.is_empty());
     let mut queued = Vec::new();
     let mut connect = memory.connector();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -4084,8 +4084,7 @@ fn a_pin_survives_the_round_trip_files_graph_files() {
         "{index}"
     );
     // Read back: the same pins, titles and hooks.
-    let back =
-        crate::harnesses::claude_code::import::read_dir(&exported_dir, Some(project.clone()));
+    let back = crate::memory::import::read_dir(&exported_dir, Some(project.clone()));
     let pins: Vec<(&str, bool, &str, &str)> = back
         .files
         .iter()
@@ -4105,14 +4104,8 @@ fn a_pin_survives_the_round_trip_files_graph_files() {
     let fresh = Memory::open(data2.path());
     let mut connect = fresh.connector();
     let mut state = ImportState::default();
-    let plans = crate::harnesses::claude_code::import::plan(vec![back], &state);
-    let report = crate::harnesses::claude_code::import::apply(
-        &plans,
-        &mut connect,
-        &mut state,
-        data2.path(),
-        None,
-    );
+    let plans = crate::memory::import::plan(vec![back], &state);
+    let report = crate::memory::import::apply(&plans, &mut connect, &mut state, data2.path(), None);
     assert!(report.problems.is_empty(), "{:?}", report.problems);
     let context = fresh
         .runtime
@@ -4138,8 +4131,7 @@ fn a_pin_survives_the_round_trip_files_graph_files() {
         kept.starts_with("# Mine\n## Pinned\n- [Graph first](graph-first.md) — x\n"),
         "{kept}"
     );
-    let reread =
-        crate::harnesses::claude_code::import::read_dir(&exported_dir, Some(project.clone()));
+    let reread = crate::memory::import::read_dir(&exported_dir, Some(project.clone()));
     let pinned_of = |slug: &str| reread.files.iter().find(|f| f.slug == slug).unwrap().pinned;
     assert!(pinned_of("release-plan") && pinned_of("odd-name"), "{kept}");
     drop(connect);
@@ -5022,7 +5014,7 @@ fn b1_b2_the_export_round_trip_makes_no_siblings_and_refreshes_files_unchanged_s
     let report = crate::memory::export::write(setup.agent(), data.path(), &rows).unwrap();
     assert_eq!(report.conflicts.len(), 1, "{report:?}");
     assert!(dir.join("crlf-rule.graphersal.md").exists());
-    let scanned = crate::harnesses::claude_code::import::read_dir(&dir, Some(project.clone()));
+    let scanned = crate::memory::import::read_dir(&dir, Some(project.clone()));
     assert!(
         !scanned.files.iter().any(|f| f.slug.contains("graphersal")),
         "{:?}",
@@ -5076,7 +5068,7 @@ fn a_superseded_memory_is_written_but_left_out_of_the_index_and_a_conflict_is_na
     let tabs = read(&dir.join("tabs.md"));
     assert!(tabs.contains("CONFLICT with spaces:"), "{tabs}");
     // Imported back, the notes are not part of the memory.
-    let scanned = crate::harnesses::claude_code::import::read_dir(&dir, Some(project.clone()));
+    let scanned = crate::memory::import::read_dir(&dir, Some(project.clone()));
     let npm = scanned.files.iter().find(|f| f.slug == "use-npm").unwrap();
     assert_eq!(npm.body, "Install with npm");
     memory.close();
@@ -5142,7 +5134,7 @@ fn memories_imported_before_m12_get_their_file_as_source_once() {
         "summary": "An old rule", "body": "Old."}),
     );
     let mut state = ImportState::default();
-    let file = crate::harnesses::claude_code::import::MemoryFile {
+    let file = crate::memory::import::MemoryFile {
         path: PathBuf::from("/h/.claude/projects/-w-app/memory/old-rule.md"),
         slug: "old-rule".into(),
         kind: "feedback".into(),
@@ -5165,7 +5157,7 @@ fn memories_imported_before_m12_get_their_file_as_source_once() {
     state.save(data.path()).unwrap();
     let call = |name: &str, args: Value| memory.runtime.call(name, args);
     assert_eq!(
-        crate::harnesses::claude_code::import::migrate_sources(data.path(), &call).unwrap(),
+        crate::memory::import::migrate_sources(data.path(), &call).unwrap(),
         1
     );
     let read = memory.call("/w/app", "memory", json!({"slug": "old-rule"}));
@@ -5182,7 +5174,7 @@ fn memories_imported_before_m12_get_their_file_as_source_once() {
         "summary": "An old rule, rewritten", "body": "New."}),
     );
     assert_eq!(
-        crate::harnesses::claude_code::import::migrate_sources(data.path(), &call).unwrap(),
+        crate::memory::import::migrate_sources(data.path(), &call).unwrap(),
         0
     );
     let read = memory.call("/w/app", "memory", json!({"slug": "old-rule"}));

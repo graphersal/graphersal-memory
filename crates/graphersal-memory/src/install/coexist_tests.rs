@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::harnesses::agent::{Harness, Kind};
-use crate::harnesses::claude_code::import::ImportState;
 use crate::install::coexist::{self, ServerState};
 use crate::install::install_tests::{
     Memory, bare_setup_in, existing_home, memory_fixture, native, read, run_install, run_uninstall,
     run_wizard, setup_in, snapshot, uninstall_yes, with_programs, yes,
 };
 use crate::install::{self, InstallOptions, Setup};
+use crate::memory::import::ImportState;
 use crate::runtime::mcp;
 use crate::runtime::mcp_tests::TempDir;
 
@@ -921,7 +921,7 @@ fn a_file_that_brings_back_a_forgotten_memory_is_reported_and_can_be_ignored() {
     )
     .unwrap();
     let state = ImportState::load(data.path()).unwrap();
-    let plans = crate::harnesses::claude_code::import::plan(
+    let plans = crate::memory::import::plan(
         crate::harnesses::claude_code::import::scan(&setup.paths().projects).unwrap(),
         &state,
     );
