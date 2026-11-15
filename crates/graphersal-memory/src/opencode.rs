@@ -418,6 +418,19 @@ impl Harness for OpenCode {
         !install::inspect(setup).nothing_installed()
     }
 
+    fn plan(
+        &self,
+        setup: &crate::install::Setup,
+        input: &crate::install::PlanInput<'_>,
+    ) -> Result<crate::install::HarnessPlan, String> {
+        let plan = install::plan(setup, input.language, input.read_only, input.develop)?;
+        Ok(crate::install::HarnessPlan::of(
+            plan.steps,
+            plan.changes,
+            plan.conflicts,
+        ))
+    }
+
     fn mcp_config_file(&self) -> &Path {
         &self.paths.config_file
     }

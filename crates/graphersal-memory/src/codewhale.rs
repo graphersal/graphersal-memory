@@ -475,6 +475,42 @@ impl Harness for CodeWhale {
         !install::inspect(setup).nothing_installed()
     }
 
+    /// With the records of `[tools] always_load` and the memory switch, which go with the
+    /// write of `config.toml`.
+    fn plan(
+        &self,
+        setup: &crate::install::Setup,
+        input: &crate::install::PlanInput<'_>,
+    ) -> Result<crate::install::HarnessPlan, String> {
+        let plan = install::plan(
+            setup,
+            input.language,
+            input.read_only,
+            input.develop,
+            input.own_memory_off,
+        )?;
+        let mut out = crate::install::HarnessPlan::of(plan.steps, plan.changes, plan.conflicts);
+        out.own_memory_off = Some(input.own_memory_off);
+        if plan
+            .records
+            .iter()
+            .any(|(key, value)| *key == install::MEMORY_RECORD && value.is_some())
+        {
+            out.switched_off = Some(
+                "CodeWhale's memory: off (uninstall exports every memory as Markdown and \
+                 switches it on again)"
+                    .to_string(),
+            );
+        }
+        let config = self.paths.config_file.clone();
+        out.records = plan
+            .records
+            .into_iter()
+            .map(|(key, value)| (config.clone(), key, value))
+            .collect();
+        Ok(out)
+    }
+
     fn mcp_config_file(&self) -> &Path {
         &self.paths.mcp_file
     }

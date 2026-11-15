@@ -236,6 +236,42 @@ impl Harness for Codex {
         !install::inspect(setup).nothing_installed()
     }
 
+    /// With the record of the memories switch, which goes with the write of `config.toml`.
+    fn plan(
+        &self,
+        setup: &crate::install::Setup,
+        input: &crate::install::PlanInput<'_>,
+    ) -> Result<crate::install::HarnessPlan, String> {
+        let plan = install::plan(
+            setup,
+            input.language,
+            input.read_only,
+            input.develop,
+            input.own_memory_off,
+        )?;
+        let mut out = crate::install::HarnessPlan::of(plan.steps, plan.changes, plan.conflicts);
+        out.own_memory_off = Some(input.own_memory_off);
+        let config = self.paths.config_file.clone();
+        match plan.memories {
+            Some(true) => {
+                out.records.push((
+                    config,
+                    install::MEMORIES_RECORD,
+                    Some(serde_json::json!({"previous": true})),
+                ));
+                out.switched_off = Some(
+                    "Codex's memories: off (uninstall exports every memory as Markdown and \
+                     switches them on again)"
+                        .to_string(),
+                );
+                out.nothing_is_lost = Some(install::NOTHING_IS_LOST);
+            }
+            Some(false) => out.records.push((config, install::MEMORIES_RECORD, None)),
+            None => {}
+        }
+        Ok(out)
+    }
+
     fn mcp_config_file(&self) -> &Path {
         &self.paths.config_file
     }

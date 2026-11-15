@@ -1072,29 +1072,105 @@ pub(crate) struct Step {
     pub(crate) lines: Vec<String>,
 }
 
+/// What a harness's plan is made from (`Harness::plan`): the answers that concern it.
+pub(crate) struct PlanInput<'a> {
+    /// The memory language.
+    pub(crate) language: Language,
+    /// Other memory tools the rule block names read-only.
+    pub(crate) read_only: &'a [String],
+    /// The develop server registered (and on).
+    pub(crate) develop: bool,
+    /// The harness's own memory switched off (or kept off).
+    pub(crate) own_memory_off: bool,
+    /// The sentence that says how the always-loaded memories reach a session
+    /// (`start_context_sentence`), for the auto-memory step.
+    pub(crate) start_sentence: &'a str,
+}
+
+/// One harness's part of an install (`Harness::plan`).
+pub(crate) struct HarnessPlan {
+    /// Its steps, shown under its name.
+    pub(crate) steps: Vec<Step>,
+    /// Its file changes.
+    pub(crate) changes: Vec<Change>,
+    /// Conflicts: parts of ours install leaves as they are.
+    pub(crate) conflicts: Vec<String>,
+    /// Records of its state file written with the write of their file: (file, key, the value
+    /// to set, or `None` to remove the key).
+    pub(crate) records: Vec<(PathBuf, &'static str, Option<Value>)>,
+    /// For a harness with a memory of its own: whether it is (or stays) off, kept in its
+    /// state's `auto_memory_off`.
+    pub(crate) own_memory_off: Option<bool>,
+    /// The report line when the plan switches the harness's own memory off now.
+    pub(crate) switched_off: Option<String>,
+    /// The wizard's "nothing is lost" sentence when the plan switches its own memory off now.
+    pub(crate) nothing_is_lost: Option<&'static str>,
+}
+
+impl HarnessPlan {
+    /// A plan of `steps`, `changes` and `conflicts`, without records or an own memory.
+    pub(crate) fn of(steps: Vec<Step>, changes: Vec<Change>, conflicts: Vec<String>) -> Self {
+        Self {
+            steps,
+            changes,
+            conflicts,
+            records: Vec::new(),
+            own_memory_off: None,
+            switched_off: None,
+            nothing_is_lost: None,
+        }
+    }
+}
+
+/// Claude Code's part of an install: the MCP entries, the hooks and the auto-memory switch in
+/// the settings, the rule block.
+pub(crate) fn claude_plan(setup: &Setup, input: &PlanInput<'_>) -> Result<HarnessPlan, String> {
+    let state = State::load(setup)?;
+    let mut conflicts = Vec::new();
+    let mut steps = Vec::new();
+    let mut changes = Vec::new();
+    let (step, change) = plan_user_config(setup, input.develop, &mut conflicts)?;
+    steps.push(step);
+    changes.extend(change);
+    let (step, change, auto_memory) =
+        plan_settings(setup, input.own_memory_off, input.start_sentence, &state)?;
+    steps.push(step);
+    changes.extend(change);
+    let (step, change) = plan_block(setup, input.language, input.read_only, &mut conflicts)?;
+    steps.push(step);
+    changes.extend(change);
+    let mut plan = HarnessPlan::of(steps, changes, conflicts);
+    plan.own_memory_off = Some(input.own_memory_off);
+    let settings = setup.paths.settings.clone();
+    match auto_memory {
+        AutoMemoryPlan::Keep => {}
+        AutoMemoryPlan::SwitchOff { previous } => {
+            plan.records.push((
+                settings,
+                AUTO_MEMORY_RECORD,
+                Some(json!({"previous": previous})),
+            ));
+            plan.switched_off = Some(format!(
+                "{}'s auto-memory: off (uninstall writes every memory back to its memory files \
+                 and switches it on again)",
+                Kind::ClaudeCode.display_name()
+            ));
+            plan.nothing_is_lost = Some(NOTHING_IS_LOST);
+        }
+        AutoMemoryPlan::Restore => plan.records.push((settings, AUTO_MEMORY_RECORD, None)),
+    }
+    Ok(plan)
+}
+
 /// The planned install: its steps in sections (shared, one per agent, then import and
 /// indexing), each with its heading.
 struct InstallPlan {
     sections: Vec<(String, Vec<Step>)>,
-    /// Claude Code's file changes.
-    changes: Vec<Change>,
-    /// opencode's file changes.
-    opencode_changes: Vec<Change>,
-    /// Codex's file changes.
-    codex_changes: Vec<Change>,
-    /// What happens to Codex's memories (`crate::codex::install::Plan::memories`).
-    codex_memories: Option<bool>,
-    /// Cursor's file changes.
-    cursor_changes: Vec<Change>,
-    /// CodeWhale's file changes.
-    codewhale_changes: Vec<Change>,
-    /// The records of CodeWhale's `config.toml` state entry
-    /// (`crate::codewhale::install::Plan::records`).
-    codewhale_records: Vec<(&'static str, Option<Value>)>,
+    /// Each chosen harness's part, in wizard order.
+    harnesses: Vec<(Kind, HarnessPlan)>,
     conflicts: Vec<String>,
     imports: Vec<DirPlan>,
     write_config: bool,
-    auto_memory: AutoMemoryPlan,
     /// Other memory tools' entries switched off now: (harness, file, name, record).
     other_off: Vec<(Kind, PathBuf, String, Value)>,
     /// Other memory tools' entries switched on again now (install had switched them off).
@@ -2495,10 +2571,7 @@ fn plan_install(
     current: &Current,
 ) -> Result<InstallPlan, String> {
     let mut conflicts = Vec::new();
-    let mut changes = Vec::new();
-    let state = State::load(setup)?;
     let claude = answers.harnesses.contains(&Kind::ClaudeCode);
-    let opencode = answers.harnesses.contains(&Kind::OpenCode);
     let mut shared = vec![Step {
         title: "Agents".to_string(),
         lines: vec![format!(
@@ -2529,86 +2602,33 @@ fn plan_install(
         }],
     });
     let mut sections = vec![("Shared by every agent".to_string(), shared)];
-    let mut auto_memory = AutoMemoryPlan::Keep;
     let mut imports = Vec::new();
     let mut after = Vec::new();
+    let start_sentence = start_context_sentence(current);
+    let mut harnesses = Vec::new();
+    for kind in Kind::ALL {
+        if !answers.harnesses.contains(&kind) {
+            continue;
+        }
+        let input = PlanInput {
+            language: answers.language,
+            read_only: &answers.read_only,
+            develop: answers.develop_on(kind),
+            own_memory_off: answers.own_memory_off(kind),
+            start_sentence: &start_sentence,
+        };
+        let mut plan = setup.agent_of(kind).plan(setup, &input)?;
+        sections.push((
+            kind.display_name().to_string(),
+            std::mem::take(&mut plan.steps),
+        ));
+        conflicts.append(&mut plan.conflicts);
+        harnesses.push((kind, plan));
+    }
     if claude {
-        let mut steps = Vec::new();
-        let (step, change) =
-            plan_user_config(setup, answers.develop_on(Kind::ClaudeCode), &mut conflicts)?;
-        steps.push(step);
-        changes.extend(change);
-        let (step, change, plan) = plan_settings(
-            setup,
-            answers.own_memory_off(Kind::ClaudeCode),
-            &start_context_sentence(current),
-            &state,
-        )?;
-        auto_memory = plan;
-        steps.push(step);
-        changes.extend(change);
-        let (step, change) =
-            plan_block(setup, answers.language, &answers.read_only, &mut conflicts)?;
-        steps.push(step);
-        changes.extend(change);
-        sections.push((Kind::ClaudeCode.display_name().to_string(), steps));
         let (step, planned) = plan_import(setup, answers)?;
         after.push(step);
         imports = planned;
-    }
-    let mut opencode_changes = Vec::new();
-    if opencode {
-        let plan = crate::opencode::install::plan(
-            setup,
-            answers.language,
-            &answers.read_only,
-            answers.develop_on(Kind::OpenCode),
-        )?;
-        sections.push((Kind::OpenCode.display_name().to_string(), plan.steps));
-        opencode_changes = plan.changes;
-        conflicts.extend(plan.conflicts);
-    }
-    let mut codex_changes = Vec::new();
-    let mut codex_memories = None;
-    if answers.harnesses.contains(&Kind::Codex) {
-        let plan = crate::codex::install::plan(
-            setup,
-            answers.language,
-            &answers.read_only,
-            answers.develop_on(Kind::Codex),
-            answers.own_memory_off(Kind::Codex),
-        )?;
-        sections.push((Kind::Codex.display_name().to_string(), plan.steps));
-        codex_changes = plan.changes;
-        codex_memories = plan.memories;
-        conflicts.extend(plan.conflicts);
-    }
-    let mut cursor_changes = Vec::new();
-    if answers.harnesses.contains(&Kind::Cursor) {
-        let plan = crate::cursor::install::plan(
-            setup,
-            answers.language,
-            &answers.read_only,
-            answers.develop_on(Kind::Cursor),
-        )?;
-        sections.push((Kind::Cursor.display_name().to_string(), plan.steps));
-        cursor_changes = plan.changes;
-        conflicts.extend(plan.conflicts);
-    }
-    let mut codewhale_changes = Vec::new();
-    let mut codewhale_records = Vec::new();
-    if answers.harnesses.contains(&Kind::CodeWhale) {
-        let plan = crate::codewhale::install::plan(
-            setup,
-            answers.language,
-            &answers.read_only,
-            answers.develop_on(Kind::CodeWhale),
-            answers.own_memory_off(Kind::CodeWhale),
-        )?;
-        sections.push((Kind::CodeWhale.display_name().to_string(), plan.steps));
-        codewhale_changes = plan.changes;
-        codewhale_records = plan.records;
-        conflicts.extend(plan.conflicts);
     }
     let mut other_off = Vec::new();
     let mut other_on = Vec::new();
@@ -2616,13 +2636,7 @@ fn plan_install(
         setup,
         answers,
         current,
-        [
-            (Kind::ClaudeCode, &mut changes),
-            (Kind::OpenCode, &mut opencode_changes),
-            (Kind::Codex, &mut codex_changes),
-            (Kind::Cursor, &mut cursor_changes),
-            (Kind::CodeWhale, &mut codewhale_changes),
-        ],
+        &mut harnesses,
         &mut other_off,
         &mut other_on,
     )?;
@@ -2643,17 +2657,10 @@ fn plan_install(
     sections.push(("Then, after the files are written".to_string(), after));
     Ok(InstallPlan {
         sections,
-        changes,
-        opencode_changes,
-        codex_changes,
-        codex_memories,
-        cursor_changes,
-        codewhale_changes,
-        codewhale_records,
+        harnesses,
         conflicts,
         imports,
         write_config,
-        auto_memory,
         other_off,
         other_on,
     })
@@ -2684,7 +2691,7 @@ fn plan_other_memory(
     setup: &Setup,
     answers: &Answers,
     current: &Current,
-    mut changes: [(Kind, &mut Vec<Change>); 5],
+    harnesses: &mut [(Kind, HarnessPlan)],
     other_off: &mut Vec<(Kind, PathBuf, String, Value)>,
     other_on: &mut Vec<(Kind, PathBuf, String)>,
 ) -> Result<Vec<Step>, String> {
@@ -2705,9 +2712,10 @@ fn plan_other_memory(
             continue;
         }
         let disable = answers.disable_other.contains(&server.name);
-        let Some((_, list)) = changes.iter_mut().find(|(k, _)| *k == server.harness) else {
+        let Some((_, plan)) = harnesses.iter_mut().find(|(k, _)| *k == server.harness) else {
             continue;
         };
+        let list = &mut plan.changes;
         match (&server.state, disable) {
             (ServerState::On, true) => {
                 let change = change_for(list, &server.file)?;
@@ -2783,8 +2791,8 @@ fn plan_other_memory(
         }
     }
     // A change made only for an entry that ends up as it was is no change.
-    for (_, list) in changes.iter_mut() {
-        list.retain(|change| {
+    for (_, plan) in harnesses.iter_mut() {
+        plan.changes.retain(|change| {
             change.after.is_none()
                 || read_text(&change.path).ok().flatten().as_ref() != change.after.as_ref()
         });
@@ -3333,13 +3341,9 @@ pub fn install(
     }
     let codex_approval = answers.harnesses.contains(&Kind::Codex)
         && !crate::codex::install::inspect(setup).hooks_trusted;
-    if answers.harnesses.contains(&Kind::ClaudeCode)
-        && answers.auto_memory_off
-        && !current.auto_memory_off
-    {
-        must_read.push(NOTHING_IS_LOST.to_string());
-    } else if plan.codex_memories == Some(true) {
-        must_read.push(crate::codex::install::NOTHING_IS_LOST.to_string());
+    // The first harness whose own memory the plan switches off says that nothing is lost.
+    if let Some(sentence) = plan.harnesses.iter().find_map(|(_, h)| h.nothing_is_lost) {
+        must_read.push(sentence.to_string());
     }
     if interactive {
         let mut console = Console::new(input, out, options.color);
@@ -3445,7 +3449,7 @@ pub fn install(
     let mut report = Vec::new();
     let claude = answers.harnesses.contains(&Kind::ClaudeCode);
     let (plan, agent_report, backups) =
-        apply_with_retries(setup, options, &answers, &current, plan, &mut report)?;
+        apply_with_retries(setup, options, &answers, &current, plan)?;
     // The settings file: the defaults when there is none, then the answers.
     if plan.write_config {
         let path = crate::config::path(&setup.data_dir);
@@ -3682,12 +3686,7 @@ pub fn install(
             general: &report,
             backups: &backups,
             conflicts: &plan.conflicts,
-            up_to_date: plan.changes.is_empty()
-                && plan.opencode_changes.is_empty()
-                && plan.codex_changes.is_empty()
-                && plan.cursor_changes.is_empty()
-                && plan.codewhale_changes.is_empty()
-                && plan.conflicts.is_empty(),
+            up_to_date: all_changes(&plan).next().is_none() && plan.conflicts.is_empty(),
             harnesses: &answers.harnesses,
             codex_approval: answers.harnesses.contains(&Kind::Codex)
                 && !crate::codex::install::inspect(setup).hooks_trusted,
@@ -3792,9 +3791,8 @@ fn refresh(
     }
     crate::store::create_private_dir(&setup.data_dir)?;
     let _lock = InstallLock::take(setup, true)?;
-    let mut report = Vec::new();
     let (plan, agent_report, backups) =
-        apply_with_retries(setup, options, &answers, &current, plan, &mut report)?;
+        apply_with_retries(setup, options, &answers, &current, plan)?;
     let _ = writeln!(out, "\n{}", paint(color, "1", "Report:"));
     for dir in &backups {
         let _ = writeln!(
@@ -3811,9 +3809,6 @@ fn refresh(
         for line in lines {
             let _ = writeln!(out, "  {}", setup.show(line));
         }
-    }
-    for line in &report {
-        let _ = writeln!(out, "  {}", setup.show(line));
     }
     if !plan.conflicts.is_empty() {
         let _ = writeln!(out);
@@ -3883,9 +3878,10 @@ fn refresh_answers(setup: &Setup, current: &Current, harnesses: Vec<Kind>) -> An
     }
 }
 
-/// Applies the agents' file changes of `plan` (each harness's state recorded as it goes) and
-/// install's auto-memory record. Every file written is recorded in `journal` with its text
-/// before (for a rollback); `bases` are the fingerprints the plan's texts were computed from.
+/// Applies the agents' file changes of `plan` (each harness's state recorded as it goes, its
+/// records with the write of their file). Every file written is recorded in `journal` with its
+/// text before (for a rollback); `bases` are the fingerprints the plan's texts were computed
+/// from.
 #[allow(clippy::too_many_arguments)]
 fn apply_agents(
     setup: &Setup,
@@ -3894,11 +3890,12 @@ fn apply_agents(
     bases: &std::collections::BTreeMap<PathBuf, Option<String>>,
     journal: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
     agent_report: &mut Vec<(Kind, Vec<String>)>,
-    report: &mut Vec<String>,
     backups: &mut std::collections::BTreeSet<PathBuf>,
-) -> Result<State, String> {
-    let mut state = State::load(setup)?;
+) -> Result<(), String> {
     for kind in &answers.harnesses {
+        let Some((_, harness)) = plan.harnesses.iter().find(|(k, _)| k == kind) else {
+            continue;
+        };
         let mut lines = Vec::new();
         let mut kind_state = State::load_of(setup, *kind)?;
         if !kind_state.meta.contains_key("installed_at") {
@@ -3912,159 +3909,37 @@ fn apply_agents(
         kind_state
             .meta
             .insert("exe".into(), json!(setup.exe.display().to_string()));
-        match kind {
-            Kind::ClaudeCode => {
-                kind_state.meta.insert(
-                    "auto_memory_off".into(),
-                    json!(answers.own_memory_off(Kind::ClaudeCode)),
-                );
-                kind_state.save(setup)?;
-                let settings = setup.paths.settings.clone();
-                apply_changes(
-                    setup,
-                    &plan.changes,
-                    &mut kind_state,
-                    &mut lines,
-                    backups,
-                    bases,
-                    journal,
-                    // install's auto-memory record goes with the write of the settings file.
-                    &mut |path, state| {
-                        record_other(plan, Kind::ClaudeCode, path, state);
-                        if path != settings {
-                            return;
-                        }
-                        match &plan.auto_memory {
-                            AutoMemoryPlan::Keep => {}
-                            AutoMemoryPlan::SwitchOff { previous } => {
-                                state.file_mut(path).insert(
-                                    AUTO_MEMORY_RECORD.into(),
-                                    json!({"previous": previous}),
-                                );
-                            }
-                            AutoMemoryPlan::Restore => {
-                                state.file_mut(path).remove(AUTO_MEMORY_RECORD);
-                            }
-                        }
-                    },
-                )?;
-                state = kind_state;
-            }
-            Kind::OpenCode => {
-                kind_state.save(setup)?;
-                apply_changes(
-                    setup,
-                    &plan.opencode_changes,
-                    &mut kind_state,
-                    &mut lines,
-                    backups,
-                    bases,
-                    journal,
-                    &mut |path, state| record_other(plan, Kind::OpenCode, path, state),
-                )?;
-            }
-            Kind::Codex => {
-                kind_state.meta.insert(
-                    "auto_memory_off".into(),
-                    json!(answers.own_memory_off(Kind::Codex)),
-                );
-                kind_state.save(setup)?;
-                let config = setup.codex.config_file.clone();
-                apply_changes(
-                    setup,
-                    &plan.codex_changes,
-                    &mut kind_state,
-                    &mut lines,
-                    backups,
-                    bases,
-                    journal,
-                    // The memories record goes with the write of config.toml.
-                    &mut |path, state| {
-                        record_other(plan, Kind::Codex, path, state);
-                        if path != config {
-                            return;
-                        }
-                        match plan.codex_memories {
-                            Some(true) => {
-                                state.file_mut(path).insert(
-                                    crate::codex::install::MEMORIES_RECORD.into(),
-                                    json!({"previous": true}),
-                                );
-                            }
-                            Some(false) => {
-                                state
-                                    .file_mut(path)
-                                    .remove(crate::codex::install::MEMORIES_RECORD);
-                            }
-                            None => {}
-                        }
-                    },
-                )?;
-                if plan.codex_memories == Some(true) {
-                    lines.push(
-                        "Codex's memories: off (uninstall exports every memory as Markdown \
-                         and switches them on again)"
-                            .to_string(),
-                    );
-                }
-            }
-            Kind::Cursor => {
-                kind_state.save(setup)?;
-                apply_changes(
-                    setup,
-                    &plan.cursor_changes,
-                    &mut kind_state,
-                    &mut lines,
-                    backups,
-                    bases,
-                    journal,
-                    &mut |path, state| record_other(plan, Kind::Cursor, path, state),
-                )?;
-            }
-            Kind::CodeWhale => {
-                kind_state.meta.insert(
-                    "auto_memory_off".into(),
-                    json!(answers.own_memory_off(Kind::CodeWhale)),
-                );
-                kind_state.save(setup)?;
-                let config = setup.codewhale.config_file.clone();
-                apply_changes(
-                    setup,
-                    &plan.codewhale_changes,
-                    &mut kind_state,
-                    &mut lines,
-                    backups,
-                    bases,
-                    journal,
-                    // The always_load and memory records go with the write of config.toml.
-                    &mut |path, state| {
-                        record_other(plan, Kind::CodeWhale, path, state);
-                        if path != config {
-                            return;
-                        }
-                        for (key, value) in &plan.codewhale_records {
-                            match value {
-                                Some(value) => {
-                                    state.file_mut(path).insert((*key).into(), value.clone());
-                                }
-                                None => {
-                                    state.file_mut(path).remove(*key);
-                                }
-                            }
-                        }
-                    },
-                )?;
-                if plan.codewhale_records.iter().any(|(key, value)| {
-                    *key == crate::codewhale::install::MEMORY_RECORD && value.is_some()
-                }) {
-                    lines.push(
-                        "CodeWhale's memory: off (uninstall exports every memory as Markdown \
-                         and switches it on again)"
-                            .to_string(),
-                    );
-                }
-            }
+        if let Some(off) = harness.own_memory_off {
+            kind_state.meta.insert("auto_memory_off".into(), json!(off));
         }
+        kind_state.save(setup)?;
+        apply_changes(
+            setup,
+            &harness.changes,
+            &mut kind_state,
+            &mut lines,
+            backups,
+            bases,
+            journal,
+            // The harness's records go with the write of their file.
+            &mut |path, state| {
+                record_other(plan, *kind, path, state);
+                for (file, key, value) in &harness.records {
+                    if file != path {
+                        continue;
+                    }
+                    match value {
+                        Some(value) => {
+                            state.file_mut(path).insert((*key).into(), value.clone());
+                        }
+                        None => {
+                            state.file_mut(path).remove(*key);
+                        }
+                    }
+                }
+            },
+        )?;
+        lines.extend(harness.switched_off.clone());
         for (k, path, name, _) in &plan.other_off {
             if k == kind {
                 lines.push(format!(
@@ -4083,21 +3958,7 @@ fn apply_agents(
             None => agent_report.push((*kind, lines)),
         }
     }
-    if matches!(plan.auto_memory, AutoMemoryPlan::SwitchOff { .. }) {
-        let line = format!(
-            "{}'s auto-memory: off (uninstall writes every memory back to its memory files \
-             and switches it on again)",
-            setup.agent().display_name()
-        );
-        match agent_report
-            .iter_mut()
-            .find(|(k, _)| *k == Kind::ClaudeCode)
-        {
-            Some((_, lines)) => lines.push(line),
-            None => report.push(line),
-        }
-    }
-    Ok(state)
+    Ok(())
 }
 
 /// Records in `state` (the harness `kind`'s) what the plan switched off in `path` (the entry
@@ -4128,12 +3989,9 @@ fn record_other(plan: &InstallPlan, kind: Kind, path: &Path, state: &mut State) 
 
 /// Every file change of a plan, of every agent.
 fn all_changes(plan: &InstallPlan) -> impl Iterator<Item = &Change> {
-    plan.changes
+    plan.harnesses
         .iter()
-        .chain(&plan.opencode_changes)
-        .chain(&plan.codex_changes)
-        .chain(&plan.cursor_changes)
-        .chain(&plan.codewhale_changes)
+        .flat_map(|(_, harness)| &harness.changes)
 }
 
 /// The agents' part of an install: plans again right before writing (a harness may have
@@ -4149,7 +4007,6 @@ fn apply_with_retries(
     answers: &Answers,
     current: &Current,
     shown: InstallPlan,
-    report: &mut Vec<String>,
 ) -> Result<
     (
         InstallPlan,
@@ -4186,7 +4043,6 @@ fn apply_with_retries(
         if !blocked.is_empty() && journal.is_empty() {
             return Err(format!("{}; nothing was changed", blocked.join("; ")));
         }
-        let mut lines = Vec::new();
         match apply_agents(
             setup,
             answers,
@@ -4194,16 +4050,11 @@ fn apply_with_retries(
             &bases,
             &mut journal,
             &mut agent_report,
-            &mut lines,
             &mut backups,
         ) {
-            Ok(_) => {
-                report.extend(lines);
-                return Ok((plan, agent_report, backups));
-            }
+            Ok(()) => return Ok((plan, agent_report, backups)),
             Err(err) if err.contains(fsutil::CHANGED_MEANWHILE) && attempt < ATTEMPTS => {
                 // What was written stays (it is installed and recorded); the next plan sees it.
-                report.extend(lines);
                 previous = plan;
             }
             Err(err) => return Err(roll_back(setup, &err, &journal, &states)),

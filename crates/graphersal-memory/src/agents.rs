@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::install::{ClaudePaths, Setup};
+use crate::install::{ClaudePaths, HarnessPlan, PlanInput, Setup};
 
 /// The harnesses graphersal-memory supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -91,6 +91,9 @@ pub trait Harness {
     fn config_roots(&self) -> Vec<PathBuf>;
     /// Whether a part of ours (an MCP entry, a hook, the rule block, ...) is in its files.
     fn has_our_parts(&self, setup: &Setup) -> bool;
+    /// Its part of an install: steps, file changes, conflicts and the records that go with
+    /// them.
+    fn plan(&self, setup: &Setup, input: &PlanInput<'_>) -> Result<HarnessPlan, String>;
     /// The harness id of the command line (`claude-code`, `opencode`, `codex`).
     fn id(&self) -> &'static str {
         self.kind().id()
@@ -211,6 +214,10 @@ impl Harness for ClaudeCode {
 
     fn has_our_parts(&self, setup: &Setup) -> bool {
         !crate::install::inspect(setup).nothing_installed()
+    }
+
+    fn plan(&self, setup: &Setup, input: &PlanInput<'_>) -> Result<HarnessPlan, String> {
+        crate::install::claude_plan(setup, input)
     }
 
     fn mcp_config_file(&self) -> &Path {
