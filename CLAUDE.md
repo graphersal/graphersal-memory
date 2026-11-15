@@ -26,8 +26,11 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     a Claude Code hook whose input is Cursor's, `cursor_version`, does nothing); the
     wizard is interactive when stdin and stdout are terminals;
   - `src/agents.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex | cursor | codewhale, with
-    its id, display and program names; the `Harness` trait: its program (`find_program`), its
-    configuration roots, whether our parts are in its files, the MCP configuration file, its
+    its id, display and program names and `dir_names`; the `Harness` trait: its program
+    (`find_program`), its configuration roots, whether our parts are in its files, its part of an
+    install (`plan` -> `install::HarnessPlan` with the state `records` written with their file;
+    `PlanInput`), of an uninstall (`removal`, `own_memory_restored`), `status_lines`, `doctor`,
+    `develop_on`, `action_needed`, `has_plugin`, the MCP configuration file, its
     servers key and entry shape, settings and instruction files, the sessions location, the
     export directories, the auto-memory key, the headless command; `is_our_entry` for both entry
     shapes) and `ClaudeCode`; `Setup::detected` (a harness's program found: `Setup::program`,
