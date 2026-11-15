@@ -3746,7 +3746,7 @@ fn install_refuses_when_no_agent_program_is_found() {
             "{out}"
         );
         assert!(
-            out.contains("looked for: claude, opencode, codex and cursor on PATH"),
+            out.contains("looked for: claude, opencode, codex, cursor, codewhale and dsh on PATH"),
             "{out}"
         );
         assert!(
