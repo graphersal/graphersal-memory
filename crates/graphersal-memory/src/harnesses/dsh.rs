@@ -113,7 +113,10 @@
 //!   npm's `dsh.cmd`); Desktop links `/usr/local/bin/dsh` on macOS and puts its `dsh.cmd`
 //!   directory on the Windows user `PATH` (`apps/desktop/src/command-manager-entry.ts:17-31`).
 //!   `npx @deepseek-ai/dsh` leaves no program: such a configuration is a leftover, and `doctor`
-//!   says how to install it globally.
+//!   says how to install it globally. Debian's and Ubuntu's `dsh` package (a distributed shell,
+//!   `/usr/bin/dsh`) has the same name: a found `dsh` counts only when its real path or its
+//!   script text says DeepSeek ([`is_deepseek_program`]; it is never run to find out), and
+//!   `doctor` names a rejected one.
 
 pub mod install;
 pub mod sessions;
@@ -281,11 +284,8 @@ impl DshPaths {
     }
 }
 
-/// The `dsh` program on `search_path` (`None`: this process's `PATH`), else, for this process's
-/// own `PATH` only (tests pass their search path), where its installers put it off `PATH`:
-/// npm's default global directory on Windows (`%APPDATA%\npm`, under the home directory) and
-/// the Desktop app's link `/usr/local/bin/dsh` on macOS.
-pub fn find_program(home: &Path, search_path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+/// Every file named `dsh`, `dsh.cmd` or `dsh.exe` where [`find_program`] looks, in order.
+fn candidates(home: &Path, search_path: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     let path = match search_path {
         Some(path) => Some(path.to_os_string()),
         None => std::env::var_os("PATH"),
@@ -301,7 +301,70 @@ pub fn find_program(home: &Path, search_path: Option<&std::ffi::OsStr>) -> Optio
     let names = ["dsh", "dsh.cmd", "dsh.exe"];
     dirs.iter()
         .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
-        .find(|candidate| candidate.is_file())
+        .filter(|candidate| candidate.is_file())
+        .collect()
+}
+
+/// The `dsh` program on `search_path` (`None`: this process's `PATH`), else, for this process's
+/// own `PATH` only (tests pass their search path), where its installers put it off `PATH`:
+/// npm's default global directory on Windows (`%APPDATA%\npm`, under the home directory) and
+/// the Desktop app's link `/usr/local/bin/dsh` on macOS. Only DeepSeek Harness's own program
+/// counts ([`is_deepseek_program`]): Debian's and Ubuntu's `dsh` package (a distributed shell,
+/// `/usr/bin/dsh`) is another program of the same name.
+pub fn find_program(home: &Path, search_path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    candidates(home, search_path)
+        .into_iter()
+        .find(|candidate| is_deepseek_program(candidate))
+}
+
+/// The first `dsh` found where [`find_program`] looks that is not DeepSeek Harness, when no
+/// DeepSeek Harness program is found (for `doctor`).
+pub fn foreign_program(home: &Path, search_path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let found = candidates(home, search_path);
+    if found.iter().any(|candidate| is_deepseek_program(candidate)) {
+        return None;
+    }
+    found.into_iter().next()
+}
+
+/// How much of a found program is read to tell a script or shim of DeepSeek Harness.
+const PROGRAM_PEEK_BYTES: u64 = 64 * 1024;
+
+/// Whether a found `dsh` is DeepSeek Harness's, without running it: its real path (symbolic
+/// links followed) has a directory `@deepseek-ai` or one whose name says `deepseek` (npm's
+/// global link into `lib/node_modules/@deepseek-ai/dsh/lib/bin.js`, the Desktop app's
+/// `DeepSeek*.app/Contents/Resources/runtime/cli/bin/dsh`), or it is a small text file (npm's
+/// `dsh.cmd`, `dsh.ps1` and shell wrappers, pnpm's and Volta's shims) that names
+/// `@deepseek-ai/dsh` (either separator) or `deepseek-harness`.
+pub fn is_deepseek_program(program: &Path) -> bool {
+    let real = std::fs::canonicalize(program).unwrap_or_else(|_| program.to_path_buf());
+    let named = real.components().any(|part| {
+        let part = part.as_os_str().to_string_lossy().to_lowercase();
+        part == "@deepseek-ai" || part.contains("deepseek")
+    });
+    named || script_names_deepseek(&real)
+}
+
+/// Whether the first [`PROGRAM_PEEK_BYTES`] of `file` are text naming DeepSeek Harness's
+/// package.
+fn script_names_deepseek(file: &Path) -> bool {
+    use std::io::Read;
+    let Ok(handle) = std::fs::File::open(file) else {
+        return false;
+    };
+    let mut head = Vec::new();
+    if handle
+        .take(PROGRAM_PEEK_BYTES)
+        .read_to_end(&mut head)
+        .is_err()
+        || head.contains(&0)
+    {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&head).to_lowercase();
+    ["@deepseek-ai/dsh", "@deepseek-ai\\dsh", "deepseek-harness"]
+        .iter()
+        .any(|marker| text.contains(marker))
 }
 
 /// Whether `command` runs dsh.
@@ -381,6 +444,11 @@ impl Harness for Dsh {
     #[cfg(test)]
     fn user_files(&self, home: &Path) {
         fixture::user_files(home);
+    }
+
+    #[cfg(test)]
+    fn fake_program(&self) -> &'static str {
+        fixture::PROGRAM
     }
 
     fn has_sessions(&self) -> bool {
@@ -509,6 +577,9 @@ pub(crate) mod fixture {
     /// The web profile's layer as dsh's Settings write it: a model and an MCP server of the
     /// manager.
     pub(crate) const WEB_PATCH: &str = "- id: agent-default-model\n  config:\n    provider: deepseek-official\n    model: deepseek-flash\n- id: mcp-manager\n  config:\n    servers:\n      github:\n        transport: stdio\n        command: npx\n        args: [-y, github-mcp]\n";
+
+    /// npm's POSIX shell wrapper of a global `dsh` (as on a file system without symbolic links).
+    pub(crate) const PROGRAM: &str = "#!/bin/sh\nbasedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\nexec node \"$basedir/node_modules/@deepseek-ai/dsh/lib/bin.js\" \"$@\"\n";
 
     pub(crate) fn user_files(home: &Path) {
         let dir = home.join(".dsh");
@@ -708,17 +779,111 @@ mod tests {
         let tmp = TempDir::new("dsh-program");
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        assert_eq!(find_program(tmp.path(), Some(bin.as_os_str())), None);
-        std::fs::write(bin.join("dsh.cmd"), "").unwrap();
-        assert_eq!(
-            find_program(tmp.path(), Some(bin.as_os_str())),
-            Some(bin.join("dsh.cmd"))
-        );
+        let search = Some(bin.as_os_str());
+        assert_eq!(find_program(tmp.path(), search), None);
+        assert_eq!(foreign_program(tmp.path(), search), None);
+        // npm's Windows shim names the package with backslashes.
+        let cmd = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\"%_prog%\"  \"%dp0%\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js\" %*\r\n";
+        std::fs::write(bin.join("dsh.cmd"), cmd).unwrap();
+        assert_eq!(find_program(tmp.path(), search), Some(bin.join("dsh.cmd")));
+        std::fs::write(bin.join("dsh"), fixture::PROGRAM).unwrap();
+        assert_eq!(find_program(tmp.path(), search), Some(bin.join("dsh")));
+        assert_eq!(foreign_program(tmp.path(), search), None);
+    }
+
+    #[test]
+    fn other_programs_named_dsh_are_not_deepseek_harness() {
+        let tmp = TempDir::new("dsh-foreign");
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let search = Some(bin.as_os_str());
+        // Debian's distributed shell: an ELF binary (never run to find out).
+        let mut elf = b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0".to_vec();
+        elf.extend_from_slice(b"dancer's shell, or distributed shell\0dsh.conf\0");
+        std::fs::write(bin.join("dsh"), &elf).unwrap();
+        assert!(!is_deepseek_program(&bin.join("dsh")));
+        assert_eq!(find_program(tmp.path(), search), None);
+        assert_eq!(foreign_program(tmp.path(), search), Some(bin.join("dsh")));
+        // A shell script of another program.
+        std::fs::write(
+            bin.join("dsh"),
+            "#!/bin/sh\nexec ssh -o BatchMode=yes \"$@\"\n",
+        )
+        .unwrap();
+        assert_eq!(find_program(tmp.path(), search), None);
+        // An empty file is not either.
         std::fs::write(bin.join("dsh"), "").unwrap();
+        assert_eq!(find_program(tmp.path(), search), None);
+        // A large text file is read only at its start.
+        let mut big = "#!/bin/sh\n".to_string();
+        big.push_str(&"# padding\n".repeat(8 * 1024));
+        big.push_str("exec node @deepseek-ai/dsh\n");
+        std::fs::write(bin.join("dsh"), big).unwrap();
+        assert_eq!(find_program(tmp.path(), search), None);
+        // DeepSeek's program found after a foreign one wins.
+        let npm = tmp.path().join("npm");
+        std::fs::create_dir_all(&npm).unwrap();
+        std::fs::write(npm.join("dsh"), fixture::PROGRAM).unwrap();
+        let both = std::env::join_paths([&bin, &npm]).unwrap();
+        assert_eq!(
+            find_program(tmp.path(), Some(both.as_os_str())),
+            Some(npm.join("dsh"))
+        );
+        assert_eq!(foreign_program(tmp.path(), Some(both.as_os_str())), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_and_desktop_links_are_followed() {
+        let tmp = TempDir::new("dsh-links");
+        let prefix = tmp.path().join("prefix");
+        let package = prefix
+            .join("lib")
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh")
+            .join("lib");
+        std::fs::create_dir_all(&package).unwrap();
+        // The package's entry point is JavaScript that never names the package itself.
+        std::fs::write(
+            package.join("bin.js"),
+            "#!/usr/bin/env node\nimport('./cli.js');\n",
+        )
+        .unwrap();
+        let bin = prefix.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(package.join("bin.js"), bin.join("dsh")).unwrap();
         assert_eq!(
             find_program(tmp.path(), Some(bin.as_os_str())),
             Some(bin.join("dsh"))
         );
+        // The Desktop app's link to its bundled CLI (a binary).
+        let cli = tmp
+            .path()
+            .join("Applications")
+            .join("DeepSeek.app")
+            .join("Contents")
+            .join("Resources")
+            .join("runtime")
+            .join("cli")
+            .join("bin");
+        std::fs::create_dir_all(&cli).unwrap();
+        std::fs::write(cli.join("dsh"), b"\xcf\xfa\xed\xfe\0\0").unwrap();
+        let local = tmp.path().join("local");
+        std::fs::create_dir_all(&local).unwrap();
+        std::os::unix::fs::symlink(cli.join("dsh"), local.join("dsh")).unwrap();
+        assert_eq!(
+            find_program(tmp.path(), Some(local.as_os_str())),
+            Some(local.join("dsh"))
+        );
+        // A link to another program's binary is not.
+        let other = tmp.path().join("usr").join("lib").join("dsh");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("dsh"), b"\x7fELF\0").unwrap();
+        let alt = tmp.path().join("alt");
+        std::fs::create_dir_all(&alt).unwrap();
+        std::os::unix::fs::symlink(other.join("dsh"), alt.join("dsh")).unwrap();
+        assert_eq!(find_program(tmp.path(), Some(alt.as_os_str())), None);
     }
 
     #[test]

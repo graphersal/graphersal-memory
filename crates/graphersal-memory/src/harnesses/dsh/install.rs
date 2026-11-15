@@ -886,7 +886,16 @@ pub fn doctor(setup: &Setup) -> Vec<Finding> {
             program.display()
         ))),
         None => findings.push(note(
-            "DeepSeek Harness: the `dsh` program is not found (`npx` leaves none)",
+            match crate::harnesses::dsh::foreign_program(&paths.home, setup.search_path.as_deref())
+            {
+                Some(other) => format!(
+                    "DeepSeek Harness: the `dsh` program is not found (`npx` leaves none; the \
+                     `dsh` at {} is not DeepSeek Harness)",
+                    other.display()
+                ),
+                None => "DeepSeek Harness: the `dsh` program is not found (`npx` leaves none)"
+                    .to_string(),
+            },
             format!(
                 "install it globally: `npm install -g {}`",
                 crate::harnesses::dsh::NPM_PACKAGE
@@ -1353,6 +1362,25 @@ mod tests {
                 .fix
                 .as_deref()
                 .is_some_and(|fix| fix.contains("npm install -g @deepseek-ai/dsh"))),
+            "{findings:?}"
+        );
+        assert!(!findings.iter().any(|f| f.text.contains("is not DeepSeek")));
+        // Another program named dsh (Debian's distributed shell) is named, never taken.
+        let mut foreign = bare_setup_in(home.path(), data.path());
+        let bin = data.path().join("foreign-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("dsh"), b"\x7fELF\x02\x01\x01\0").unwrap();
+        foreign.search_path = Some(bin.clone().into_os_string());
+        assert_eq!(foreign.program(Kind::Dsh), None);
+        let findings = doctor(&foreign);
+        let text = format!(
+            "the `dsh` at {} is not DeepSeek Harness",
+            bin.join("dsh").display()
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.text.contains(&text) && !f.problem),
             "{findings:?}"
         );
         run_uninstall(&setup, out_of_dsh());

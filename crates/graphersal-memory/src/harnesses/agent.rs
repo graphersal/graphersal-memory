@@ -267,6 +267,12 @@ pub trait Harness {
     /// comments, rules): what the conformance tests (`crate::harnesses::conformance_tests`) start from.
     #[cfg(test)]
     fn user_files(&self, home: &Path);
+    /// The text of a fake program of this harness that its `find_program` accepts (tests; most
+    /// harnesses accept any file of the program's name).
+    #[cfg(test)]
+    fn fake_program(&self) -> &'static str {
+        ""
+    }
     /// What the bench needs of it, when the bench runs through it (`crate::bench`).
     fn bench(&self) -> Option<std::sync::Arc<dyn crate::bench::BenchSupport>> {
         None
