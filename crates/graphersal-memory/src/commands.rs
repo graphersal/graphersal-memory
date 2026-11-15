@@ -665,7 +665,7 @@ pub fn export_files(
 }
 
 /// Where the export of `agent` goes, for messages.
-pub fn export_target(agent: &dyn crate::agents::Agent) -> String {
+pub fn export_target(agent: &dyn crate::agents::Harness) -> String {
     if agent.has_file_memory() {
         format!("{}'s file memory", agent.display_name())
     } else {
@@ -681,7 +681,7 @@ pub fn export_target(agent: &dyn crate::agents::Agent) -> String {
 }
 
 /// What to do with an export for a harness without file memory.
-pub fn export_note(agent: &dyn crate::agents::Agent) -> String {
+pub fn export_note(agent: &dyn crate::agents::Harness) -> String {
     let how = match agent.kind() {
         crate::agents::Kind::Codex => {
             "to give the agent a file, paste it into ~/.codex/AGENTS.md or a project's AGENTS.md"

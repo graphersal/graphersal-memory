@@ -28,6 +28,7 @@ mod engine;
 mod export;
 mod fsutil;
 mod harness;
+mod harnesses;
 mod hook;
 mod import;
 mod install;

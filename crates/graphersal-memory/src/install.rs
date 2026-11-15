@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::agents::{Agent, ClaudeCode, Kind};
+use crate::agents::{ClaudeCode, Harness, Kind};
 use crate::config::Config;
 use crate::import::{self, Connect, DirPlan, ImportState};
 use crate::language::Language;
@@ -255,15 +255,9 @@ impl Setup {
         tilde(text, &self.opencode.home)
     }
 
-    /// The agent of a harness.
-    pub fn agent_of(&self, kind: Kind) -> Box<dyn Agent> {
-        match kind {
-            Kind::ClaudeCode => Box::new(self.agent()),
-            Kind::OpenCode => Box::new(self.opencode_agent()),
-            Kind::Codex => Box::new(self.codex_agent()),
-            Kind::Cursor => Box::new(self.cursor_agent()),
-            Kind::CodeWhale => Box::new(self.codewhale_agent()),
-        }
+    /// The harness of `kind` (`crate::harnesses`).
+    pub fn agent_of(&self, kind: Kind) -> Box<dyn Harness> {
+        crate::harnesses::of(self, kind)
     }
 
     /// The program of a harness on this machine: on the search path, or in a known install
@@ -271,55 +265,17 @@ impl Setup {
     /// `~/.opencode/bin/opencode`, Cursor's app bundle). System-wide locations (`/Applications`)
     /// are looked at only for this process's own `PATH` (tests pass their search path).
     pub fn program(&self, kind: Kind) -> Option<PathBuf> {
-        let home = &self.opencode.home;
-        let search = self.search_path.as_deref();
-        let first_file = |candidates: Vec<PathBuf>| candidates.into_iter().find(|p| p.is_file());
-        match kind {
-            Kind::ClaudeCode => {
-                let path = match search {
-                    Some(path) => Some(path.to_os_string()),
-                    None => std::env::var_os("PATH"),
-                };
-                let mut candidates: Vec<PathBuf> = path
-                    .iter()
-                    .flat_map(std::env::split_paths)
-                    .flat_map(|dir| {
-                        ["claude", "claude.exe", "claude.cmd"].map(|name| dir.join(name))
-                    })
-                    .collect();
-                candidates.push(home.join(".local").join("bin").join("claude"));
-                candidates.push(home.join(".claude").join("local").join("claude"));
-                first_file(candidates)
-            }
-            Kind::OpenCode => crate::opencode::find_program(home, search),
-            Kind::Codex => crate::codex::find_program(search),
-            Kind::Cursor => crate::cursor::find_program(search)
-                .or_else(|| {
-                    let mut bundles = vec![home.join("Applications").join("Cursor.app")];
-                    if search.is_none() {
-                        bundles.push(PathBuf::from("/Applications/Cursor.app"));
-                    }
-                    bundles.into_iter().find(|bundle| bundle.is_dir())
-                })
-                .or_else(|| first_file(cursor_windows_locations(home, search.is_none()))),
-            Kind::CodeWhale => crate::codewhale::find_program(home, search),
-        }
+        self.agent_of(kind)
+            .find_program(&self.opencode.home, self.search_path.as_deref())
     }
 
     /// Whether a harness's configuration is on this machine (its configuration directory or
     /// file), whether or not its program is.
     fn config_found(&self, kind: Kind) -> Option<PathBuf> {
-        let candidates: Vec<PathBuf> = match kind {
-            Kind::ClaudeCode => vec![
-                self.paths.config_dir.clone(),
-                self.paths.user_config.clone(),
-            ],
-            Kind::OpenCode => vec![self.opencode.config_dir.clone()],
-            Kind::Codex => vec![self.codex.codex_home.clone()],
-            Kind::Cursor => vec![self.cursor.cursor_dir.clone()],
-            Kind::CodeWhale => vec![self.codewhale.codewhale_home.clone()],
-        };
-        candidates.into_iter().find(|path| path.exists())
+        self.agent_of(kind)
+            .config_roots()
+            .into_iter()
+            .find(|path| path.exists())
     }
 
     /// The harnesses found on this machine, in wizard order: those whose program is found
@@ -348,13 +304,7 @@ impl Setup {
 
     /// The name of a harness's program, for messages.
     pub fn program_name(kind: Kind) -> &'static str {
-        match kind {
-            Kind::ClaudeCode => "claude",
-            Kind::OpenCode => "opencode",
-            Kind::Codex => "codex",
-            Kind::Cursor => "cursor",
-            Kind::CodeWhale => "codewhale",
-        }
+        kind.program_name()
     }
 
     /// The harnesses graphersal-memory is installed in (their state file exists, or one of
@@ -363,18 +313,7 @@ impl Setup {
         Kind::ALL
             .into_iter()
             .filter(|kind| {
-                State::exists_of(self, *kind)
-                    || match kind {
-                        Kind::ClaudeCode => !inspect(self).nothing_installed(),
-                        Kind::OpenCode => {
-                            !crate::opencode::install::inspect(self).nothing_installed()
-                        }
-                        Kind::Codex => !crate::codex::install::inspect(self).nothing_installed(),
-                        Kind::Cursor => !crate::cursor::install::inspect(self).nothing_installed(),
-                        Kind::CodeWhale => {
-                            !crate::codewhale::install::inspect(self).nothing_installed()
-                        }
-                    }
+                State::exists_of(self, *kind) || self.agent_of(*kind).has_our_parts(self)
             })
             .collect()
     }
@@ -487,24 +426,6 @@ impl Setup {
         }
         Ours { programs }
     }
-}
-
-/// Where Cursor's Windows installers put `Cursor.exe` when it is not on `PATH`: the per-user
-/// install (`%LOCALAPPDATA%\Programs\cursor`, under the home directory) and, for this process's
-/// own machine (`system`), the per-machine one (`%ProgramFiles%\cursor`) and `%LOCALAPPDATA%`
-/// itself when it is elsewhere.
-fn cursor_windows_locations(home: &Path, system: bool) -> Vec<PathBuf> {
-    let exe = |base: PathBuf| base.join("Programs").join("cursor").join("Cursor.exe");
-    let mut candidates = vec![exe(home.join("AppData").join("Local"))];
-    if system && cfg!(windows) {
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            candidates.push(exe(PathBuf::from(local)));
-        }
-        if let Some(programs) = std::env::var_os("ProgramFiles") {
-            candidates.push(PathBuf::from(programs).join("cursor").join("Cursor.exe"));
-        }
-    }
-    candidates
 }
 
 /// How the hook commands are written on this machine.
@@ -5118,7 +5039,7 @@ pub fn uninstall_with(
         format!("graphersal-memory uninstall ({names})")
     };
     let _ = writeln!(out, "{}", paint(options.color, "1", &title));
-    let export_line = |agent: &dyn Agent, rows: Option<&Vec<export::Row>>| -> String {
+    let export_line = |agent: &dyn Harness, rows: Option<&Vec<export::Row>>| -> String {
         let target = crate::commands::export_target(agent);
         match rows {
             Some(rows) => {

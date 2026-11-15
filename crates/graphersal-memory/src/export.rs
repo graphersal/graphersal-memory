@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::agents::Agent;
+use crate::agents::Harness;
 
 /// One memory as the export reads it from the graph (`export_memories`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -589,7 +589,7 @@ pub fn project_root(data_dir: &Path, id: &str) -> PathBuf {
 }
 
 /// Writes `rows` into the agent's file memory.
-pub fn write(agent: &dyn Agent, data_dir: &Path, rows: &[Row]) -> Result<Report, String> {
+pub fn write(agent: &dyn Harness, data_dir: &Path, rows: &[Row]) -> Result<Report, String> {
     let mut report = Report::default();
     let mut by_project: BTreeMap<&str, Vec<&Row>> = BTreeMap::new();
     for row in rows {
