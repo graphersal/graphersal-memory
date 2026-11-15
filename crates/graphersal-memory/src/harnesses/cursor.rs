@@ -354,21 +354,13 @@ impl Harness for Cursor {
     fn memory_dir(&self, root: &Path) -> PathBuf {
         self.paths
             .export_dir
-            .join(crate::memory::import::claude_slug(
+            .join(crate::harnesses::claude_code::import::claude_slug(
                 &root.display().to_string(),
             ))
     }
 
     fn global_memory_file(&self) -> PathBuf {
         self.paths.export_dir.join("global.md")
-    }
-
-    fn auto_memory_key(&self) -> Option<&'static str> {
-        None
-    }
-
-    fn headless_command(&self) -> Option<&'static str> {
-        None
     }
 }
 
@@ -465,8 +457,13 @@ mod tests {
         let entry = agent.mcp_entry(Path::new("/x/graphersal-memory"), &["mcp".into()]);
         assert_eq!(entry["type"], "stdio");
         assert!(crate::harnesses::agent::is_our_entry(&entry));
-        assert_eq!(agent.auto_memory_key(), None);
-        assert_eq!(agent.headless_command(), None);
+        assert!(agent.own_memory().is_none());
+        assert_eq!(
+            crate::harnesses::driver(Kind::Cursor)
+                .headless
+                .and_then(|headless| headless.default_command()),
+            None
+        );
         assert!(!agent.has_file_memory());
         let words = |s: &str| s.split(' ').map(str::to_string).collect::<Vec<_>>();
         assert!(is_cursor_cli(&words("agent -p")));

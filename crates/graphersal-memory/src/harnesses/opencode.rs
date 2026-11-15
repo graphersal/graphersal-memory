@@ -560,22 +560,13 @@ impl Harness for OpenCode {
     fn memory_dir(&self, root: &Path) -> PathBuf {
         self.paths
             .export_dir
-            .join(crate::memory::import::claude_slug(
+            .join(crate::harnesses::claude_code::import::claude_slug(
                 &root.display().to_string(),
             ))
     }
 
     fn global_memory_file(&self) -> PathBuf {
         self.paths.export_dir.join("global.md")
-    }
-
-    /// opencode has no memory feature of its own.
-    fn auto_memory_key(&self) -> Option<&'static str> {
-        None
-    }
-
-    fn headless_command(&self) -> Option<&'static str> {
-        Some(DEFAULT_HEADLESS_COMMAND)
     }
 }
 

@@ -702,7 +702,7 @@ impl Harness for CodeWhale {
     fn memory_dir(&self, root: &Path) -> PathBuf {
         self.paths
             .export_dir
-            .join(crate::memory::import::claude_slug(
+            .join(crate::harnesses::claude_code::import::claude_slug(
                 &root.display().to_string(),
             ))
     }
@@ -710,17 +710,13 @@ impl Harness for CodeWhale {
     fn global_memory_file(&self) -> PathBuf {
         self.paths.export_dir.join("global.md")
     }
-
-    /// `memory.enabled` in `config.toml`.
-    fn auto_memory_key(&self) -> Option<&'static str> {
-        Some("memory.enabled")
-    }
-
-    fn headless_command(&self) -> Option<&'static str> {
-        Some(DEFAULT_HEADLESS_COMMAND)
-    }
 }
 
+/// CodeWhale's start context: the short one, as it cuts a server's instructions after 4,096
+/// bytes (`crates/mcp/src/lib.rs`, `MAX_SERVER_INSTRUCTIONS_BYTES`).
+pub fn start_context(_hook: bool) -> crate::runtime::protocol::StartContextMode {
+    crate::runtime::protocol::StartContextMode::Short
+}
 /// CodeWhale's headless runs (`crate::harnesses::headless::Headless`): `codewhale exec --json
 /// --prompt-file -`, a one-shot run (no tools, no hooks, no saved session).
 pub struct HeadlessRun;
@@ -1022,6 +1018,11 @@ mod tests {
             "codewhale"
         );
         assert!(!agent.has_file_memory());
-        assert_eq!(agent.headless_command(), Some("codewhale exec"));
+        assert_eq!(
+            crate::harnesses::driver(Kind::CodeWhale)
+                .headless
+                .and_then(|headless| headless.default_command()),
+            Some("codewhale exec")
+        );
     }
 }

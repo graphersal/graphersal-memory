@@ -57,7 +57,7 @@ Unit tests that need more than one module's helpers sit beside their module as
     (`coexist::OtherMemory`) and `hook` (`HookHandler`: `hook --harness <id>`; none: "needs no
     hook"), the MCP configuration file, its
     servers key and entry shape, settings and instruction files, the sessions location, the
-    export directories, the auto-memory key, the headless command; `is_our_entry` for both entry
+    export directories, `start_hook_installed`, `user_files` (tests); `is_our_entry` for both entry
     shapes); `Setup::detected` (a harness's program found: `Setup::program`,
     `PATH` plus known install locations), `leftovers` (configuration without the program:
     reported, never offered) and `installed` (what status, doctor and uninstall work on). The
@@ -66,11 +66,11 @@ Unit tests that need more than one module's helpers sit beside their module as
     `ClaudeCode` (its `Harness`, `HookHandler` and `OwnMemory` parts, `GLOBAL_RULES_FILE`),
     `ClaudeHeadless`; `claude_code/install.rs` its install parts (the rule block texts and
     `PREVIOUS_BLOCK_FINGERPRINTS`, `ClaudePaths`, the block helpers, `claude_plan`, the
-    structural `claude_removal`, `inspect`, `status_lines`, `claude_doctor`, the Git Bash checks;
-    `crate::install` re-exports them under their old paths), `claude_code/other.rs` its
+    structural `claude_removal`, `inspect`, `status_lines`, `claude_doctor`, the Git Bash checks,
+    `claude_start_hook_installed`), `claude_code/other.rs` its
     `OtherMemory`, `claude_code/sessions.rs` its `SessionSource`, `claude_code/import.rs` its
     file-memory import (`crate::memory::import` keeps `Caller`/`Connect`/`slugify` and the memory-file
-    format, and re-exports it), `claude_code/transcript.rs` its JSONL parser (`crate::memory::transcript`
+    format), `claude_code/transcript.rs` its JSONL parser (`crate::memory::transcript`
     keeps the shared `Transcript`, memory writes and path helpers), `claude_code/hook.rs` its
     hook (`crate::memory::hook` keeps the shared events, input and queueing);
   - `src/harnesses/mod.rs`: the registry, the one place that names every harness (`Harnesses`:
@@ -79,7 +79,9 @@ Unit tests that need more than one module's helpers sit beside their module as
     per-harness accessors a harness's own module and the tests use, `setup.codex()`,
     `setup.codex_agent()`, ...; `Setup` itself holds `home` and `harnesses`; `driver`: the setup-free parts of a
     `Kind`, its `sessions::SessionSource` for the daemon's indexing and its
-    `harness::Headless`, `sessions` its shortcut);
+    `headless::Headless`, `native_slugs` (memories imported from its own store, left out of
+    the export) and `start_context` (its connections' start context mode); `sessions` its
+    shortcut);
   - `src/harnesses/opencode.rs` + `src/harnesses/opencode/`: opencode 1.x and 2.x, one `OpenCode` agent with the
     line as data (`Major`, `Detected`, `detect`: `opencode --version` in a scratch home, else the
     database's tables, else 2.x; the hooks never ask the binary). Paths `OpenCodePaths`: XDG

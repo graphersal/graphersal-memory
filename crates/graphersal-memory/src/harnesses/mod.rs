@@ -22,6 +22,7 @@ use crate::harnesses::cursor::Cursor;
 use crate::harnesses::opencode::OpenCode;
 use crate::install::Setup;
 use crate::memory::sessions::SessionSource;
+use crate::runtime::protocol::StartContextMode;
 
 /// Every harness with its files on this machine: built once with the setup
 /// (`Harnesses::resolve`), asked through `Setup::agent_of`.
@@ -45,7 +46,9 @@ impl Harnesses {
     ) -> Result<Self, String> {
         let detected = opencode::detect(env, None, probe)?;
         Ok(Self {
-            claude_code: ClaudeCode::new(crate::install::ClaudePaths::resolve(env)?),
+            claude_code: ClaudeCode::new(
+                crate::harnesses::claude_code::install::ClaudePaths::resolve(env)?,
+            ),
             opencode: OpenCode::new(opencode::OpenCodePaths::resolve_for(env, detected)?),
             codex: Codex::new(codex::CodexPaths::resolve(env)?),
             cursor: Cursor::new(cursor::CursorPaths::resolve(env, data_dir)?),
@@ -60,7 +63,8 @@ impl Harnesses {
         let env = |name: &str| (name == "HOME").then(|| text.clone());
         Self {
             claude_code: ClaudeCode::new(
-                crate::install::ClaudePaths::resolve(&env).unwrap_or_else(|err| panic!("{err}")),
+                crate::harnesses::claude_code::install::ClaudePaths::resolve(&env)
+                    .unwrap_or_else(|err| panic!("{err}")),
             ),
             opencode: OpenCode::new(opencode::OpenCodePaths::of_home(home)),
             codex: Codex::new(codex::CodexPaths::of_home(home)),
@@ -90,13 +94,8 @@ impl Setup {
     }
 
     /// Claude Code's files.
-    pub fn paths(&self) -> &crate::install::ClaudePaths {
+    pub fn paths(&self) -> &crate::harnesses::claude_code::install::ClaudePaths {
         self.harnesses.claude_code.paths()
-    }
-
-    /// opencode.
-    pub fn opencode_agent(&self) -> &OpenCode {
-        &self.harnesses.opencode
     }
 
     /// opencode's files.
@@ -148,6 +147,17 @@ pub struct Driver {
     pub sessions: &'static dyn SessionSource,
     /// Its headless runs, when it has a command graphersal-memory can drive or refuse.
     pub headless: Option<&'static dyn crate::harnesses::headless::Headless>,
+    /// The slugs of the memories imported from its own memory store (`NativeMemory`), which
+    /// the export leaves out of the harness's files as it does for other tools' memories.
+    pub native_slugs: Option<fn(&Path) -> std::collections::BTreeSet<String>>,
+    /// The start context its MCP connections get, given whether its own start hook delivers
+    /// it (`Harness::start_hook_installed`).
+    pub start_context: fn(bool) -> StartContextMode,
+}
+
+/// The whole start context in the MCP instructions.
+fn full(_hook: bool) -> StartContextMode {
+    StartContextMode::Full
 }
 
 /// The setup-free parts of `kind`.
@@ -156,22 +166,32 @@ pub fn driver(kind: Kind) -> &'static Driver {
         Kind::ClaudeCode => &Driver {
             sessions: &crate::harnesses::claude_code::sessions::ClaudeSessions,
             headless: Some(&crate::harnesses::claude_code::ClaudeHeadless),
+            native_slugs: None,
+            start_context: crate::harnesses::claude_code::start_context,
         },
         Kind::OpenCode => &Driver {
             sessions: &crate::harnesses::opencode::sessions::Sessions,
             headless: Some(&crate::harnesses::opencode::HeadlessRun),
+            native_slugs: None,
+            start_context: full,
         },
         Kind::Codex => &Driver {
             sessions: &crate::harnesses::codex::sessions::Sessions,
             headless: Some(&crate::harnesses::codex::HeadlessRun),
+            native_slugs: None,
+            start_context: full,
         },
         Kind::Cursor => &Driver {
             sessions: &crate::harnesses::cursor::sessions::Sessions,
             headless: Some(&crate::harnesses::cursor::HeadlessRun),
+            native_slugs: None,
+            start_context: full,
         },
         Kind::CodeWhale => &Driver {
             sessions: &crate::harnesses::codewhale::sessions::Sessions,
             headless: Some(&crate::harnesses::codewhale::HeadlessRun),
+            native_slugs: Some(crate::harnesses::codewhale::memory::imported_slugs),
+            start_context: crate::harnesses::codewhale::start_context,
         },
     }
 }

@@ -1,11 +1,8 @@
 //! What every importer and the export share: the connection to the daemon (`Caller`,
 //! `Connect`), memory slugs, and the memory-file format (front matter, `meaning`). Claude
-//! Code's file-memory import is `crate::harnesses::claude_code::import`, re-exported here under its old
-//! paths.
+//! Code's file-memory import is `crate::harnesses::claude_code::import`.
 
 use serde_json::Value;
-
-pub use crate::harnesses::claude_code::import::*;
 
 /// The memory kinds of the memory schema.
 pub const KINDS: [&str; 4] = ["user", "feedback", "project", "reference"];

@@ -598,12 +598,15 @@ pub fn write(agent: &dyn Harness, data_dir: &Path, rows: &[Row]) -> Result<Repor
             .or_default()
             .push(row);
     }
-    let imported = crate::memory::import::ImportState::load(data_dir).unwrap_or_default();
+    let imported =
+        crate::harnesses::claude_code::import::ImportState::load(data_dir).unwrap_or_default();
     let mut other_tools = crate::install::coexist::other_import::State::load(data_dir).slugs();
-    // CodeWhale's own memory keeps its entries too.
-    other_tools.extend(crate::harnesses::codewhale::memory::imported_slugs(
-        data_dir,
-    ));
+    // A harness's own memory store keeps the entries imported from it too (CodeWhale's).
+    for kind in crate::harnesses::agent::Kind::ALL {
+        if let Some(slugs) = crate::harnesses::driver(kind).native_slugs {
+            other_tools.extend(slugs(data_dir));
+        }
+    }
     for (project, rows) in &by_project {
         if project.is_empty() {
             // Memories imported from another memory tool stay out of the global file, which

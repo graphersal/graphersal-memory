@@ -12,10 +12,11 @@ use serde_json::{Value, json};
 
 use crate::cli::Profile as ProfileKind;
 use crate::harnesses::agent::Kind;
+use crate::harnesses::claude_code::import::ImportState;
 use crate::harnesses::cursor::fixture::CURSOR_RULE;
 use crate::install::language::Language;
 use crate::install::{self, InstallOptions, Setup, UninstallOptions};
-use crate::memory::import::{self, Caller, ImportState};
+use crate::memory::import::Caller;
 use crate::runtime::client::McpClient;
 use crate::runtime::mcp::{self, StoreRuntime};
 use crate::runtime::mcp_tests::TempDir;
@@ -400,7 +401,7 @@ fn a_hand_edit_in_the_block_is_a_conflict_never_overwritten() {
         "{out}"
     );
     assert_eq!(read(&setup.paths().instructions), edited);
-    let status = install::status_lines(&setup).join("\n");
+    let status = crate::harnesses::claude_code::install::status_lines(&setup).join("\n");
     assert!(
         status.contains("rule block") && status.contains("CONFLICT"),
         "{status}"
@@ -449,7 +450,7 @@ fn the_develop_server_is_off_until_enabled_and_can_be_disabled_again() {
         config["mcpServers"]["graphersal-memory-develop"].clone()
     };
     assert!(developing().is_null());
-    let status = install::status_lines(&setup).join("\n");
+    let status = crate::harnesses::claude_code::install::status_lines(&setup).join("\n");
     assert!(
         status.contains("graphersal-memory-develop: not registered (off"),
         "{status}"
@@ -490,7 +491,7 @@ fn the_develop_server_is_off_until_enabled_and_can_be_disabled_again() {
 /// A Claude Code memory directory for the project directory `project`, with a transcript
 /// naming it.
 pub(crate) fn memory_fixture(home: &Path, project: &Path) -> PathBuf {
-    let name = import::claude_slug(&project.display().to_string());
+    let name = crate::harnesses::claude_code::import::claude_slug(&project.display().to_string());
     let dir = home.join(".claude").join("projects").join(&name);
     let memory = dir.join("memory");
     std::fs::create_dir_all(&memory).unwrap();
@@ -676,7 +677,7 @@ fn status_and_doctor_report_the_installation() {
     );
     let memory = Memory::open(data.path());
     run_install(&setup, &memory, yes());
-    let status = install::status_lines(&setup).join("\n");
+    let status = crate::harnesses::claude_code::install::status_lines(&setup).join("\n");
     assert!(
         status.contains("MCP server graphersal-memory (use): installed"),
         "{status}"
@@ -804,16 +805,19 @@ Your long-term memory of this user lives in a local graph, served by the MCP ser
 
 /// A managed block with `text` and the fingerprint `fingerprint` on its begin line.
 fn block_with(text: &str, fingerprint: &str) -> String {
-    let current = crate::fsutil::fingerprint(install::RULE_BLOCK.as_bytes());
-    install::block_text()
-        .replace(install::RULE_BLOCK, text)
+    let current =
+        crate::fsutil::fingerprint(crate::harnesses::claude_code::install::RULE_BLOCK.as_bytes());
+    crate::harnesses::claude_code::install::block_text()
+        .replace(crate::harnesses::claude_code::install::RULE_BLOCK, text)
         .replace(&current, fingerprint)
 }
 
 /// The instruction file with the block of `install` replaced by `block`.
 fn with_block(setup: &Setup, block: &str) -> String {
     let text = read(&setup.paths().instructions);
-    let found = install::find_block(&text).unwrap().unwrap();
+    let found = crate::harnesses::claude_code::install::find_block(&text)
+        .unwrap()
+        .unwrap();
     format!("{}{block}{}", &text[..found.start], &text[found.end..])
 }
 
@@ -821,14 +825,19 @@ fn with_block(setup: &Setup, block: &str) -> String {
 fn every_earlier_block_text_is_known_and_the_current_one_is_not_among_them() {
     let previous = crate::fsutil::fingerprint(BLOCK_0_0_0.as_bytes());
     assert!(
-        install::PREVIOUS_BLOCK_FINGERPRINTS.contains(&previous.as_str()),
+        crate::harnesses::claude_code::install::PREVIOUS_BLOCK_FINGERPRINTS
+            .contains(&previous.as_str()),
         "{previous}"
     );
-    let current = crate::fsutil::fingerprint(install::RULE_BLOCK.as_bytes());
-    assert!(!install::PREVIOUS_BLOCK_FINGERPRINTS.contains(&current.as_str()));
-    assert!(!install::RULE_BLOCK.contains("not indexed yet"));
+    let current =
+        crate::fsutil::fingerprint(crate::harnesses::claude_code::install::RULE_BLOCK.as_bytes());
+    assert!(
+        !crate::harnesses::claude_code::install::PREVIOUS_BLOCK_FINGERPRINTS
+            .contains(&current.as_str())
+    );
+    assert!(!crate::harnesses::claude_code::install::RULE_BLOCK.contains("not indexed yet"));
     let old = block_with(BLOCK_0_0_0, &previous);
-    let found = install::find_block(&format!("# Mine\n\n{old}"))
+    let found = crate::harnesses::claude_code::install::find_block(&format!("# Mine\n\n{old}"))
         .unwrap()
         .unwrap();
     assert!(found.intact && found.known && !found.current);
@@ -852,7 +861,11 @@ fn the_blocks_before_the_line_about_what_to_save_are_known_with_or_without_read_
     type Find = fn(&str, Language, &[String]) -> Result<Option<install::FoundBlock>, String>;
     type Rule = fn(Language) -> &'static str;
     let harnesses: [(&str, Rule, Find); 5] = [
-        ("claude-code", install::rule_block, install::find_block_with),
+        (
+            "claude-code",
+            crate::harnesses::claude_code::install::rule_block,
+            crate::harnesses::claude_code::install::find_block_with,
+        ),
         (
             "opencode",
             crate::harnesses::opencode::install::rule_block,
@@ -907,7 +920,7 @@ fn an_untouched_block_of_an_earlier_version_is_updated_and_uninstalled_cleanly()
     let previous = crate::fsutil::fingerprint(BLOCK_0_0_0.as_bytes());
     let old = with_block(&setup, &block_with(BLOCK_0_0_0, &previous));
     std::fs::write(&setup.paths().instructions, &old).unwrap();
-    let status = install::status_lines(&setup).join("\n");
+    let status = crate::harnesses::claude_code::install::status_lines(&setup).join("\n");
     assert!(
         status.contains("rule block") && status.contains("written by an earlier version"),
         "{status}"
@@ -1081,11 +1094,14 @@ fn a_block_of_an_unknown_version_is_kept_by_install_and_removed_by_uninstall() {
     let memory = Memory::open(data.path());
     run_install(&setup, &memory, yes());
     // A newer version's text: untouched (its fingerprint matches) but not one this version knows.
-    let newer = format!("{}- A rule of a newer version.\n", install::RULE_BLOCK);
+    let newer = format!(
+        "{}- A rule of a newer version.\n",
+        crate::harnesses::claude_code::install::RULE_BLOCK
+    );
     let fingerprint = crate::fsutil::fingerprint(newer.as_bytes());
     let text = with_block(&setup, &block_with(&newer, &fingerprint));
     std::fs::write(&setup.paths().instructions, &text).unwrap();
-    let status = install::status_lines(&setup).join("\n");
+    let status = crate::harnesses::claude_code::install::status_lines(&setup).join("\n");
     assert!(status.contains("written by another version"), "{status}");
 
     let (code, out) = run_install(&setup, &memory, yes());
@@ -1180,7 +1196,10 @@ fn the_wizard_asks_each_step_and_its_answers_change_what_install_does() {
     assert!(out.contains("Please type a number from 1 to 2"), "{out}");
     // Asked in step 4 (wrapped there) and repeated in the recap of the last step.
     let recap = out.split("Ready to install").nth(1).unwrap_or_default();
-    assert!(recap.contains(install::NOTHING_IS_LOST), "{out}");
+    assert!(
+        recap.contains(crate::harnesses::claude_code::install::NOTHING_IS_LOST),
+        "{out}"
+    );
     // The answers took effect.
     let config = crate::config::Config::load(data.path()).unwrap();
     assert_eq!(
@@ -1199,10 +1218,13 @@ fn the_wizard_asks_each_step_and_its_answers_change_what_install_does() {
         setup.mcp_entry("develop")
     );
     let rules = read(&setup.paths().instructions);
-    assert!(rules.contains(install::RULE_BLOCK_ANY), "{rules}");
+    assert!(
+        rules.contains(crate::harnesses::claude_code::install::RULE_BLOCK_ANY),
+        "{rules}"
+    );
     assert!(out.contains("imported 3 memories"), "{out}");
     let status = [
-        install::status_lines(&setup),
+        crate::harnesses::claude_code::install::status_lines(&setup),
         install::shared_status_lines(&setup),
     ]
     .concat()
@@ -1255,7 +1277,10 @@ fn the_auto_memory_switch_goes_back_to_what_it_was() {
     let (code, out) = run_install(&setup, &memory, yes());
     assert_eq!(code, 0, "{out}");
     assert_eq!(settings_json(&setup)["autoMemoryEnabled"], false);
-    assert!(out.contains(install::NOTHING_IS_LOST), "{out}");
+    assert!(
+        out.contains(crate::harnesses::claude_code::install::NOTHING_IS_LOST),
+        "{out}"
+    );
     // Re-run with --keep-auto-memory: back to true, the hooks stay.
     let (code, out) = run_install(
         &setup,
@@ -1397,10 +1422,10 @@ fn importing_an_export_gives_the_same_memories_back() {
     let exported_dir =
         crate::harnesses::agent::Harness::memory_dir(elsewhere.agent(), &project_dir);
     let project = Some(project_dir.display().to_string());
-    let before = import::read_dir(&original_dir, project.clone());
-    let after = import::read_dir(&exported_dir, project);
+    let before = crate::harnesses::claude_code::import::read_dir(&original_dir, project.clone());
+    let after = crate::harnesses::claude_code::import::read_dir(&exported_dir, project);
     assert!(after.problems.is_empty(), "{:?}", after.problems);
-    let key = |f: &import::MemoryFile| {
+    let key = |f: &crate::harnesses::claude_code::import::MemoryFile| {
         (
             f.slug.clone(),
             f.kind.clone(),
@@ -1418,7 +1443,7 @@ fn importing_an_export_gives_the_same_memories_back() {
     assert_eq!(a, b);
     // The listed memories keep their index line and order too.
     for slug in ["graph-first", "release-plan"] {
-        let find = |dir: &import::MemoryDir| {
+        let find = |dir: &crate::harnesses::claude_code::import::MemoryDir| {
             let f = dir.files.iter().find(|f| f.slug == slug).unwrap();
             (f.title.clone(), f.hook.clone(), f.order)
         };
@@ -2072,7 +2097,7 @@ fn opencode_uninstall_exports_every_memory_as_markdown_and_deletes_nothing() {
         "{out}"
     );
     assert!(out.contains("opencode has no file memory"), "{out}");
-    let dir = export.join(crate::memory::import::claude_slug(&project));
+    let dir = export.join(crate::harnesses::claude_code::import::claude_slug(&project));
     assert!(read(&dir.join("use-pnpm.md")).contains("use-pnpm body"));
     assert!(read(&dir.join("MEMORY.md")).contains("(use-pnpm.md)"));
     assert!(read(&export.join("global.md")).contains("tabs-not-spaces summary"));
@@ -2878,7 +2903,7 @@ fn cursor_uninstall_exports_every_memory_as_markdown() {
     );
     assert!(out.contains("Cursor has no file memory"), "{out}");
     assert!(out.contains(&native("~/.cursor/rules")), "{out}");
-    let dir = export.join(crate::memory::import::claude_slug(&project));
+    let dir = export.join(crate::harnesses::claude_code::import::claude_slug(&project));
     assert!(read(&dir.join("use-pnpm.md")).contains("use-pnpm body"));
     assert!(read(&dir.join("MEMORY.md")).contains("(use-pnpm.md)"));
     assert!(read(&export.join("global.md")).contains("tabs-not-spaces summary"));
@@ -3144,7 +3169,7 @@ fn doctor_says_what_works_without_git_bash() {
         ignored: None,
     };
     // Missing, and our hooks are the quoted form: a problem with what works and the fixes.
-    let findings = install::git_bash_findings(&missing, &quoted);
+    let findings = crate::harnesses::claude_code::install::git_bash_findings(&missing, &quoted);
     assert_eq!(findings.len(), 1);
     let finding = &findings[0];
     assert!(finding.problem);
@@ -3163,18 +3188,24 @@ fn doctor_says_what_works_without_git_bash() {
     assert!(fix.contains("graphersal-memory install"), "{fix}");
     assert!(fix.contains("Git for Windows"), "{fix}");
     assert!(fix.contains("CLAUDE_CODE_GIT_BASH_PATH"), "{fix}");
-    assert!(install::git_bash_status(&missing, &quoted).contains("the installed hooks need it"));
+    assert!(
+        crate::harnesses::claude_code::install::git_bash_status(&missing, &quoted)
+            .contains("the installed hooks need it")
+    );
     // Missing, but the hooks need no shell: fine.
-    let findings = install::git_bash_findings(&missing, &exec);
+    let findings = crate::harnesses::claude_code::install::git_bash_findings(&missing, &exec);
     assert!(!findings[0].problem);
     assert!(
         findings[0].text.contains("need no shell"),
         "{}",
         findings[0].text
     );
-    assert!(install::git_bash_status(&missing, &exec).contains("run without a shell"));
+    assert!(
+        crate::harnesses::claude_code::install::git_bash_status(&missing, &exec)
+            .contains("run without a shell")
+    );
     // Found: the path.
-    let findings = install::git_bash_findings(&found, &quoted);
+    let findings = crate::harnesses::claude_code::install::git_bash_findings(&found, &quoted);
     assert_eq!(
         findings[0].text,
         r"Git Bash: C:\Program Files\Git\bin\bash.exe (Claude Code runs shell hooks there)"
@@ -3186,7 +3217,7 @@ fn doctor_says_what_works_without_git_bash() {
             "CLAUDE_CODE_GIT_BASH_PATH=D:\\x\\git-bash.exe is not named bash.exe or sh.exe".into(),
         ),
     };
-    let findings = install::git_bash_findings(&ignored, &exec);
+    let findings = crate::harnesses::claude_code::install::git_bash_findings(&ignored, &exec);
     assert_eq!(findings.len(), 2);
     assert!(findings[0].text.contains("git-bash.exe") && findings[0].fix.is_some());
     // The doctor of a non-Windows setup has no Git Bash line.
@@ -3255,7 +3286,7 @@ fn the_shim_and_the_hook_import_the_same_files_once() {
     let file = home
         .path()
         .join(".claude/projects")
-        .join(import::claude_slug(&project))
+        .join(crate::harnesses::claude_code::import::claude_slug(&project))
         .join("memory/release-plan.md");
     std::fs::write(
         &file,
@@ -3505,7 +3536,10 @@ fn the_wizard_ends_with_a_short_recap_and_d_shows_every_change() {
     ] {
         assert!(recap.contains(line), "{line}\n{recap}");
     }
-    assert!(recap.contains(install::NOTHING_IS_LOST), "{recap}");
+    assert!(
+        recap.contains(crate::harnesses::claude_code::install::NOTHING_IS_LOST),
+        "{recap}"
+    );
     assert!(
         recap.contains("ACTION NEEDED: Codex needs your approval"),
         "{recap}"
@@ -3952,11 +3986,11 @@ fn the_start_hook_is_found_in_claude_codes_settings() {
     let home = TempDir::new("sh-home");
     let data = TempDir::new("sh-data");
     let setup = setup_in(home.path(), data.path());
-    assert!(!install::claude_start_hook_installed(setup.paths()));
+    assert!(!crate::harnesses::claude_code::install::claude_start_hook_installed(setup.paths()));
     let memory = Memory::open(data.path());
     let (code, out) = run_install(&setup, &memory, yes());
     assert_eq!(code, 0, "{out}");
-    assert!(install::claude_start_hook_installed(setup.paths()));
+    assert!(crate::harnesses::claude_code::install::claude_start_hook_installed(setup.paths()));
     memory.close();
 }
 
@@ -4050,7 +4084,8 @@ fn a_pin_survives_the_round_trip_files_graph_files() {
         "{index}"
     );
     // Read back: the same pins, titles and hooks.
-    let back = import::read_dir(&exported_dir, Some(project.clone()));
+    let back =
+        crate::harnesses::claude_code::import::read_dir(&exported_dir, Some(project.clone()));
     let pins: Vec<(&str, bool, &str, &str)> = back
         .files
         .iter()
@@ -4070,8 +4105,14 @@ fn a_pin_survives_the_round_trip_files_graph_files() {
     let fresh = Memory::open(data2.path());
     let mut connect = fresh.connector();
     let mut state = ImportState::default();
-    let plans = import::plan(vec![back], &state);
-    let report = import::apply(&plans, &mut connect, &mut state, data2.path(), None);
+    let plans = crate::harnesses::claude_code::import::plan(vec![back], &state);
+    let report = crate::harnesses::claude_code::import::apply(
+        &plans,
+        &mut connect,
+        &mut state,
+        data2.path(),
+        None,
+    );
     assert!(report.problems.is_empty(), "{:?}", report.problems);
     let context = fresh
         .runtime
@@ -4097,7 +4138,8 @@ fn a_pin_survives_the_round_trip_files_graph_files() {
         kept.starts_with("# Mine\n## Pinned\n- [Graph first](graph-first.md) — x\n"),
         "{kept}"
     );
-    let reread = import::read_dir(&exported_dir, Some(project.clone()));
+    let reread =
+        crate::harnesses::claude_code::import::read_dir(&exported_dir, Some(project.clone()));
     let pinned_of = |slug: &str| reread.files.iter().find(|f| f.slug == slug).unwrap().pinned;
     assert!(pinned_of("release-plan") && pinned_of("odd-name"), "{kept}");
     drop(connect);
@@ -4202,7 +4244,7 @@ fn an_import_keeps_the_memory_md_order_and_a_graph_order_until_the_line_moves() 
 /// A Claude Code memory directory for `project` with the memory files `(stem, kind, summary)`
 /// listed in `MEMORY.md` in that order, and a transcript naming the project.
 fn conflict_fixture(home: &Path, project: &Path, files: &[(&str, &str, &str)]) -> PathBuf {
-    let name = import::claude_slug(&project.display().to_string());
+    let name = crate::harnesses::claude_code::import::claude_slug(&project.display().to_string());
     let dir = home.join(".claude").join("projects").join(&name);
     let memory = dir.join("memory");
     std::fs::create_dir_all(&memory).unwrap();
@@ -4880,7 +4922,7 @@ fn d5_a_file_rewritten_while_install_waits_is_merged_again_never_overwritten() {
 /// line between the why and the how, a folded description, a metadata key of Claude Code's,
 /// no blank line after the front matter.
 fn formatted_fixture(home: &Path, project: &Path) -> PathBuf {
-    let name = import::claude_slug(&project.display().to_string());
+    let name = crate::harnesses::claude_code::import::claude_slug(&project.display().to_string());
     let dir = home.join(".claude").join("projects").join(&name);
     let memory = dir.join("memory");
     std::fs::create_dir_all(&memory).unwrap();
@@ -4980,7 +5022,7 @@ fn b1_b2_the_export_round_trip_makes_no_siblings_and_refreshes_files_unchanged_s
     let report = crate::memory::export::write(setup.agent(), data.path(), &rows).unwrap();
     assert_eq!(report.conflicts.len(), 1, "{report:?}");
     assert!(dir.join("crlf-rule.graphersal.md").exists());
-    let scanned = import::read_dir(&dir, Some(project.clone()));
+    let scanned = crate::harnesses::claude_code::import::read_dir(&dir, Some(project.clone()));
     assert!(
         !scanned.files.iter().any(|f| f.slug.contains("graphersal")),
         "{:?}",
@@ -5034,7 +5076,7 @@ fn a_superseded_memory_is_written_but_left_out_of_the_index_and_a_conflict_is_na
     let tabs = read(&dir.join("tabs.md"));
     assert!(tabs.contains("CONFLICT with spaces:"), "{tabs}");
     // Imported back, the notes are not part of the memory.
-    let scanned = import::read_dir(&dir, Some(project.clone()));
+    let scanned = crate::harnesses::claude_code::import::read_dir(&dir, Some(project.clone()));
     let npm = scanned.files.iter().find(|f| f.slug == "use-npm").unwrap();
     assert_eq!(npm.body, "Install with npm");
     memory.close();
@@ -5100,7 +5142,7 @@ fn memories_imported_before_m12_get_their_file_as_source_once() {
         "summary": "An old rule", "body": "Old."}),
     );
     let mut state = ImportState::default();
-    let file = import::MemoryFile {
+    let file = crate::harnesses::claude_code::import::MemoryFile {
         path: PathBuf::from("/h/.claude/projects/-w-app/memory/old-rule.md"),
         slug: "old-rule".into(),
         kind: "feedback".into(),
@@ -5122,7 +5164,10 @@ fn memories_imported_before_m12_get_their_file_as_source_once() {
     state.record_for_test(&file, "/w/app");
     state.save(data.path()).unwrap();
     let call = |name: &str, args: Value| memory.runtime.call(name, args);
-    assert_eq!(import::migrate_sources(data.path(), &call).unwrap(), 1);
+    assert_eq!(
+        crate::harnesses::claude_code::import::migrate_sources(data.path(), &call).unwrap(),
+        1
+    );
     let read = memory.call("/w/app", "memory", json!({"slug": "old-rule"}));
     assert_eq!(
         read["source"], "/h/.claude/projects/-w-app/memory/old-rule.md",
@@ -5136,7 +5181,10 @@ fn memories_imported_before_m12_get_their_file_as_source_once() {
         json!({"slug": "old-rule", "kind": "feedback",
         "summary": "An old rule, rewritten", "body": "New."}),
     );
-    assert_eq!(import::migrate_sources(data.path(), &call).unwrap(), 0);
+    assert_eq!(
+        crate::harnesses::claude_code::import::migrate_sources(data.path(), &call).unwrap(),
+        0
+    );
     let read = memory.call("/w/app", "memory", json!({"slug": "old-rule"}));
     assert_eq!(read["source"], "remember", "{read}");
     memory.close();

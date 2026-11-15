@@ -1014,7 +1014,10 @@ impl Daemon {
         ));
         if name == crate::runtime::registry::DEFAULT_STORE {
             let call = |function: &str, args: serde_json::Value| store.call(function, args);
-            match crate::memory::import::migrate_sources(&self.options.data_dir, &call) {
+            match crate::harnesses::claude_code::import::migrate_sources(
+                &self.options.data_dir,
+                &call,
+            ) {
                 Ok(0) => {}
                 Ok(n) => log(&format!(
                     "marked {n} memories imported before the import recorded their files"

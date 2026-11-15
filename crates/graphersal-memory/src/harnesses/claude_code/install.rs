@@ -13,9 +13,9 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::harnesses::agent::{Harness, Kind};
+use crate::harnesses::claude_code::import::ImportState;
 use crate::install::language::Language;
 use crate::install::*;
-use crate::memory::import::{self, ImportState};
 use crate::{fsutil, install::jsonedit};
 
 /// The text of the managed rule block (between its marker lines) with the English memory
@@ -1061,10 +1061,12 @@ pub fn claude_doctor(setup: &Setup) -> Vec<Finding> {
         ));
     }
     match ImportState::load(&setup.data_dir).and_then(|state| {
-        Ok(import::totals(&import::plan(
-            import::scan(&setup.paths().projects)?,
-            &state,
-        )))
+        Ok(crate::harnesses::claude_code::import::totals(
+            &crate::harnesses::claude_code::import::plan(
+                crate::harnesses::claude_code::import::scan(&setup.paths().projects)?,
+                &state,
+            ),
+        ))
     }) {
         Ok((_, _, new, changed, _)) if new + changed > 0 => findings.push(problem(
             format!(
@@ -1155,4 +1157,12 @@ pub fn git_bash_status(git_bash: &crate::install::winshell::GitBash, settings: &
             graphersal-memory hooks run without a shell)"
             .to_string(),
     }
+}
+
+/// Whether Claude Code's settings file (`paths.settings`) holds our SessionStart hook (then
+/// the hook delivers the start context, and the MCP instructions leave it out).
+pub fn claude_start_hook_installed(paths: &ClaudePaths) -> bool {
+    read_json(&paths.settings, &mut Vec::new())["hooks"]["SessionStart"]
+        .as_array()
+        .is_some_and(|groups| groups.iter().any(is_our_hook_group))
 }

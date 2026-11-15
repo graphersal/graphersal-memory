@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::install::ClaudePaths;
+use crate::harnesses::claude_code::import::ImportState;
+use crate::harnesses::claude_code::install::ClaudePaths;
 use crate::memory::hook::*;
-use crate::memory::import::{self, Connect, ImportState};
+use crate::memory::import::{self, Connect};
 
 /// The working directory of the session: `cwd` of the hook input, else `CLAUDE_PROJECT_DIR`,
 /// else this process's directory.
@@ -103,7 +104,9 @@ pub fn import_project(
 ) -> (usize, Vec<String>) {
     let memory_dir = paths
         .projects
-        .join(import::claude_slug(&dir.display().to_string()))
+        .join(crate::harnesses::claude_code::import::claude_slug(
+            &dir.display().to_string(),
+        ))
         .join("memory");
     if !memory_dir.is_dir() {
         return (0, Vec::new());
@@ -131,22 +134,23 @@ fn sync(
     data_dir: &Path,
     connect: &mut Connect<'_>,
     deadline: Instant,
-) -> Result<import::ImportReport, String> {
-    let done = import::with_lock(data_dir, Duration::from_secs(2), || {
-        let project = crate::runtime::mcp::project_key(None, session_dir);
-        let dir = import::read_dir(memory_dir, Some(project));
-        let mut state = ImportState::load(data_dir)?;
-        let plans = import::plan(vec![dir], &state);
-        Ok::<_, String>(import::apply(
-            &plans,
-            connect,
-            &mut state,
-            data_dir,
-            Some(deadline),
-        ))
-    })?;
+) -> Result<crate::harnesses::claude_code::import::ImportReport, String> {
+    let done =
+        crate::harnesses::claude_code::import::with_lock(data_dir, Duration::from_secs(2), || {
+            let project = crate::runtime::mcp::project_key(None, session_dir);
+            let dir = crate::harnesses::claude_code::import::read_dir(memory_dir, Some(project));
+            let mut state = ImportState::load(data_dir)?;
+            let plans = crate::harnesses::claude_code::import::plan(vec![dir], &state);
+            Ok::<_, String>(crate::harnesses::claude_code::import::apply(
+                &plans,
+                connect,
+                &mut state,
+                data_dir,
+                Some(deadline),
+            ))
+        })?;
     // `None`: another hook or import runs right now; it imports the same files.
-    done.unwrap_or_else(|| Ok(import::ImportReport::default()))
+    done.unwrap_or_else(|| Ok(crate::harnesses::claude_code::import::ImportReport::default()))
 }
 
 /// Runs a hook with the time limit: never fails, always returns exit code 0 (without the

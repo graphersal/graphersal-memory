@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::bench::{self, Call, DryRun, Harness, Kind, Options, questions};
 use crate::cli::BenchArm;
-use crate::install::ClaudePaths;
+use crate::harnesses::claude_code::install::ClaudePaths;
 use crate::runtime::mcp_tests::TempDir;
 
 const PROJECT: &str = "/w/bench-app";
@@ -126,7 +126,7 @@ impl Machine {
         let project_dir = machine
             .claude()
             .projects
-            .join(crate::memory::import::claude_slug(PROJECT));
+            .join(crate::harnesses::claude_code::import::claude_slug(PROJECT));
         std::fs::create_dir_all(project_dir.join("memory")).unwrap();
         let transcript = project_dir.join("0f0e0d0c-1111-2222-3333-444444444444.jsonl");
         std::fs::write(&transcript, fixture()).unwrap();
@@ -775,10 +775,13 @@ fn without_finished_sessions_the_bench_says_so_before_asking_and_names_projects_
     let other = TempDir::new("bench-other-project");
     std::fs::create_dir_all(other.path().join(".git")).unwrap();
     let other_text = other.path().display().to_string();
-    let other_dir = machine
-        .claude()
-        .projects
-        .join(crate::memory::import::claude_slug(&other_text));
+    let other_dir =
+        machine
+            .claude()
+            .projects
+            .join(crate::harnesses::claude_code::import::claude_slug(
+                &other_text,
+            ));
     std::fs::create_dir_all(&other_dir).unwrap();
     let transcript = other_dir.join("1f0e0d0c-1111-2222-3333-444444444444.jsonl");
     std::fs::write(

@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::harnesses::agent::Kind;
-use crate::install::{ClaudePaths, Setup};
+use crate::harnesses::claude_code::install::ClaudePaths;
+use crate::install::Setup;
 use crate::memory::import::Connect;
 use crate::memory::sessions::Request;
 

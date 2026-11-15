@@ -208,11 +208,11 @@ mod tests {
     use std::time::Instant;
 
     use crate::harnesses::claude_code::hook::*;
+    use crate::harnesses::claude_code::install::ClaudePaths;
     use crate::harnesses::codex::hook::{codex_request, run_codex};
     use crate::harnesses::cursor::hook::{CURSOR_START_LINE, is_cursor_input};
     use crate::harnesses::cursor::hook::{cursor_request, run_cursor, run_cursor_with_context};
     use crate::harnesses::opencode::hook::run_opencode;
-    use crate::install::ClaudePaths;
     use crate::memory::import;
 
     #[test]
