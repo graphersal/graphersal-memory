@@ -53,6 +53,7 @@
 //!   `uninstall` writes readable Markdown files into `~/graphersal-memory-export/cursor/`.
 
 pub mod install;
+pub mod other;
 pub mod sessions;
 
 use std::path::{Path, PathBuf};
@@ -221,6 +222,10 @@ impl Harness for Cursor {
 
     fn develop_on(&self, setup: &crate::install::Setup) -> bool {
         install::inspect(setup).develop_server != crate::install::PartState::Missing
+    }
+
+    fn other_memory(&self) -> Option<&dyn crate::coexist::OtherMemory> {
+        Some(self)
     }
 
     fn status_lines(&self, setup: &crate::install::Setup) -> Vec<String> {

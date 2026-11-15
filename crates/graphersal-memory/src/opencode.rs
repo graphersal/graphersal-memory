@@ -54,6 +54,7 @@
 //!   `~/graphersal-memory-export/opencode/` instead ([`OpenCode::memory_dir`]).
 
 pub mod install;
+pub mod other;
 pub mod sessions;
 
 use std::path::{Path, PathBuf};
@@ -425,6 +426,10 @@ impl Harness for OpenCode {
 
     fn has_plugin(&self) -> bool {
         true
+    }
+
+    fn other_memory(&self) -> Option<&dyn crate::coexist::OtherMemory> {
+        Some(self)
     }
 
     fn status_lines(&self, setup: &crate::install::Setup) -> Vec<String> {

@@ -737,9 +737,10 @@ fn instruction_lines_about_memory_elsewhere_are_found_and_never_edited() {
         .map(|m| m.file.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
     assert_eq!(files, ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"]);
+    // In the registry's order.
     assert_eq!(
         found.mentions[2].loaded_by,
-        [Kind::Codex, Kind::OpenCode, Kind::Cursor, Kind::CodeWhale]
+        [Kind::OpenCode, Kind::Codex, Kind::Cursor, Kind::CodeWhale]
     );
     let doctor = doctor_texts(&setup);
     let line = doctor
@@ -1169,6 +1170,10 @@ fn a_rule_block_naming_other_tools_is_ours_for_update_and_removal() {
 
 #[test]
 fn the_switch_off_edits_undo_exactly() {
+    // The edit needs no files: any setup names the harnesses.
+    let home = TempDir::new("disable-home");
+    let data = TempDir::new("disable-data");
+    let setup = setup_in(home.path(), data.path());
     let server = |harness: Kind, path: &[&str], entry: Value| coexist::Server {
         harness,
         name: "mem0".to_string(),
@@ -1183,10 +1188,13 @@ fn the_switch_off_edits_undo_exactly() {
     // opencode 2.x: "disabled".
     let text = "{\n  \"mcp\": {\n    \"servers\": {\n      \"mem0\": {\"type\": \"local\", \"command\": [\"m\"]}\n    }\n  }\n}\n";
     let entry = json!({"type": "local", "command": ["m"]});
-    let (off, record) =
-        coexist::disable_edit(&server(Kind::OpenCode, &["mcp", "servers"], entry), text)
-            .unwrap()
-            .unwrap();
+    let (off, record) = coexist::disable_edit(
+        &setup,
+        &server(Kind::OpenCode, &["mcp", "servers"], entry),
+        text,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
         crate::jsonedit::value_of(&off).unwrap()["mcp"]["servers"]["mem0"]["disabled"],
         true
@@ -1204,6 +1212,7 @@ fn the_switch_off_edits_undo_exactly() {
     // Codex: a value that was there is put back.
     let text = "[mcp_servers.mem0]\ncommand = \"m\"\nenabled = true\n";
     let (off, record) = coexist::disable_edit(
+        &setup,
         &server(
             Kind::Codex,
             &["mcp_servers"],
@@ -1223,6 +1232,7 @@ fn the_switch_off_edits_undo_exactly() {
     // A Codex entry written inline cannot be switched off in place.
     assert_eq!(
         coexist::disable_edit(
+            &setup,
             &server(Kind::Codex, &["mcp_servers"], json!({"command": "m"})),
             "mcp_servers.mem0 = { command = \"m\" }\n"
         )

@@ -316,6 +316,83 @@ pub struct BuiltIn {
     pub text: String,
     /// How many entries it holds (files), 0 when unknown.
     pub entries: usize,
+    /// Whether it alone makes other memory worth a section (Claude Code's auto-memory, which
+    /// every Claude Code has, does not).
+    pub notable: bool,
+}
+
+/// An object of MCP registrations in a harness's configuration ([`OtherMemory::server_sources`]).
+pub struct ServerSource {
+    /// The configuration file.
+    pub file: PathBuf,
+    /// The key path of the object in it (`mcpServers`, `mcp`, `mcp.servers`, `mcp_servers`).
+    pub path: Vec<String>,
+    /// The object.
+    pub entries: Value,
+    /// `None` at user scope; else the project whose own registration it is.
+    pub project: Option<String>,
+    /// The MCP tool names the harness's permission rules give per server (Claude Code).
+    pub permission_tools: BTreeMap<String, Vec<String>>,
+    /// Members of the object that are not servers (opencode 2.x's `servers` inside `mcp`).
+    pub skip: Vec<String>,
+}
+
+impl ServerSource {
+    /// The object at `path` of `value` (read from `file`), at user scope or of `project`.
+    pub fn of(file: &Path, path: &[&str], value: &Value, project: Option<String>) -> Self {
+        let entries = path.iter().fold(value, |v, k| &v[*k]).clone();
+        Self {
+            file: file.to_path_buf(),
+            path: path.iter().map(|k| k.to_string()).collect(),
+            entries,
+            project,
+            permission_tools: BTreeMap::new(),
+            skip: Vec::new(),
+        }
+    }
+}
+
+/// What a harness tells about other memory beside graphersal-memory (M15): where another
+/// memory tool may be registered, its own built-in memory, plugins, the instruction files it
+/// loads, and how one of its MCP entries is switched off.
+pub trait OtherMemory {
+    /// The objects of MCP registrations in its configuration (user scope, and `project`'s).
+    fn server_sources(&self, setup: &Setup, project: Option<&Path>) -> Vec<ServerSource>;
+    /// Its built-in memory, when it has one (the harness is on this machine).
+    fn built_in(&self, _setup: &Setup) -> Option<BuiltIn> {
+        None
+    }
+    /// Plugins or hooks of another memory tool in its configuration.
+    fn plugins(&self, _setup: &Setup) -> Vec<Plugin> {
+        Vec::new()
+    }
+    /// The instruction files it loads (user scope, and `project`'s), existing or not.
+    fn instruction_files(&self, setup: &Setup, project: Option<&Path>) -> Vec<PathBuf>;
+    /// `text` (the server's configuration file) with `server` switched off, and the record
+    /// that undoes it; `None` when it cannot be done in place (then the user is told how).
+    fn disable_edit(&self, server: &Server, text: &str) -> Result<Option<(String, Value)>, String>;
+    /// How to switch `server` off by hand.
+    fn off_by_hand(&self, server: &Server) -> String;
+}
+
+/// The files with extension `ext` directly in `dir`, sorted.
+pub(crate) fn files_with_extension(dir: &Path, ext: &str) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == ext))
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    found
+}
+
+/// Whether `text` names a known memory tool (a plugin's name or a hook's command).
+pub(crate) fn names_memory_tool(text: &str) -> bool {
+    known_tool(&text.to_lowercase(), text).is_some()
 }
 
 /// A memory directory that another program (or the user by hand) writes.
@@ -371,7 +448,7 @@ impl Findings {
             || !self.writers.is_empty()
             || !self.returning.is_empty()
             || !self.ignored.is_empty()
-            || self.built_in.iter().any(|b| b.harness != Kind::ClaudeCode)
+            || self.built_in.iter().any(|b| b.notable)
     }
 
     /// The user-scope servers of the harnesses `kinds` (what install can name or switch off).
@@ -573,7 +650,7 @@ fn entry_off(entry: &Value) -> bool {
 }
 
 /// The tools Claude Code's permission rules name per server (`mcp__<server>__<tool>`).
-fn claude_permission_tools(setup: &Setup) -> BTreeMap<String, Vec<String>> {
+pub(crate) fn claude_permission_tools(setup: &Setup) -> BTreeMap<String, Vec<String>> {
     let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let settings = crate::install::read_json(&setup.paths.settings, &mut Vec::new());
     for list in ["allow", "ask", "deny"] {
@@ -623,6 +700,7 @@ fn servers_in(
     entries: &Value,
     project: Option<String>,
     permission_tools: &BTreeMap<String, Vec<String>>,
+    skip: &[String],
     off_by_us: &[(Kind, PathBuf, String, Value)],
     out: &mut Vec<Server>,
 ) {
@@ -635,7 +713,7 @@ fn servers_in(
             || name == USE_SERVER
             || name == DEVELOP_SERVER
             || ours.entry(entry)
-            || (harness == Kind::OpenCode && name == "servers" && path == ["mcp"])
+            || skip.contains(name)
         {
             continue;
         }
@@ -671,143 +749,27 @@ fn servers_in(
 pub fn servers(setup: &Setup, project: Option<&Path>) -> Vec<Server> {
     let mut out = Vec::new();
     let off_by_us = recorded_off(setup);
-    let permission_tools = claude_permission_tools(setup);
-    let none = BTreeMap::new();
-    // Claude Code: user scope, local scopes, the project's .mcp.json.
-    let config = crate::install::read_json(&setup.paths.user_config, &mut Vec::new());
-    let user_file = setup.paths.user_config.clone();
-    servers_in(
-        setup,
-        Kind::ClaudeCode,
-        &user_file,
-        &["mcpServers"],
-        &config["mcpServers"],
-        None,
-        &permission_tools,
-        &off_by_us,
-        &mut out,
-    );
-    if let Some(projects) = config["projects"].as_object() {
-        for (path, value) in projects {
+    for kind in Kind::ALL {
+        let harness = setup.agent_of(kind);
+        let Some(other) = harness.other_memory() else {
+            continue;
+        };
+        for source in other.server_sources(setup, project) {
+            let path: Vec<&str> = source.path.iter().map(String::as_str).collect();
             servers_in(
                 setup,
-                Kind::ClaudeCode,
-                &user_file,
-                &["projects", path, "mcpServers"],
-                &value["mcpServers"],
-                Some(path.clone()),
-                &permission_tools,
-                &[],
-                &mut out,
-            );
-        }
-    }
-    if let Some(root) = project {
-        let file = root.join(".mcp.json");
-        let value = crate::install::read_json(&file, &mut Vec::new());
-        servers_in(
-            setup,
-            Kind::ClaudeCode,
-            &file,
-            &["mcpServers"],
-            &value["mcpServers"],
-            Some(root.display().to_string()),
-            &permission_tools,
-            &[],
-            &mut out,
-        );
-    }
-    // opencode: mcp (1.x, and 2.x's legacy entries) and mcp.servers (2.x).
-    let file = setup.opencode.config_file.clone();
-    let value = crate::install::read_json(&file, &mut Vec::new());
-    servers_in(
-        setup,
-        Kind::OpenCode,
-        &file,
-        &["mcp"],
-        &value["mcp"],
-        None,
-        &none,
-        &off_by_us,
-        &mut out,
-    );
-    servers_in(
-        setup,
-        Kind::OpenCode,
-        &file,
-        &["mcp", "servers"],
-        &value["mcp"]["servers"],
-        None,
-        &none,
-        &off_by_us,
-        &mut out,
-    );
-    // Codex: [mcp_servers.*].
-    let file = setup.codex.config_file.clone();
-    if let Ok(Some(text)) = read_text(&file)
-        && let Ok(doc) = tomledit::parse(&text)
-    {
-        servers_in(
-            setup,
-            Kind::Codex,
-            &file,
-            &["mcp_servers"],
-            &doc["mcp_servers"],
-            None,
-            &none,
-            &off_by_us,
-            &mut out,
-        );
-    }
-    // Cursor: ~/.cursor/mcp.json and the project's .cursor/mcp.json.
-    let file = setup.cursor.mcp_file.clone();
-    let value = crate::install::read_json(&file, &mut Vec::new());
-    servers_in(
-        setup,
-        Kind::Cursor,
-        &file,
-        &["mcpServers"],
-        &value["mcpServers"],
-        None,
-        &none,
-        &off_by_us,
-        &mut out,
-    );
-    if let Some(root) = project {
-        let file = root.join(".cursor").join("mcp.json");
-        let value = crate::install::read_json(&file, &mut Vec::new());
-        servers_in(
-            setup,
-            Kind::Cursor,
-            &file,
-            &["mcpServers"],
-            &value["mcpServers"],
-            Some(root.display().to_string()),
-            &none,
-            &[],
-            &mut out,
-        );
-    }
-    // CodeWhale: its mcp.json (`servers` or `mcpServers`) and the project's .codewhale/mcp.json.
-    let mut codewhale_files = vec![(setup.codewhale.mcp_file.clone(), None)];
-    if let Some(root) = project {
-        codewhale_files.push((
-            root.join(".codewhale").join("mcp.json"),
-            Some(root.display().to_string()),
-        ));
-    }
-    for (file, owner) in codewhale_files {
-        let value = crate::install::read_json(&file, &mut Vec::new());
-        for key in ["servers", "mcpServers"] {
-            servers_in(
-                setup,
-                Kind::CodeWhale,
-                &file,
-                &[key],
-                &value[key],
-                owner.clone(),
-                &none,
-                if owner.is_none() { &off_by_us } else { &[] },
+                kind,
+                &source.file,
+                &path,
+                &source.entries,
+                source.project.clone(),
+                &source.permission_tools,
+                &source.skip,
+                if source.project.is_none() {
+                    &off_by_us
+                } else {
+                    &[]
+                },
                 &mut out,
             );
         }
@@ -849,89 +811,9 @@ pub fn servers(setup: &Setup, project: Option<&Path>) -> Vec<Server> {
 /// Memory plugins and hooks of other tools (by known names).
 pub fn plugins(setup: &Setup) -> Vec<Plugin> {
     let mut out = Vec::new();
-    let named = |text: &str| -> bool {
-        let lower = text.to_lowercase();
-        known_tool(&lower, text).is_some()
-    };
-    let settings = crate::install::read_json(&setup.paths.settings, &mut Vec::new());
-    if let Some(enabled) = settings["enabledPlugins"].as_object() {
-        for (name, on) in enabled {
-            if *on != Value::Bool(false) && named(name) {
-                out.push(Plugin {
-                    harness: Kind::ClaudeCode,
-                    name: name.clone(),
-                    file: setup.paths.settings.clone(),
-                });
-            }
-        }
-    }
-    let installed_file = setup
-        .paths
-        .config_dir
-        .join("plugins")
-        .join("installed_plugins.json");
-    let installed = crate::install::read_json(&installed_file, &mut Vec::new());
-    if let Some(plugins) = installed["plugins"].as_object() {
-        for name in plugins.keys() {
-            if named(name) && !out.iter().any(|p| p.name == *name) {
-                out.push(Plugin {
-                    harness: Kind::ClaudeCode,
-                    name: name.clone(),
-                    file: installed_file.clone(),
-                });
-            }
-        }
-    }
-    let ours = setup.ours();
-    if let Some(events) = settings["hooks"].as_object() {
-        for groups in events.values() {
-            for group in groups.as_array().into_iter().flatten() {
-                for hook in group["hooks"].as_array().into_iter().flatten() {
-                    let command = hook["command"].as_str().unwrap_or_default();
-                    if !ours.hook(hook) && named(command) && !out.iter().any(|p| p.name == command)
-                    {
-                        out.push(Plugin {
-                            harness: Kind::ClaudeCode,
-                            name: command.to_string(),
-                            file: setup.paths.settings.clone(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    let config = crate::install::read_json(&setup.opencode.config_file, &mut Vec::new());
-    for item in config["plugin"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
-        if named(item) {
-            out.push(Plugin {
-                harness: Kind::OpenCode,
-                name: item.to_string(),
-                file: setup.opencode.config_file.clone(),
-            });
-        }
-    }
-    for dir in ["plugin", "plugins"] {
-        let dir = setup.opencode.config_dir.join(dir);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut names: Vec<String> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|name| name != crate::opencode::PLUGIN_FILE && named(name))
-            .collect();
-        names.sort();
-        for name in names {
-            out.push(Plugin {
-                harness: Kind::OpenCode,
-                name: name.clone(),
-                file: dir.join(name),
-            });
+    for kind in Kind::ALL {
+        if let Some(other) = setup.agent_of(kind).other_memory() {
+            out.extend(other.plugins(setup));
         }
     }
     out
@@ -939,100 +821,25 @@ pub fn plugins(setup: &Setup) -> Vec<Plugin> {
 
 /// The harnesses' own memory, for the harnesses whose program or configuration is here.
 pub fn built_in(setup: &Setup) -> Vec<BuiltIn> {
-    let mut out = Vec::new();
     let present = |kind: Kind| {
         setup.program(kind).is_some()
             || setup.leftovers().iter().any(|(k, _)| *k == kind)
             || State::exists_of(setup, kind)
     };
-    if present(Kind::ClaudeCode) {
-        let settings = crate::install::read_json(&setup.paths.settings, &mut Vec::new());
-        let off = settings["autoMemoryEnabled"] == Value::Bool(false);
-        let dirs = crate::import::scan(&setup.paths.projects).unwrap_or_default();
-        let files: usize = dirs.iter().map(|d| d.files.len()).sum();
-        out.push(BuiltIn {
-            harness: Kind::ClaudeCode,
-            text: format!(
-                "Claude Code's auto-memory: {}; {files} memory file{} in {} project{} ({})",
-                if off { "off" } else { "on" },
-                if files == 1 { "" } else { "s" },
-                dirs.len(),
-                if dirs.len() == 1 { "" } else { "s" },
-                setup.show(&setup.paths.projects.display().to_string())
-            ),
-            entries: files,
-        });
-    }
-    if present(Kind::Codex) {
-        let on = read_text(&setup.codex.config_file)
-            .ok()
-            .flatten()
-            .and_then(|text| tomledit::parse(&text).ok())
-            .is_some_and(|doc| crate::codex::install::memories_on(&doc));
-        let mut files = 0;
-        for dir in ["memories_v2", "memories"] {
-            files += count_files(&setup.codex.codex_home.join(dir), 2);
+    let mut out = Vec::new();
+    for kind in Kind::ALL {
+        if !present(kind) {
+            continue;
         }
-        if on || files > 0 {
-            out.push(BuiltIn {
-                harness: Kind::Codex,
-                text: format!(
-                    "Codex's memories: {}; {files} file{} in {}",
-                    if on { "on" } else { "off" },
-                    if files == 1 { "" } else { "s" },
-                    setup.show(
-                        &setup
-                            .codex
-                            .codex_home
-                            .join("memories_v2")
-                            .display()
-                            .to_string()
-                    )
-                ),
-                entries: files,
-            });
+        if let Some(other) = setup.agent_of(kind).other_memory() {
+            out.extend(other.built_in(setup));
         }
-    }
-    if present(Kind::CodeWhale) {
-        let on = crate::codewhale::memory_on(
-            &read_text(&setup.codewhale.config_file)
-                .ok()
-                .flatten()
-                .and_then(|text| tomledit::parse(&text).ok())
-                .unwrap_or(Value::Null),
-            setup.codewhale.memory_env_on,
-        );
-        let store = &setup.codewhale.memory_store;
-        let entries = crate::codewhale::memory::read(store)
-            .map(|e| e.len())
-            .unwrap_or(0);
-        if on || store.is_file() {
-            out.push(BuiltIn {
-                harness: Kind::CodeWhale,
-                text: format!(
-                    "CodeWhale's memory: {}; {entries} reviewed entr{} in {}",
-                    if on { "on" } else { "off" },
-                    if entries == 1 { "y" } else { "ies" },
-                    setup.show(&store.display().to_string())
-                ),
-                entries,
-            });
-        }
-    }
-    if present(Kind::Cursor) {
-        out.push(BuiltIn {
-            harness: Kind::Cursor,
-            text: "Cursor's Memories: kept by Cursor itself, not readable from files (Cursor \
-                   Settings, Rules & Memories, shows and switches them)"
-                .to_string(),
-            entries: 0,
-        });
     }
     out
 }
 
 /// The number of files under `dir`, `depth` levels deep at most.
-fn count_files(dir: &Path, depth: usize) -> usize {
+pub(crate) fn count_files(dir: &Path, depth: usize) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
@@ -1057,131 +864,32 @@ fn count_files(dir: &Path, depth: usize) -> usize {
 /// that load each one.
 pub fn instruction_files(setup: &Setup, project: Option<&Path>) -> Vec<(PathBuf, Vec<Kind>)> {
     let mut files: Vec<(PathBuf, Vec<Kind>)> = Vec::new();
-    let mut add = |path: PathBuf, kind: Kind| {
-        if !path.is_file() {
-            return;
-        }
-        match files.iter_mut().find(|(p, _)| *p == path) {
-            Some((_, kinds)) => {
-                if !kinds.contains(&kind) {
-                    kinds.push(kind);
-                }
-            }
-            None => files.push((path, vec![kind])),
-        }
+    // The user-level files of every harness first, then the project's.
+    let passes = if project.is_some() {
+        vec![None, project]
+    } else {
+        vec![None]
     };
-    let md_in = |dir: &Path, ext: &str| -> Vec<PathBuf> {
-        let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().is_some_and(|e| e == ext))
-                    .collect()
-            })
-            .unwrap_or_default();
-        found.sort();
-        found
-    };
-    // Claude Code.
-    add(setup.paths.instructions.clone(), Kind::ClaudeCode);
-    for file in md_in(&setup.paths.config_dir.join("rules"), "md") {
-        if file
-            .file_name()
-            .is_some_and(|n| n != crate::agents::GLOBAL_RULES_FILE)
-        {
-            add(file, Kind::ClaudeCode);
-        }
-    }
-    // Codex.
-    add(
-        setup.codex.codex_home.join("AGENTS.override.md"),
-        Kind::Codex,
-    );
-    add(setup.codex.codex_home.join("AGENTS.md"), Kind::Codex);
-    // opencode: its AGENTS.md and the files listed in `instructions` (not ours, no globs).
-    add(setup.opencode.config_dir.join("AGENTS.md"), Kind::OpenCode);
-    let config = crate::install::read_json(&setup.opencode.config_file, &mut Vec::new());
-    for item in config["instructions"]
-        .as_array()
+    for (pass, kind) in passes
         .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
+        .flat_map(|pass| Kind::ALL.into_iter().map(move |kind| (pass, kind)))
     {
-        if item.contains('*') || item.ends_with(crate::opencode::RULES_FILE) {
+        let harness = setup.agent_of(kind);
+        let Some(other) = harness.other_memory() else {
             continue;
-        }
-        let path = if let Some(rest) = item.strip_prefix("~/") {
-            setup.opencode.home.join(rest)
-        } else if Path::new(item).is_absolute() {
-            PathBuf::from(item)
-        } else {
-            setup.opencode.config_dir.join(item)
         };
-        add(path, Kind::OpenCode);
-    }
-    // opencode also loads Claude Code's files where it has none of its own (its "Claude Code
-    // compatibility"): ~/.claude/CLAUDE.md when it has no global AGENTS.md, unless switched off
-    // by OPENCODE_DISABLE_CLAUDE_CODE(_PROMPT).
-    let opencode_reads_claude = setup.opencode.config_dir.is_dir()
-        && std::env::var_os("OPENCODE_DISABLE_CLAUDE_CODE").is_none();
-    if opencode_reads_claude
-        && std::env::var_os("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT").is_none()
-        && !setup.opencode.config_dir.join("AGENTS.md").is_file()
-    {
-        add(setup.paths.instructions.clone(), Kind::OpenCode);
-    }
-    // Codex: the extra file names of `project_doc_fallback_filenames` (CLAUDE.md, for example).
-    let codex_fallbacks: Vec<String> = std::fs::read_to_string(&setup.codex.config_file)
-        .ok()
-        .and_then(|text| crate::tomledit::parse(&text).ok())
-        .map(|config| {
-            config["project_doc_fallback_filenames"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .filter(|name| !name.contains(['/', '\\']) && !name.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    // CodeWhale: the global file it loads (the first of its candidates).
-    add(
-        crate::codewhale::instruction_file(&setup.codewhale.home),
-        Kind::CodeWhale,
-    );
-    // Cursor: user rules other than ours.
-    for file in md_in(&setup.cursor.cursor_dir.join("rules"), "mdc") {
-        if file != setup.cursor.rules_file {
-            add(file, Kind::Cursor);
-        }
-    }
-    if let Some(root) = project {
-        add(root.join("CLAUDE.md"), Kind::ClaudeCode);
-        add(root.join("CLAUDE.local.md"), Kind::ClaudeCode);
-        add(root.join(".claude").join("CLAUDE.md"), Kind::ClaudeCode);
-        for file in md_in(&root.join(".claude").join("rules"), "md") {
-            add(file, Kind::ClaudeCode);
-        }
-        for kind in [Kind::Codex, Kind::OpenCode, Kind::Cursor, Kind::CodeWhale] {
-            add(root.join("AGENTS.md"), kind);
-        }
-        add(root.join("AGENTS.override.md"), Kind::Codex);
-        // opencode: the project's CLAUDE.md when the project has no AGENTS.md.
-        if opencode_reads_claude && !root.join("AGENTS.md").is_file() {
-            add(root.join("CLAUDE.md"), Kind::OpenCode);
-        }
-        // Codex: its fallback names, when the project has no AGENTS(.override).md.
-        if !root.join("AGENTS.md").is_file()
-            && !root.join("AGENTS.override.md").is_file()
-            && let Some(name) = codex_fallbacks.iter().find(|n| root.join(n).is_file())
-        {
-            add(root.join(name), Kind::Codex);
-        }
-        add(root.join(".cursorrules"), Kind::Cursor);
-        for file in md_in(&root.join(".cursor").join("rules"), "mdc") {
-            add(file, Kind::Cursor);
+        for path in other.instruction_files(setup, pass) {
+            if !path.is_file() {
+                continue;
+            }
+            match files.iter_mut().find(|(p, _)| *p == path) {
+                Some((_, kinds)) => {
+                    if !kinds.contains(&kind) {
+                        kinds.push(kind);
+                    }
+                }
+                None => files.push((path, vec![kind])),
+            }
         }
     }
     files
@@ -1555,16 +1263,6 @@ pub fn detect(setup: &Setup, project: Option<&Path>) -> Findings {
 // Switching another tool's entry off and on again
 // ----------------------------------------------------------------------------------------
 
-/// The opencode switch of an entry in `path`: 2.x entries (`mcp.servers`) have `"disabled"`,
-/// 1.x and legacy ones `"enabled"`. Returns (key, value when off).
-fn opencode_switch(path: &[String]) -> (&'static str, bool) {
-    if path.len() == 2 && path[1] == "servers" {
-        ("disabled", true)
-    } else {
-        ("enabled", false)
-    }
-}
-
 /// `text` (the server's configuration file) with `server` switched off, and the record that
 /// undoes it; `None` when it cannot be done in place (then the user is told how).
 /// - Claude Code and Cursor have no switched-off state for a user-scope entry: it is removed
@@ -1573,57 +1271,14 @@ fn opencode_switch(path: &[String]) -> (&'static str, bool) {
 ///   value before, `null` when absent).
 /// - Codex: `enabled = false` in its table (`how: toml`, with the value before).
 /// - CodeWhale: `"disabled": true` (`how: flag`, `off: true`, with the value before).
-pub fn disable_edit(server: &Server, text: &str) -> Result<Option<(String, Value)>, String> {
-    let path: Vec<&str> = server.path.iter().map(String::as_str).collect();
-    match server.harness {
-        Kind::ClaudeCode | Kind::Cursor => Ok(jsonedit::remove_member(text, &path, &server.name)?
-            .map(|new| {
-                (
-                    new,
-                    json!({"how": "removed", "path": server.path, "entry": server.entry}),
-                )
-            })),
-        Kind::OpenCode => {
-            let (key, off) = opencode_switch(&server.path);
-            let previous = server.entry.get(key).cloned().unwrap_or(Value::Null);
-            let mut entry_path = path.clone();
-            entry_path.push(&server.name);
-            Ok(jsonedit::set_member(text, &entry_path, key, &json!(off))?.map(|(new, _)| {
-                (
-                    new,
-                    json!({"how": "flag", "path": server.path, "key": key, "previous": previous}),
-                )
-            }))
-        }
-        Kind::CodeWhale => {
-            let previous = server.entry.get("disabled").cloned().unwrap_or(Value::Null);
-            let mut entry_path = path.clone();
-            entry_path.push(&server.name);
-            Ok(
-                jsonedit::set_member(text, &entry_path, "disabled", &json!(true))?.map(
-                    |(new, _)| {
-                        (
-                            new,
-                            json!({"how": "flag", "path": server.path, "key": "disabled",
-                                   "off": true, "previous": previous}),
-                        )
-                    },
-                ),
-            )
-        }
-        Kind::Codex => {
-            let previous = server.entry.get("enabled").cloned().unwrap_or(Value::Null);
-            Ok(
-                tomledit::set_table_bool(text, &["mcp_servers", &server.name], "enabled", false)?
-                    .map(|new| {
-                        (
-                            new,
-                            json!({"how": "toml", "path": server.path, "key": "enabled",
-                                   "previous": previous}),
-                        )
-                    }),
-            )
-        }
+pub fn disable_edit(
+    setup: &Setup,
+    server: &Server,
+    text: &str,
+) -> Result<Option<(String, Value)>, String> {
+    match setup.agent_of(server.harness).other_memory() {
+        Some(other) => other.disable_edit(server, text),
+        None => Ok(None),
     }
 }
 
@@ -1660,7 +1315,12 @@ pub fn restore_edit(
             let entry = &path.iter().fold(&parsed, |v, k| &v[*k])[name];
             let off = match &record["off"] {
                 Value::Bool(off) => *off,
-                _ => opencode_switch(&path.iter().map(|p| p.to_string()).collect::<Vec<_>>()).1,
+                _ => {
+                    crate::opencode::other::switch(
+                        &path.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                    )
+                    .1
+                }
             };
             if entry[key] != json!(off) {
                 return Ok(None);
@@ -1690,26 +1350,10 @@ pub fn restore_edit(
 }
 
 /// How to switch `server` off by hand (when install cannot, or for a project's registration).
-pub fn off_by_hand(server: &Server) -> String {
-    match (server.harness, &server.project) {
-        (Kind::ClaudeCode, Some(_)) if server.file.ends_with(".mcp.json") => format!(
-            "remove `{}` from that project's .mcp.json, or deny it in its .claude/settings.json",
-            server.name
-        ),
-        (Kind::ClaudeCode, Some(_)) => {
-            format!(
-                "in that project: `claude mcp remove -s local {}`",
-                server.name
-            )
-        }
-        (Kind::ClaudeCode, None) => format!("`claude mcp remove -s user {}`", server.name),
-        (Kind::OpenCode, _) => {
-            let (key, off) = opencode_switch(&server.path);
-            format!("set \"{key}\": {off} in its entry")
-        }
-        (Kind::Codex, _) => format!("set `enabled = false` in [mcp_servers.{}]", server.name),
-        (Kind::Cursor, _) => format!("switch {} off in Cursor Settings, MCP", server.name),
-        (Kind::CodeWhale, _) => format!("`codewhale mcp disable {}`", server.name),
+pub fn off_by_hand(setup: &Setup, server: &Server) -> String {
+    match setup.agent_of(server.harness).other_memory() {
+        Some(other) => other.off_by_hand(server),
+        None => format!("switch {} off in its configuration", server.name),
     }
 }
 
@@ -1848,7 +1492,7 @@ pub fn doctor_findings(setup: &Setup, findings: &Findings) -> Vec<Finding> {
         if server.state == ServerState::On && server.project.is_some() {
             out.push(crate::install::note(
                 format!("{text}; the agent sees two memories in that project"),
-                format!("to switch it off: {}", off_by_hand(server)),
+                format!("to switch it off: {}", off_by_hand(setup, server)),
             ));
         } else if undecided {
             out.push(crate::install::note(
@@ -1916,4 +1560,198 @@ pub fn doctor_findings(setup: &Setup, findings: &Findings) -> Vec<Finding> {
         )));
     }
     out
+}
+
+// ----------------------------------------------------------------------------------------
+// Claude Code's part (moves to its own module with the rest of Claude Code)
+// ----------------------------------------------------------------------------------------
+
+impl OtherMemory for crate::agents::ClaudeCode {
+    /// User scope, the local scopes of `~/.claude.json`, and the project's `.mcp.json`.
+    fn server_sources(&self, setup: &Setup, project: Option<&Path>) -> Vec<ServerSource> {
+        let permission_tools = claude_permission_tools(setup);
+        let file = setup.paths.user_config.clone();
+        let config = crate::install::read_json(&file, &mut Vec::new());
+        let mut out = vec![ServerSource::of(&file, &["mcpServers"], &config, None)];
+        if let Some(projects) = config["projects"].as_object() {
+            for path in projects.keys() {
+                out.push(ServerSource::of(
+                    &file,
+                    &["projects", path, "mcpServers"],
+                    &config,
+                    Some(path.clone()),
+                ));
+            }
+        }
+        if let Some(root) = project {
+            let file = root.join(".mcp.json");
+            let value = crate::install::read_json(&file, &mut Vec::new());
+            out.push(ServerSource::of(
+                &file,
+                &["mcpServers"],
+                &value,
+                Some(root.display().to_string()),
+            ));
+        }
+        for source in &mut out {
+            source.permission_tools = permission_tools.clone();
+        }
+        out
+    }
+
+    fn built_in(&self, setup: &Setup) -> Option<BuiltIn> {
+        let settings = crate::install::read_json(&setup.paths.settings, &mut Vec::new());
+        let off = settings["autoMemoryEnabled"] == Value::Bool(false);
+        let dirs = crate::import::scan(&setup.paths.projects).unwrap_or_default();
+        let files: usize = dirs.iter().map(|d| d.files.len()).sum();
+        Some(BuiltIn {
+            harness: Kind::ClaudeCode,
+            text: format!(
+                "Claude Code's auto-memory: {}; {files} memory file{} in {} project{} ({})",
+                if off { "off" } else { "on" },
+                if files == 1 { "" } else { "s" },
+                dirs.len(),
+                if dirs.len() == 1 { "" } else { "s" },
+                setup.show(&setup.paths.projects.display().to_string())
+            ),
+            entries: files,
+            notable: false,
+        })
+    }
+
+    /// Enabled and installed plugins, and hooks other than ours, that name a memory tool.
+    fn plugins(&self, setup: &Setup) -> Vec<Plugin> {
+        let mut out = Vec::new();
+        let settings = crate::install::read_json(&setup.paths.settings, &mut Vec::new());
+        if let Some(enabled) = settings["enabledPlugins"].as_object() {
+            for (name, on) in enabled {
+                if *on != Value::Bool(false) && names_memory_tool(name) {
+                    out.push(Plugin {
+                        harness: Kind::ClaudeCode,
+                        name: name.clone(),
+                        file: setup.paths.settings.clone(),
+                    });
+                }
+            }
+        }
+        let installed_file = setup
+            .paths
+            .config_dir
+            .join("plugins")
+            .join("installed_plugins.json");
+        let installed = crate::install::read_json(&installed_file, &mut Vec::new());
+        if let Some(plugins) = installed["plugins"].as_object() {
+            for name in plugins.keys() {
+                if names_memory_tool(name) && !out.iter().any(|p| p.name == *name) {
+                    out.push(Plugin {
+                        harness: Kind::ClaudeCode,
+                        name: name.clone(),
+                        file: installed_file.clone(),
+                    });
+                }
+            }
+        }
+        let ours = setup.ours();
+        if let Some(events) = settings["hooks"].as_object() {
+            for groups in events.values() {
+                for group in groups.as_array().into_iter().flatten() {
+                    for hook in group["hooks"].as_array().into_iter().flatten() {
+                        let command = hook["command"].as_str().unwrap_or_default();
+                        if !ours.hook(hook)
+                            && names_memory_tool(command)
+                            && !out.iter().any(|p| p.name == command)
+                        {
+                            out.push(Plugin {
+                                harness: Kind::ClaudeCode,
+                                name: command.to_string(),
+                                file: setup.paths.settings.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `~/.claude/CLAUDE.md`, the user rules (not our exported global memories); a project's
+    /// `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md` and `.claude/rules/`.
+    fn instruction_files(&self, setup: &Setup, project: Option<&Path>) -> Vec<PathBuf> {
+        let mut out = vec![setup.paths.instructions.clone()];
+        for file in files_with_extension(&setup.paths.config_dir.join("rules"), "md") {
+            if file
+                .file_name()
+                .is_some_and(|n| n != crate::agents::GLOBAL_RULES_FILE)
+            {
+                out.push(file);
+            }
+        }
+        if let Some(root) = project {
+            out.push(root.join("CLAUDE.md"));
+            out.push(root.join("CLAUDE.local.md"));
+            out.push(root.join(".claude").join("CLAUDE.md"));
+            out.extend(files_with_extension(
+                &root.join(".claude").join("rules"),
+                "md",
+            ));
+        }
+        out
+    }
+
+    /// A user-scope entry has no switched-off state: removed, and kept in the record.
+    fn disable_edit(&self, server: &Server, text: &str) -> Result<Option<(String, Value)>, String> {
+        remove_entry(server, text)
+    }
+
+    fn off_by_hand(&self, server: &Server) -> String {
+        match &server.project {
+            Some(_) if server.file.ends_with(".mcp.json") => format!(
+                "remove `{}` from that project's .mcp.json, or deny it in its .claude/settings.json",
+                server.name
+            ),
+            Some(_) => format!(
+                "in that project: `claude mcp remove -s local {}`",
+                server.name
+            ),
+            None => format!("`claude mcp remove -s user {}`", server.name),
+        }
+    }
+}
+
+/// `text` without `server`'s entry, and the record that puts it back (`how: removed`, with
+/// the entry): for a harness without a switched-off state (Claude Code, Cursor).
+pub(crate) fn remove_entry(server: &Server, text: &str) -> Result<Option<(String, Value)>, String> {
+    let path: Vec<&str> = server.path.iter().map(String::as_str).collect();
+    Ok(
+        jsonedit::remove_member(text, &path, &server.name)?.map(|new| {
+            (
+                new,
+                json!({"how": "removed", "path": server.path, "entry": server.entry}),
+            )
+        }),
+    )
+}
+
+/// `text` with `key` of `server`'s entry set to `off`, and the record that undoes it (`how:
+/// flag`, the value before, `null` when absent; `off` when `record_off`).
+pub(crate) fn flag_entry(
+    server: &Server,
+    text: &str,
+    key: &str,
+    off: bool,
+    record_off: bool,
+) -> Result<Option<(String, Value)>, String> {
+    let previous = server.entry.get(key).cloned().unwrap_or(Value::Null);
+    let mut entry_path: Vec<&str> = server.path.iter().map(String::as_str).collect();
+    entry_path.push(&server.name);
+    Ok(
+        jsonedit::set_member(text, &entry_path, key, &json!(off))?.map(|(new, _)| {
+            let mut record = json!({"how": "flag", "path": server.path, "key": key,
+                                    "previous": previous});
+            if record_off {
+                record["off"] = json!(off);
+            }
+            (new, record)
+        }),
+    )
 }
