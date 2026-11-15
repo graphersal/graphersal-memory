@@ -30,6 +30,9 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The default harness (what install sets up when nothing else is found), as a constant.
+    pub const DEFAULT: Kind = Kind::ClaudeCode;
+
     /// Every supported harness, in the order the wizard lists them.
     pub const ALL: [Kind; 5] = [
         Kind::ClaudeCode,
