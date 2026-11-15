@@ -260,8 +260,9 @@ pub trait Harness {
         false
     }
     /// For a harness without file memory: how to give the agent an exported file.
-    fn export_hint(&self) -> &'static str {
+    fn export_hint(&self) -> String {
         "to give the agent a file, add its path to `instructions` in the agent's configuration"
+            .to_string()
     }
     /// Writes the harness's configuration as a user has it into `home` (their own entries,
     /// comments, rules): what the conformance tests (`crate::harnesses::conformance_tests`) start from.

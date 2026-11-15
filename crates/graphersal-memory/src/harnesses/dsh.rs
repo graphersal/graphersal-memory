@@ -119,7 +119,8 @@
 //!   says how to install it globally. Debian's and Ubuntu's `dsh` package (a distributed shell,
 //!   `/usr/bin/dsh`) has the same name: a found `dsh` counts only when its real path or its
 //!   script text says DeepSeek ([`is_deepseek_program`]; it is never run to find out), and
-//!   `doctor` names a rejected one.
+//!   `doctor` names a rejected one. Version managers' shims (Volta, mise, asdf) say neither, so
+//!   a `dsh` installed through one is not found (`--harness dsh` installs anyway).
 
 pub mod install;
 pub mod other;
@@ -153,6 +154,13 @@ pub const STARTUP_TIMEOUT_MS: u64 = 60_000;
 /// ours far below it (a test proves the bound).
 #[cfg(test)]
 pub const MAX_INSTRUCTION_BYTES: usize = 32768;
+
+/// The byte budget of each instruction chain dsh loads (the user-global one is
+/// `$DSH_HOME/AGENTS.md`, then `<agents home>/AGENTS.md`): `maxBytes` of the
+/// `agent-instructions` row in `packages/bundle/base/cordis.patch.yml:307-310`. Over it, dsh
+/// omits the harness-home file (our rule block) before the shared-root one
+/// (`packages/context/agent-instructions/README.md`, "Observing the budget").
+pub const INSTRUCTION_CHAIN_BYTES: u64 = 65_536;
 
 /// The row of dsh's session log upload.
 pub const SESSION_LOG_ROW: &str = "session-log-deepseek";
@@ -353,8 +361,13 @@ const PROGRAM_PEEK_BYTES: u64 = 64 * 1024;
 /// links followed) has a directory `@deepseek-ai` or one whose name says `deepseek` (npm's
 /// global link into `lib/node_modules/@deepseek-ai/dsh/lib/bin.js`, the Desktop app's
 /// `DeepSeek*.app/Contents/Resources/runtime/cli/bin/dsh`), or it is a small text file (npm's
-/// `dsh.cmd`, `dsh.ps1` and shell wrappers, pnpm's and Volta's shims) that names
-/// `@deepseek-ai/dsh` (either separator) or `deepseek-harness`.
+/// `dsh.cmd`, `dsh.ps1` and shell wrappers, pnpm's shims) that names `@deepseek-ai/dsh`
+/// (either separator) or `deepseek-harness`.
+///
+/// Not recognised: version managers' shims. Volta's and mise's `dsh` is a link to their own
+/// shim binary (no `deepseek` in its real path, binary content), and asdf's shim script does not
+/// name the package. `doctor` then says the program is not found; `install --harness dsh`
+/// installs anyway after a warning.
 pub fn is_deepseek_program(program: &Path) -> bool {
     let real = std::fs::canonicalize(program).unwrap_or_else(|_| program.to_path_buf());
     let named = real.components().any(|part| {
@@ -460,8 +473,14 @@ impl Harness for Dsh {
         state != crate::install::PartState::Missing && enabled
     }
 
-    fn export_hint(&self) -> &'static str {
-        "to give the agent a file, paste it into ~/.dsh/AGENTS.md or a project's AGENTS.md"
+    fn export_hint(&self) -> String {
+        format!(
+            "to give the agent a file, paste it into {} or a project's AGENTS.md",
+            crate::install::tilde(
+                &self.paths.instruction_file.display().to_string(),
+                &self.paths.home
+            )
+        )
     }
 
     #[cfg(test)]

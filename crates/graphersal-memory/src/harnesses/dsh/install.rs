@@ -769,13 +769,81 @@ pub fn switches_session_log_off(items: &[Value]) -> bool {
     })
 }
 
-/// The layers that switch the session log upload off (empty: it is on in every profile).
-pub fn session_log_off(setup: &Setup) -> Vec<String> {
-    layers(setup)
+/// Where dsh's session log upload is switched off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionLog {
+    /// Nowhere: on in every profile.
+    On,
+    /// In the home layer, which every profile reads after its own and which outranks the
+    /// profile layers: off everywhere.
+    OffEverywhere,
+    /// Only in these profiles' layers (dsh's web Settings toggle writes there): on in the
+    /// others.
+    OffIn(Vec<String>),
+}
+
+/// Where the session log upload is switched off ([`SessionLog`]).
+pub fn session_log(setup: &Setup) -> SessionLog {
+    let paths = setup.dsh();
+    let off = |file: &Path| {
+        read_text(file)
+            .ok()
+            .flatten()
+            .and_then(|text| yamledit::items(&text).ok())
+            .is_some_and(|items| switches_session_log_off(&items))
+    };
+    if off(&paths.patch_file) {
+        return SessionLog::OffEverywhere;
+    }
+    let profiles: Vec<String> = paths
+        .profile_patches()
         .into_iter()
-        .filter(|(_, _, items)| switches_session_log_off(items))
-        .map(|(layer, _, _)| layer)
-        .collect()
+        .filter(|(_, file)| off(file))
+        .map(|(name, _)| name)
+        .collect();
+    if profiles.is_empty() {
+        SessionLog::On
+    } else {
+        SessionLog::OffIn(profiles)
+    }
+}
+
+/// The inserted rows of profile layers that use one of our server names, by id or server name:
+/// `(profile, patch file, row id, name)`. dsh refuses the second server of a name in that
+/// profile ("serverName ... is already in use"), so one of the two does not load there.
+pub fn profile_row_clashes(setup: &Setup) -> Vec<(String, PathBuf, String, String)> {
+    let mut out = Vec::new();
+    for (profile, file) in setup.dsh().profile_patches() {
+        let Some(items) = read_text(&file)
+            .ok()
+            .flatten()
+            .and_then(|text| yamledit::items(&text).ok())
+        else {
+            continue;
+        };
+        for row in inserted(&items) {
+            let Some(name) = SERVERS.iter().map(|(name, _)| *name).find(|name| {
+                row["id"].as_str() == Some(name)
+                    || row["config"]["serverName"].as_str() == Some(name)
+            }) else {
+                continue;
+            };
+            let id = row["id"].as_str().unwrap_or("(no id)").to_string();
+            out.push((profile.clone(), file.clone(), id, name.to_string()));
+        }
+    }
+    out
+}
+
+/// The bytes of dsh's user-global instruction chain (`$DSH_HOME/AGENTS.md` and
+/// `<agents home>/AGENTS.md`), when it is over [`crate::harnesses::dsh::INSTRUCTION_CHAIN_BYTES`]:
+/// `(home file's bytes, shared-root file's bytes)`.
+pub fn instruction_chain_over(setup: &Setup) -> Option<(u64, u64)> {
+    let paths = setup.dsh();
+    let size = |file: &Path| std::fs::metadata(file).map_or(0, |meta| meta.len());
+    let home = size(&paths.instruction_file);
+    let shared = size(&paths.agents_home.join("AGENTS.md"));
+    (home + shared > crate::harnesses::dsh::INSTRUCTION_CHAIN_BYTES).then_some((home, shared))
 }
 
 /// The `mcp-manager` servers whose name is one of ours (or starts like ours), with their layer:
@@ -801,10 +869,27 @@ const SESSION_LOG_NOTE: &str = "dsh's session log upload (`session-log-deepseek`
     the official DeepSeek API it sends the session log, the memory tools' results included, \
     with every request";
 
-/// How to switch the session log upload off.
-const SESSION_LOG_FIX: &str = "to keep memories out of it, add `- id: session-log-deepseek` \
-    with `config: {enabled: false}` to ~/.dsh/cordis.patch.yml (or switch \"Upload Session Log\" \
-    off in dsh's Settings); graphersal-memory never changes it";
+/// How to switch the session log upload off in every profile: the home layer's override.
+fn session_log_fix(setup: &Setup) -> String {
+    format!(
+        "to keep memories out of it in every profile, add `- id: session-log-deepseek` with \
+         `config: {{enabled: false}}` to dsh's home layer {} (every profile reads it; dsh's \
+         Settings toggle \"Upload Session Log\" switches it off only in the profile whose \
+         Settings you use); graphersal-memory never changes it",
+        setup.show(&setup.dsh().patch_file.display().to_string())
+    )
+}
+
+/// The `status` line or `doctor` note text of a session log upload switched off in some
+/// profiles only.
+fn session_log_partly(profiles: &[String]) -> String {
+    format!(
+        "dsh's session log upload (`session-log-deepseek`) is off in profile(s) {} only; on in \
+         the others: with the official DeepSeek API they send the session log, the memory \
+         tools' results included, with every request",
+        profiles.join(", ")
+    )
+}
 
 /// The dsh part of `status`.
 pub fn status_lines(setup: &Setup) -> Vec<String> {
@@ -852,14 +937,12 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
          when dsh exits, or 30 minutes after its last change"
             .to_string(),
     ];
-    let off = session_log_off(setup);
-    lines.push(if off.is_empty() {
-        format!("  note: {SESSION_LOG_NOTE}")
-    } else {
-        format!(
-            "  session log upload (session-log-deepseek): off in the {} layer(s)",
-            off.join(", ")
-        )
+    lines.push(match session_log(setup) {
+        SessionLog::On => format!("  note: {SESSION_LOG_NOTE}"),
+        SessionLog::OffIn(profiles) => format!("  note: {}", session_log_partly(&profiles)),
+        SessionLog::OffEverywhere => "  session log upload (session-log-deepseek): off in the \
+             home layer, so in every profile"
+            .to_string(),
     });
     for error in &inspection.errors {
         lines.push(format!("  problem: {error}"));
@@ -963,11 +1046,47 @@ pub fn doctor(setup: &Setup) -> Vec<Finding> {
             "nothing to do: the memory tools and the MCP server's instructions still reach it",
         ));
     }
-    if session_log_off(setup).is_empty() {
+    for (profile, file, id, name) in profile_row_clashes(setup) {
         findings.push(note(
-            format!("DeepSeek Harness: {SESSION_LOG_NOTE}"),
-            SESSION_LOG_FIX,
+            format!(
+                "DeepSeek Harness: the profile {profile} layer {} inserts an MCP server named \
+                 `{name}` (row `{id}`): dsh refuses a second server of one name (\"serverName \
+                 ... is already in use\"), so in that profile one of the two does not load",
+                setup.show(&file.display().to_string())
+            ),
+            format!(
+                "remove the row `- id: {id}` (with its lines) from the `- insert:` list in {}; \
+                 ours is in the home layer {}, which every profile reads",
+                setup.show(&file.display().to_string()),
+                setup.show(&paths.patch_file.display().to_string())
+            ),
         ));
+    }
+    if let Some((home, shared)) = instruction_chain_over(setup) {
+        findings.push(note(
+            format!(
+                "DeepSeek Harness: the user instruction files {} ({home} bytes) and {} \
+                 ({shared} bytes) are over dsh's {} KiB budget per instruction chain: it omits {} \
+                 first, and the rule block with it",
+                setup.show(&paths.instruction_file.display().to_string()),
+                setup.show(&paths.agents_home.join("AGENTS.md").display().to_string()),
+                crate::harnesses::dsh::INSTRUCTION_CHAIN_BYTES / 1024,
+                setup.show(&paths.instruction_file.display().to_string()),
+            ),
+            "shorten these files; the memory tools and the MCP server's instructions still \
+             reach dsh either way",
+        ));
+    }
+    match session_log(setup) {
+        SessionLog::On => findings.push(note(
+            format!("DeepSeek Harness: {SESSION_LOG_NOTE}"),
+            session_log_fix(setup),
+        )),
+        SessionLog::OffIn(profiles) => findings.push(note(
+            format!("DeepSeek Harness: {}", session_log_partly(&profiles)),
+            session_log_fix(setup),
+        )),
+        SessionLog::OffEverywhere => {}
     }
     findings.push(ok(format!(
         "DeepSeek Harness: {} saved session(s) in {}",
@@ -1333,13 +1452,32 @@ mod tests {
         )
         .unwrap();
         std::fs::create_dir_all(paths.profiles.join("sdk-minimal")).unwrap();
+        // Off in one profile only: still a note, naming the profile and the home-layer fix.
         let status = status_lines(&setup).join("\n");
-        assert!(status.contains("off in the profile web layer"), "{status}");
+        assert!(
+            status.contains("note: dsh's session log upload (`session-log-deepseek`) is off in profile(s) web only; on in the others"),
+            "{status}"
+        );
+        assert_eq!(
+            session_log(&setup),
+            SessionLog::OffIn(vec!["web".to_string()])
+        );
         let findings = doctor(&setup);
         assert!(
             !findings.iter().any(|f| f.text.contains("is on: with")),
             "{findings:?}"
         );
+        let partly = findings
+            .iter()
+            .find(|f| f.text.contains("off in profile(s) web only"))
+            .unwrap();
+        assert!(!partly.problem);
+        let fix = partly.fix.as_deref().unwrap();
+        assert!(
+            fix.contains(&setup.show(&paths.patch_file.display().to_string())),
+            "{fix}"
+        );
+        assert!(fix.contains("only in the profile"), "{fix}");
         assert!(
             findings
                 .iter()
@@ -1347,6 +1485,28 @@ mod tests {
             "{findings:?}"
         );
         assert!(findings.iter().any(|f| f.text.contains("sdk-minimal")));
+        // Off in the home layer: off everywhere, no note.
+        std::fs::write(
+            &paths.patch_file,
+            format!(
+                "{}- id: session-log-deepseek\n  disabled: true\n",
+                read(&paths.patch_file)
+            ),
+        )
+        .unwrap();
+        assert_eq!(session_log(&setup), SessionLog::OffEverywhere);
+        let status = status_lines(&setup).join("\n");
+        assert!(
+            status.contains("off in the home layer, so in every profile"),
+            "{status}"
+        );
+        let findings = doctor(&setup);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.text.contains("session-log-deepseek")),
+            "{findings:?}"
+        );
         // The home layer's switch counts too, in either form.
         assert!(switches_session_log_off(&[
             json!({"id": "session-log-deepseek", "disabled": true})
@@ -1384,6 +1544,179 @@ mod tests {
             "{findings:?}"
         );
         run_uninstall(&setup, out_of_dsh());
+        memory.close();
+    }
+
+    #[test]
+    fn a_profile_row_with_our_name_is_a_doctor_note() {
+        let home = TempDir::new("dsh-profile-row-home");
+        let data = TempDir::new("dsh-profile-row-data");
+        fixture::user_files(home.path());
+        let setup = machine(home.path(), data.path());
+        let paths = setup.dsh().clone();
+        let memory = Memory::open(data.path());
+        run_install(&setup, &memory, into_dsh());
+        assert!(profile_row_clashes(&setup).is_empty());
+        // An old row of ours by hand in the web layer (by id), another program's by server name
+        // in the desktop layer, and an unrelated row.
+        let web = paths.profiles.join("web").join("cordis.patch.yml");
+        std::fs::write(
+            &web,
+            format!(
+                "{}- insert:\n    - id: graphersal-memory\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: memory\n        transport: stdio\n        command: graphersal-memory\n    - id: git\n      config:\n        serverName: git\n",
+                fixture::WEB_PATCH
+            ),
+        )
+        .unwrap();
+        let desktop_dir = paths.profiles.join("desktop");
+        std::fs::create_dir_all(&desktop_dir).unwrap();
+        let desktop = desktop_dir.join("cordis.patch.yml");
+        std::fs::write(
+            &desktop,
+            "- insert:\n    - id: mem\n      config:\n        serverName: graphersal-memory-develop\n",
+        )
+        .unwrap();
+        assert_eq!(
+            profile_row_clashes(&setup),
+            vec![
+                (
+                    "desktop".to_string(),
+                    desktop.clone(),
+                    "mem".to_string(),
+                    DEVELOP_SERVER.to_string()
+                ),
+                (
+                    "web".to_string(),
+                    web.clone(),
+                    USE_SERVER.to_string(),
+                    USE_SERVER.to_string()
+                ),
+            ]
+        );
+        let findings = doctor(&setup);
+        for (file, id) in [(&web, USE_SERVER), (&desktop, "mem")] {
+            let shown = setup.show(&file.display().to_string());
+            let finding = findings
+                .iter()
+                .find(|f| f.text.contains(&shown) && f.text.contains("already in use"))
+                .unwrap_or_else(|| panic!("{findings:?}"));
+            assert!(!finding.problem, "a note, not a problem");
+            let fix = finding.fix.as_deref().unwrap();
+            assert!(fix.contains(&format!("`- id: {id}`")), "{fix}");
+            assert!(fix.contains(&shown), "{fix}");
+        }
+        // The home layer is not a profile layer: our own rows there are never named.
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.text.contains("already in use") && f.text.contains("home layer")),
+            "{findings:?}"
+        );
+        run_uninstall(&setup, out_of_dsh());
+        memory.close();
+    }
+
+    #[test]
+    fn a_user_instruction_chain_over_dshs_budget_is_a_doctor_note() {
+        let home = TempDir::new("dsh-chain-home");
+        let data = TempDir::new("dsh-chain-data");
+        let setup = machine(home.path(), data.path());
+        let paths = setup.dsh().clone();
+        let memory = Memory::open(data.path());
+        run_install(&setup, &memory, into_dsh());
+        let budget = usize::try_from(crate::harnesses::dsh::INSTRUCTION_CHAIN_BYTES).unwrap();
+        let ours = read(&paths.instruction_file).len();
+        let shared = paths.agents_home.join("AGENTS.md");
+        std::fs::create_dir_all(&paths.agents_home).unwrap();
+        let over = |findings: &[Finding]| {
+            findings
+                .iter()
+                .find(|f| f.text.contains("budget per instruction chain"))
+                .cloned()
+        };
+        // Exactly at the budget: fits.
+        std::fs::write(&shared, "x".repeat(budget - ours)).unwrap();
+        assert_eq!(instruction_chain_over(&setup), None);
+        assert!(over(&doctor(&setup)).is_none());
+        // One byte over it: a note naming both files and that ours goes first.
+        std::fs::write(&shared, "x".repeat(budget - ours + 1)).unwrap();
+        assert_eq!(
+            instruction_chain_over(&setup),
+            Some((
+                u64::try_from(ours).unwrap(),
+                u64::try_from(budget - ours + 1).unwrap()
+            ))
+        );
+        let finding = over(&doctor(&setup)).unwrap();
+        assert!(!finding.problem, "a note, not a problem");
+        let home_file = setup.show(&paths.instruction_file.display().to_string());
+        assert!(
+            finding.text.contains(&format!("omits {home_file} first")),
+            "{}",
+            finding.text
+        );
+        assert!(
+            finding
+                .text
+                .contains(&setup.show(&shared.display().to_string())),
+            "{}",
+            finding.text
+        );
+        assert!(
+            finding.text.contains(&format!("{} KiB", budget / 1024)),
+            "{}",
+            finding.text
+        );
+        run_uninstall(&setup, out_of_dsh());
+        memory.close();
+    }
+
+    #[test]
+    fn user_facing_text_names_the_actual_dsh_home() {
+        let home = TempDir::new("dsh-moved-text-home");
+        let data = TempDir::new("dsh-moved-text-data");
+        let own = home.path().join("cfg").join("dsh");
+        let text = home.path().display().to_string();
+        let own_text = own.display().to_string();
+        let env = |name: &str| match name {
+            "HOME" | "USERPROFILE" => Some(text.clone()),
+            "DSH_HOME" => Some(own_text.clone()),
+            _ => None,
+        };
+        let mut setup = machine(home.path(), data.path());
+        setup.set_dsh(DshPaths::resolve(&env).unwrap());
+        let paths = setup.dsh().clone();
+        let fix = session_log_fix(&setup);
+        let shown = setup.show(&paths.patch_file.display().to_string());
+        assert!(shown.starts_with('~'), "{shown}");
+        assert!(fix.contains(&shown), "{fix}");
+        assert!(!fix.contains(".dsh"), "{fix}");
+        let hint = setup.agent_of(Kind::Dsh).export_hint();
+        assert!(
+            hint.contains(&setup.show(&paths.instruction_file.display().to_string())),
+            "{hint}"
+        );
+        assert!(!hint.contains(".dsh"), "{hint}");
+    }
+
+    #[test]
+    fn an_explicit_harness_installs_without_a_found_program() {
+        // A `dsh` behind a version manager's shim is not recognised: `--harness dsh` installs
+        // all the same, after a warning.
+        let home = TempDir::new("dsh-no-program-home");
+        let data = TempDir::new("dsh-no-program-data");
+        let setup = bare_setup_in(home.path(), data.path());
+        assert_eq!(setup.program(Kind::Dsh), None);
+        let memory = Memory::open(data.path());
+        let (code, out) = run_install(&setup, &memory, into_dsh());
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains("program `dsh` is not found") && out.contains("installing anyway"),
+            "{out}"
+        );
+        assert_eq!(inspect(&setup).use_row, PartState::Installed);
+        let (code, out) = run_uninstall(&setup, out_of_dsh());
+        assert_eq!(code, 0, "{out}");
         memory.close();
     }
 

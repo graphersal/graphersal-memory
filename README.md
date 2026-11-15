@@ -296,8 +296,10 @@ Known limits of 0.2.1:
   through dsh (it cannot run without tools). In the `web`, Desktop and `acp` profiles one dsh
   serves several workspaces through one MCP server started in dsh's launch directory, so
   memories go to that directory's project; `headless`, or dsh started from the project, is
-  right. dsh uploads its session log, memories included, with official DeepSeek API requests
-  unless you switch it off ([docs/privacy.md](docs/privacy.md#deepseek-harness-dsh)):
+  right. A `dsh` installed through Volta, mise or asdf is not recognised (install it with npm, or
+  run `install --harness dsh`). dsh uploads its session log, memories included, with official
+  DeepSeek API requests unless you switch it off in its home layer
+  ([docs/privacy.md](docs/privacy.md#deepseek-harness-dsh)):
   [docs/dsh-live-check.md](docs/dsh-live-check.md).
 - **Windows**: no harness has been run live on Windows yet; the daemon, install and the hooks are
   covered by the test suite there.

@@ -57,9 +57,11 @@ dsh-v0.2.2-rc.3 (commit 38a6a5c; not checked live):
   through dsh go to DeepSeek this way**. (Like any MCP server's instructions, the start context
   is model input in every harness anyway.)
 - **graphersal-memory never changes it.** Install does not touch the row; `status` and `doctor`
-  note when no configuration layer switches it off.
-- **To switch it off**, add to the home layer `~/.dsh/cordis.patch.yml` (or `$DSH_HOME`'s),
-  outside graphersal-memory's marked block:
+  note when the home layer does not switch it off: "on" when no layer does, "off in profile(s)
+  ... only; on in the others" when only profile layers do. Both are notes, never problems.
+- **To switch it off in every profile**, add to the home layer `~/.dsh/cordis.patch.yml` (or
+  `$DSH_HOME/cordis.patch.yml`; `doctor` names the file of your setup), outside
+  graphersal-memory's marked block:
 
   ```yaml
   - id: session-log-deepseek
@@ -67,10 +69,12 @@ dsh-v0.2.2-rc.3 (commit 38a6a5c; not checked live):
       enabled: false
   ```
 
-  (`disabled: true` in place of `config` switches the whole row off), or switch off "Upload
-  Session Log when using the official model API" in dsh's web Settings (General). The home layer
-  outranks that switch. Row ids change between dsh versions, so check after an upgrade that
-  `status` still reports it off.
+  (`disabled: true` in place of `config` switches the whole row off). Every profile reads the
+  home layer, and it outranks the profile layers. The switch "Upload Session Log when using the
+  official model API" in dsh's web Settings (General) is not enough on its own: it writes only
+  that profile's layer (`~/.dsh/profiles/<name>/cordis.patch.yml`), so the CLI, headless and
+  every other profile keep uploading. Row ids change between dsh versions, so check after an
+  upgrade that `status` still reports it off.
 - **dsh's own telemetry** (OpenTelemetry) runs in the mode `FEEDBACK_ONLY` by default: it sends
   only after you give feedback explicitly. Any non-empty `DSH_TELEMETRY_DISABLED` switches it
   off (`packages/bundle/base/cordis.patch.yml`, `packages/boot/app-boot/src/profile-context.ts`).

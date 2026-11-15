@@ -89,10 +89,14 @@ share) and a yes/no for each question.
 
 9. **status and doctor.** `graphersal-memory status` and `graphersal-memory doctor`.
    Expect: every part installed, the develop server "registered, disabled", the note that dsh's
-   session log upload (`session-log-deepseek`) is on with how to switch it off; after adding that
-   override to `$DSH_HOME/cordis.patch.yml` (outside our block), status says "off in the home
-   layer(s)" and `dsh --profile headless --dump-config` shows the row with `enabled: false`.
-   Record: both outputs before and after.
+   session log upload (`session-log-deepseek`) is on, with how to switch it off naming
+   `$DSH_HOME/cordis.patch.yml` (with `~` for your home). Then switch "Upload Session Log" off in
+   the web UI's Settings: status and doctor should say "off in profile(s) web only; on in the
+   others" (check which file dsh wrote: expected `$DSH_HOME/profiles/web/cordis.patch.yml` only).
+   After adding the override to `$DSH_HOME/cordis.patch.yml` (outside our block), status says
+   "off in the home layer, so in every profile" and `dsh --profile headless --dump-config` shows
+   the row with `enabled: false`.
+   Record: the outputs at each of the three points and the file the web toggle changed.
 
 10. **Uninstall.** `graphersal-memory uninstall --harness dsh`.
     Expect: `cordis.patch.yml` and `AGENTS.md` byte for byte as before step 2 (`cmp` with your

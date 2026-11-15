@@ -157,7 +157,8 @@ Unit tests that need more than one module's helpers sit beside their module as
     `Dsh` (the `Agent`; no hooks, start context `Short`: far below dsh's 32768-byte
     `maxInstructionBytes` reject, a test proves it), `find_program` (`PATH`, `%APPDATA%\npm`,
     Desktop's `/usr/local/bin/dsh`; `is_deepseek_program`: only a real path or script text naming
-    `@deepseek-ai/dsh`/`deepseek-harness`, never run, so Debian's `dsh` is not taken;
+    `@deepseek-ai/dsh`/`deepseek-harness`, never run, so Debian's `dsh` is not taken, nor a
+    Volta/mise/asdf shim (a known limit; `--harness dsh` installs anyway);
     `foreign_program` for doctor), `HeadlessRun` recognised only to refuse (`NO_HEADLESS`: no way
     to run without tools, no cost, every run saved); `dsh/install.rs` the
     plan/removal/inspect/status/doctor (one `yamledit` managed block in the home layer holding one
@@ -165,8 +166,11 @@ Unit tests that need more than one module's helpers sit beside their module as
     {serverName, transport: stdio, command, args, env, startupTimeoutMs: 60000}}`, develop
     `disabled: true`; a missing file created and deleted again, dsh's `[]` template replaced and
     put back; a hand edit inside or a foreign row named like ours is a conflict; the rule block in
-    `$DSH_HOME/AGENTS.md`; notes: `session-log-deepseek` on in every layer (privacy),
-    `mcp-manager` servers named like ours, the `sdk-minimal` profile without instruction files);
+    `$DSH_HOME/AGENTS.md`; notes: `session_log` (`SessionLog`: off everywhere only by the home
+    layer, else on or off in some profiles only; the fix names the home layer's path with `~`;
+    privacy), `mcp-manager` servers named like ours, `profile_row_clashes` (an inserted row with
+    our id or `serverName` in a profile layer), `instruction_chain_over` (the user chain over
+    `INSTRUCTION_CHAIN_BYTES`), the `sdk-minimal` profile without instruction files);
     `dsh/sessions.rs` the reader of `<root>/<project key>/<session>/session.v4.jsonl[.zstd]`
     (`ruzstd` frame by frame into one buffer, at most `MAX_DECODED` = 128 MiB, a torn last frame
     ends the read; project = the header's `cwd`; a fork's (`isSeeded`) events up to its last

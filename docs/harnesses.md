@@ -835,8 +835,10 @@ homes; no test or person has run graphersal-memory with a real dsh.
   starts the server with its own environment minus every `DSH_*` variable and every name with
   `KEY`, `PASSWORD`, `SECRET` or `TOKEN`, then adds the row's `env`
   (`packages/subprocess/subprocess/src/index.ts`, `packages/mcp/mcp-client/src/transport.ts`).
-  A second server of the same name is refused ("already in use"), also against a server of the
-  web and Desktop profiles' MCP manager (the `mcp-manager` row): `doctor` names one.
+  A second server of the same name is refused ("serverName ... is already in use"), also against
+  a server of the web and Desktop profiles' MCP manager (the `mcp-manager` row) and against a
+  row of the same id or `serverName` inserted in a profile layer: `doctor` names each (a note
+  with the file and the row to remove).
 - **The start context**: the server's instructions go into the system prompt; above
   `maxInstructionBytes` (32,768 bytes by default, the attribution line included) the server is
   rejected, not cut (`packages/mcp/mcp-client/src/connection.ts`). Our row's `env` sets
@@ -845,8 +847,11 @@ homes; no test or person has run graphersal-memory with a real dsh.
   whatever the characters; a test proves the bound and a round trip fills the budget.
 - **Rules**: the first request carries `~/.dsh/AGENTS.md`, then `~/.agents/AGENTS.md`, then the
   project's `AGENTS.md`/`CLAUDE.md` chain, 64 KiB per chain
-  (`packages/context/agent-instructions/README.md`). The rule block goes into
-  `~/.dsh/AGENTS.md`. The `sdk-minimal` profile loads no instruction files, so there only the
+  (`packages/context/agent-instructions/README.md`, `packages/bundle/base/cordis.patch.yml`).
+  The rule block goes into `~/.dsh/AGENTS.md`. When the user chain (`~/.dsh/AGENTS.md` and
+  `~/.agents/AGENTS.md`) is over 64 KiB, dsh omits `~/.dsh/AGENTS.md` first, and the rule block
+  with it: `doctor` notes it (headings and framing count too, so dsh may drop it a little
+  earlier). The `sdk-minimal` profile loads no instruction files, so there only the
   MCP server's instructions reach the model; `doctor` notes it when that profile exists.
 - **Session start and end**: dsh's hook bridges are experimental packages no bundle loads (no
   session end, an empty `transcript_path`), so install adds no hooks and `hook --harness dsh`
@@ -867,10 +872,13 @@ homes; no test or person has run graphersal-memory with a real dsh.
   `sdk-minimal` profile writes `session.v4.jsonl` uncompressed, in the same place;
   `packages/session/session-persistence-jsonl/src/format.ts`). The `.zstd` file is a chain of
   zstd frames whose last one can be cut by a crash or a write in progress: it is read frame by
-  frame, and a cut frame ends the read. The project key in the directory name is lossy, so the
+  frame, and a cut frame ends the read (at most 128 MiB decoded; a larger file fails with that
+  reason). The project key in the directory name is lossy, so the
   project is the header's `cwd`. The reader takes your prompts (messages dsh injects are not
   yours and are left out), the assistant's text, tool names and the memories our tools wrote;
-  sub-agent sessions and sessions without a working directory (`_no-cwd/`) give no turns. Older
+  sub-agent sessions and sessions without a working directory (`_no-cwd/`) give no turns. A
+  forked session (`isSeeded` in its header) starts with a copy of its parent's events up to a
+  `session/end-seed` marker: that part is the parent's and is left out. Older
   generations beside the v4 file (`session.jsonl`, `session.v1..v3.jsonl[.zstd]`) are not read,
   and a file of an unknown version is logged and indexed as empty (not failed) until it
   changes. Sessions are indexed as `session:dsh-<uuid>`.
@@ -891,8 +899,17 @@ homes; no test or person has run graphersal-memory with a real dsh.
   and Ubuntu's `dsh` package (a distributed shell) has the same name: a found `dsh` counts only
   when its real path or its script text names DeepSeek's package (it is never run to find out),
   and `doctor` names a `dsh` it rejected.
+- **Version managers (a known limit)**: a `dsh` installed through Volta or mise is a link to the
+  manager's own shim binary, and asdf's shim script does not name the package, so neither is
+  recognised as DeepSeek Harness: `install` does not offer dsh and `doctor` says its program is
+  not found. Install dsh globally with npm (`npm install -g @deepseek-ai/dsh`), or run
+  `graphersal-memory install --harness dsh`, which installs anyway after a warning that the
+  program is not found (status, doctor and uninstall work on the installed parts all the same).
 - **Privacy**: dsh's session log upload is on by default and sends memories our tools return to
-  DeepSeek with official API requests; see [privacy.md](privacy.md#deepseek-harness-dsh).
+  DeepSeek with official API requests. Switch it off in the home layer to switch it off in every
+  profile: dsh's web Settings toggle writes only that profile's layer, and `status`/`doctor` say
+  "off in profile(s) ... only; on in the others" then. See
+  [privacy.md](privacy.md#deepseek-harness-dsh).
 
 ### What `install` writes
 
