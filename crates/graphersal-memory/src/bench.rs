@@ -135,32 +135,17 @@ impl Harness for Process {
     fn call(&mut self, call: &Call) -> Value {
         let mut env = vec![(crate::summaries::HOOK_ENV, "off")];
         env.extend(call.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-        let opencode = crate::opencode::is_opencode(&call.args);
-        let codex = crate::codex::is_codex(&call.args);
+        let headless = crate::harness::headless_of(&call.args).map(|(_, headless)| headless);
         // opencode 2.x gets `--standalone` (its own server, in the sandbox's environment).
-        let args = if opencode {
-            crate::opencode::headless_args(&call.args)
-        } else if codex {
-            crate::codex::exec_args(&call.args)
-        } else {
-            call.args.clone()
+        let args = match headless {
+            Some(headless) => headless.bench_args(&call.args),
+            None => call.args.clone(),
         };
         match crate::harness::run(&args, &call.input, &call.cwd, &env, CALL_TIMEOUT) {
-            Ok(output) if opencode => crate::opencode::normalize_run_output(&output.stdout),
-            Ok(output) if codex => {
-                let mut answer = crate::codex::normalize_exec_output(
-                    &output.stdout,
-                    crate::codex::local_model(&call.args),
-                );
-                // Codex reports a failed start (for example a local server that does not
-                // answer) on stderr only.
-                if answer["is_error"] == true && !output.stderr.trim().is_empty() {
-                    answer["result"] = json!(format!(
-                        "{} ({})",
-                        answer["result"].as_str().unwrap_or_default(),
-                        crate::transcript::clip(output.stderr.trim(), 300)
-                    ));
-                }
+            Ok(output)
+                if let Some(answer) =
+                    headless.and_then(|headless| headless.bench_answer(&output, &call.args)) =>
+            {
                 answer
             }
             Ok(output) => json_in(&output.stdout).unwrap_or_else(|| {
@@ -491,37 +476,16 @@ pub fn check_harness(command: &[String]) -> Result<(), String> {
 
 /// [`check_harness`], naming the settings file `config` (its full path) in the refusal.
 pub fn check_harness_in(command: &[String], config: Option<&Path>) -> Result<(), String> {
-    let is_claude = command.first().is_some_and(|program| {
-        Path::new(program)
-            .file_stem()
-            .is_some_and(|stem| stem == "claude")
-    });
-    let (headline, why) = if crate::cursor::is_cursor_cli(command) {
-        (
-            "the bench does not run through Cursor's CLI.",
-            "Cursor's CLI reports no cost, so the budget could not stop the run, and it reads \
-             your ~/.cursor (MCP servers, hooks) with no way to isolate a run.",
-        )
-    } else if crate::codewhale::is_codewhale(command) {
-        (
-            "the bench does not run through CodeWhale yet (planned).",
-            crate::codewhale::NO_BENCH,
-        )
-    } else if crate::codex::is_codex(command) && !crate::codex::local_model(command) {
-        (
-            "the bench through Codex needs a local model (`--oss`).",
-            "`codex exec` reports tokens but no cost, so the budget could not stop a run on a \
-             paid model.",
-        )
-    } else if is_claude || crate::opencode::is_opencode(command) || crate::codex::is_codex(command)
-    {
-        return Ok(());
-    } else {
-        (
+    let (headline, why) = match crate::harness::headless_of(command) {
+        Some((_, headless)) => match headless.bench_refusal(command) {
+            Some(refusal) => refusal,
+            None => return Ok(()),
+        },
+        None => (
             "the bench cannot run through this harness command.",
             "The bench drives Claude Code's `claude -p`, opencode's `opencode run` or Codex's \
              `codex exec --oss` with a local model.",
-        )
+        ),
     };
     Err(harness_refusal(headline, why, command, config))
 }

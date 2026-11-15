@@ -1098,26 +1098,16 @@ fn session_counts(data_dir: &Path) -> Result<(usize, usize, usize), String> {
 /// One estimate line for summaries through `command`: $0 for a free model of opencode Zen or a
 /// local model of Codex, else [`estimate_line`].
 pub fn estimate_line_for(estimate: &sessions::Estimate, command: &[String]) -> String {
-    if crate::codex::local_model(command) {
-        format!(
-            "{} finished session{}, {} without a summary: $0.00 (`{}` runs a local model on this \
-             machine)",
+    let note =
+        crate::harness::headless_of(command).and_then(|(_, headless)| headless.free_note(command));
+    match note {
+        Some(note) => format!(
+            "{} finished session{}, {} without a summary: $0.00 ({note})",
             estimate.sessions,
             if estimate.sessions == 1 { "" } else { "s" },
             estimate.pending,
-            command.join(" ")
-        )
-    } else if crate::opencode::free_model(command) {
-        format!(
-            "{} finished session{}, {} without a summary: $0.00 (`{}` uses a free model of \
-             opencode Zen, free for a limited time; the monthly budget still applies)",
-            estimate.sessions,
-            if estimate.sessions == 1 { "" } else { "s" },
-            estimate.pending,
-            command.join(" ")
-        )
-    } else {
-        estimate_line(estimate)
+        ),
+        None => estimate_line(estimate),
     }
 }
 

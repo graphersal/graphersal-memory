@@ -17,14 +17,43 @@ pub fn of(setup: &Setup, kind: Kind) -> Box<dyn Harness> {
     }
 }
 
+/// The setup-free parts of a harness: what the daemon uses with a request's directory or a
+/// harness command only.
+pub struct Driver {
+    /// Its sessions, as the indexing reads them.
+    pub sessions: &'static dyn SessionSource,
+    /// Its headless runs, when it has a command graphersal-memory can drive or refuse.
+    pub headless: Option<&'static dyn crate::harness::Headless>,
+}
+
+/// The setup-free parts of `kind`.
+pub fn driver(kind: Kind) -> &'static Driver {
+    match kind {
+        Kind::ClaudeCode => &Driver {
+            sessions: &crate::sessions::ClaudeSessions,
+            headless: Some(&crate::harness::ClaudeHeadless),
+        },
+        Kind::OpenCode => &Driver {
+            sessions: &crate::opencode::sessions::Sessions,
+            headless: Some(&crate::opencode::HeadlessRun),
+        },
+        Kind::Codex => &Driver {
+            sessions: &crate::codex::sessions::Sessions,
+            headless: Some(&crate::codex::HeadlessRun),
+        },
+        Kind::Cursor => &Driver {
+            sessions: &crate::cursor::sessions::Sessions,
+            headless: Some(&crate::cursor::HeadlessRun),
+        },
+        Kind::CodeWhale => &Driver {
+            sessions: &crate::codewhale::sessions::Sessions,
+            headless: Some(&crate::codewhale::HeadlessRun),
+        },
+    }
+}
+
 /// The sessions of `kind`, as the indexing reads them: without a setup (the daemon indexes
 /// with a request's directory).
 pub fn sessions(kind: Kind) -> &'static dyn SessionSource {
-    match kind {
-        Kind::ClaudeCode => &crate::sessions::ClaudeSessions,
-        Kind::OpenCode => &crate::opencode::sessions::Sessions,
-        Kind::Codex => &crate::codex::sessions::Sessions,
-        Kind::Cursor => &crate::cursor::sessions::Sessions,
-        Kind::CodeWhale => &crate::codewhale::sessions::Sessions,
-    }
+    driver(kind).sessions
 }

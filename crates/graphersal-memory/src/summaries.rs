@@ -409,45 +409,21 @@ pub fn run_harness_with(
     if args.is_empty() {
         return Err("summaries.harness_command is empty".to_string());
     }
-    if crate::cursor::is_cursor_cli(command) {
-        return Err(crate::cursor::NO_HEADLESS.to_string());
-    }
-    let opencode = crate::opencode::is_opencode(command);
-    let codex = crate::codex::is_codex(command);
-    let codewhale = crate::codewhale::is_codewhale(command);
-    if codewhale {
-        // A one-shot run has no tools, fires no hooks and saves no session: the user's own
-        // configuration (provider, model, keys) in our working directory.
-        args = crate::codewhale::exec_args(&args);
+    let headless = crate::harness::headless_of(command).map(|(_, headless)| headless);
+    if let Some(why) = headless.and_then(|headless| headless.summaries_refusal()) {
+        return Err(why.to_string());
     }
     let mut env: Vec<(String, String)> = vec![(HOOK_ENV.to_string(), "off".to_string())];
-    if codex {
-        args = crate::codex::exec_args(&args);
-        let sandbox = work_dir.join("codex");
-        let _ = std::fs::remove_dir_all(&sandbox);
-        let config = crate::codex::sandbox_config(
-            codex_home
-                .map(|d| d.join(crate::codex::CONFIG_FILE))
-                .as_deref(),
-            "",
-        );
-        env = crate::codex::build_sandbox(
-            &sandbox,
-            &config,
-            None,
-            codex_home.map(|d| d.join("auth.json")).as_deref(),
-        )?;
-    }
-    if opencode {
-        args = crate::opencode::headless_args(&args);
-        args.extend(["--format".to_string(), "json".to_string()]);
-        let sandbox = work_dir.join("opencode");
-        let _ = std::fs::remove_dir_all(&sandbox);
-        env = crate::opencode::build_sandbox(
-            &sandbox,
-            &json!({"permission": crate::opencode::permissions(&[]), "mcp": {}}),
+    if let Some(headless) = headless {
+        let homes = crate::harness::Homes {
             opencode_db,
-        )?;
+            codex_home,
+        };
+        let (prepared, sandbox) = headless.summaries_run(args, work_dir, &homes)?;
+        args = prepared;
+        if !sandbox.is_empty() {
+            env = sandbox;
+        }
     }
     let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let output =
@@ -461,19 +437,9 @@ pub fn run_harness_with(
                 err
             }
         })?;
-    let stdout = if opencode {
-        crate::opencode::normalize_run_output(&output.stdout).to_string()
-    } else if codex {
-        crate::codex::normalize_exec_output(&output.stdout, crate::codex::local_model(command))
-            .to_string()
-    } else if codewhale {
-        crate::codewhale::normalize_exec_output(
-            &output.stdout,
-            crate::codewhale::local_model(command),
-        )
-        .to_string()
-    } else {
-        output.stdout.clone()
+    let stdout = match headless {
+        Some(headless) => headless.answer(&output.stdout, command),
+        None => output.stdout.clone(),
     };
     match parse_answer(&stdout) {
         Ok(summary) => Ok(summary),

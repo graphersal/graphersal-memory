@@ -41,8 +41,9 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     reported, never offered) and `installed` (what status, doctor and uninstall work on). The
     harness refactor (moving every per-harness branch behind the trait) is under way;
   - `src/harnesses.rs`: the registry, the one place that names every harness (`of`: the
-    `Harness` of a `Kind`, which `Setup::agent_of` returns; `sessions`: the setup-free
-    `sessions::SessionSource` of a `Kind`, for the daemon's indexing);
+    `Harness` of a `Kind`, which `Setup::agent_of` returns; `driver`: the setup-free parts of a
+    `Kind`, its `sessions::SessionSource` for the daemon's indexing and its
+    `harness::Headless`, `sessions` its shortcut);
   - `src/opencode.rs` + `src/opencode/`: opencode 1.x and 2.x, one `OpenCode` agent with the
     line as data (`Major`, `Detected`, `detect`: `opencode --version` in a scratch home, else the
     database's tables, else 2.x; the hooks never ask the binary). Paths `OpenCodePaths`: XDG
@@ -278,7 +279,10 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
     `--format json`,
     `GRAPHERSAL_MEMORY_HOOK=off`), `parse_answer`, `Spend` (`<data dir>/sessions/spend.json`),
     `Summarizer` (exists only when enabled; budget check before each call), `facts`, `render`;
-  - `src/harness.rs`: running the user's harness: `program_path` (Windows: a bare name such as
+  - `src/harness.rs`: running the user's harness: the `Headless` trait (a harness command
+    recognised, its default, free note, summaries sandbox `summaries_run` (`Homes`,
+    `Prepared`), answer, bench arguments, answer and refusal; `ClaudeHeadless`, the others'
+    `HeadlessRun` in their modules), `headless_of(command)`, `costs_nothing`, `program_path` (Windows: a bare name such as
     `claude` resolved through `PATH`/`PATHEXT`, so npm's `claude.cmd` is found; std runs a
     `.cmd` through `cmd.exe` with safe quoting, so keep line breaks out of arguments) and `run`
     (stdin prompt, timeout, output);

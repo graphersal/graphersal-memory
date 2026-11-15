@@ -18,12 +18,103 @@ use std::time::{Duration, Instant};
 /// The extensions Windows tries when `PATHEXT` is not set.
 const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 
-/// Whether a headless command runs on a model that costs nothing: a free model of opencode Zen
-/// (`crate::opencode::free_model`) or a local model of Codex (`--oss`, `crate::codex::local_model`).
+/// A prepared headless run: its arguments and its environment.
+pub type Prepared = (Vec<String>, Vec<(String, String)>);
+
+/// The user's own files a headless run's sandbox copies from (opencode's database, Codex's home).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Homes<'a> {
+    /// opencode's database (`opencode.db`).
+    pub opencode_db: Option<&'a Path>,
+    /// Codex's home (`CODEX_HOME`).
+    pub codex_home: Option<&'a Path>,
+}
+
+/// A harness run headless with a prompt on stdin (`summaries.harness_command`, `bench
+/// --harness-command`): how its command is recognised, prepared and answered. Setup-free
+/// (`crate::harnesses::driver`): the daemon runs the summaries.
+pub trait Headless: Sync {
+    /// Whether `command` runs this harness.
+    fn matches(&self, command: &[String]) -> bool;
+    /// Its headless command when it is the one installed.
+    fn default_command(&self) -> Option<&'static str> {
+        None
+    }
+    /// What the install report says about its default command.
+    fn default_command_note(&self) -> &'static str {
+        ""
+    }
+    /// Whether `command` runs on a model that costs nothing (a free or local model).
+    fn costs_nothing(&self, _command: &[String]) -> bool {
+        false
+    }
+    /// The estimate line's note when `command` costs nothing (`None`: the usual estimate).
+    fn free_note(&self, _command: &[String]) -> Option<String> {
+        None
+    }
+    /// Why the summaries do not run through it (Cursor's CLI); `None` when they do.
+    fn summaries_refusal(&self) -> Option<&'static str> {
+        None
+    }
+    /// The arguments and environment of a summaries run of `args` in `work_dir` (a sandbox
+    /// of its own there, from `homes`).
+    fn summaries_run(
+        &self,
+        args: Vec<String>,
+        _work_dir: &Path,
+        _homes: &Homes<'_>,
+    ) -> Result<crate::harness::Prepared, String> {
+        Ok((args, Vec::new()))
+    }
+    /// The run's standard output as the answer JSON text.
+    fn answer(&self, stdout: &str, _command: &[String]) -> String {
+        stdout.to_string()
+    }
+    /// The arguments of a bench call.
+    fn bench_args(&self, args: &[String]) -> Vec<String> {
+        args.to_vec()
+    }
+    /// The answer of a bench call (`None`: the JSON object in its standard output).
+    fn bench_answer(&self, _output: &Output, _command: &[String]) -> Option<serde_json::Value> {
+        None
+    }
+    /// Why the bench does not run through `command`: (headline, why); `None` when it does.
+    fn bench_refusal(&self, _command: &[String]) -> Option<(&'static str, &'static str)> {
+        None
+    }
+}
+
+/// Claude Code's `claude -p` (its flags added by `crate::summaries::harness_args`).
+pub struct ClaudeHeadless;
+
+impl Headless for ClaudeHeadless {
+    fn matches(&self, command: &[String]) -> bool {
+        command.first().is_some_and(|program| {
+            Path::new(program)
+                .file_stem()
+                .is_some_and(|stem| stem == "claude")
+        })
+    }
+
+    fn default_command(&self) -> Option<&'static str> {
+        Some(crate::config::DEFAULT_HARNESS_COMMAND)
+    }
+}
+
+/// The harness whose headless command `command` is, with its `Headless`.
+pub fn headless_of(command: &[String]) -> Option<(crate::agents::Kind, &'static dyn Headless)> {
+    crate::agents::Kind::ALL.into_iter().find_map(|kind| {
+        crate::harnesses::driver(kind)
+            .headless
+            .filter(|headless| headless.matches(command))
+            .map(|headless| (kind, headless))
+    })
+}
+
+/// Whether a headless command runs on a model that costs nothing (a free model of opencode
+/// Zen, a local model of Codex or CodeWhale).
 pub fn costs_nothing(command: &[String]) -> bool {
-    crate::opencode::free_model(command)
-        || crate::codex::local_model(command)
-        || crate::codewhale::local_model(command)
+    headless_of(command).is_some_and(|(_, headless)| headless.costs_nothing(command))
 }
 
 /// The program to start for `program` on this platform (see the module docs).

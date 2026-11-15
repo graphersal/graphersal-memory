@@ -697,6 +697,82 @@ pub fn normalize_exec_output(stdout: &str, local: bool) -> Value {
     value
 }
 
+/// Codex's headless runs (`crate::harness::Headless`): `codex exec --json --ephemeral` in a
+/// `CODEX_HOME` of its own.
+pub struct HeadlessRun;
+
+impl crate::harness::Headless for HeadlessRun {
+    fn matches(&self, command: &[String]) -> bool {
+        is_codex(command)
+    }
+
+    fn default_command(&self) -> Option<&'static str> {
+        Some(DEFAULT_HEADLESS_COMMAND)
+    }
+
+    fn default_command_note(&self) -> &'static str {
+        "Codex only; the model of your Codex configuration"
+    }
+
+    fn costs_nothing(&self, command: &[String]) -> bool {
+        local_model(command)
+    }
+
+    fn free_note(&self, command: &[String]) -> Option<String> {
+        local_model(command)
+            .then(|| format!("`{}` runs a local model on this machine", command.join(" ")))
+    }
+
+    fn summaries_run(
+        &self,
+        args: Vec<String>,
+        work_dir: &Path,
+        homes: &crate::harness::Homes<'_>,
+    ) -> Result<crate::harness::Prepared, String> {
+        let args = exec_args(&args);
+        let sandbox = work_dir.join("codex");
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let config = sandbox_config(homes.codex_home.map(|d| d.join(CONFIG_FILE)).as_deref(), "");
+        let env = build_sandbox(
+            &sandbox,
+            &config,
+            None,
+            homes.codex_home.map(|d| d.join("auth.json")).as_deref(),
+        )?;
+        Ok((args, env))
+    }
+
+    fn answer(&self, stdout: &str, command: &[String]) -> String {
+        normalize_exec_output(stdout, local_model(command)).to_string()
+    }
+
+    fn bench_args(&self, args: &[String]) -> Vec<String> {
+        exec_args(args)
+    }
+
+    /// Codex reports a failed start (a local server that does not answer, for example) on
+    /// stderr only: added to the error.
+    fn bench_answer(&self, output: &crate::harness::Output, command: &[String]) -> Option<Value> {
+        let mut answer = normalize_exec_output(&output.stdout, local_model(command));
+        if answer["is_error"] == true && !output.stderr.trim().is_empty() {
+            answer["result"] = json!(format!(
+                "{} ({})",
+                answer["result"].as_str().unwrap_or_default(),
+                crate::transcript::clip(output.stderr.trim(), 300)
+            ));
+        }
+        Some(answer)
+    }
+
+    fn bench_refusal(&self, command: &[String]) -> Option<(&'static str, &'static str)> {
+        (!local_model(command)).then_some((
+            "the bench through Codex needs a local model (`--oss`).",
+            "`codex exec` reports tokens but no cost, so the budget could not stop a run on a \
+             paid model.",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

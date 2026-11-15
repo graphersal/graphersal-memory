@@ -703,6 +703,50 @@ impl Harness for CodeWhale {
     }
 }
 
+/// CodeWhale's headless runs (`crate::harness::Headless`): `codewhale exec --json
+/// --prompt-file -`, a one-shot run (no tools, no hooks, no saved session).
+pub struct HeadlessRun;
+
+impl crate::harness::Headless for HeadlessRun {
+    fn matches(&self, command: &[String]) -> bool {
+        is_codewhale(command)
+    }
+
+    fn default_command(&self) -> Option<&'static str> {
+        Some(DEFAULT_HEADLESS_COMMAND)
+    }
+
+    fn default_command_note(&self) -> &'static str {
+        "CodeWhale only; the model of your CodeWhale configuration"
+    }
+
+    fn costs_nothing(&self, command: &[String]) -> bool {
+        local_model(command)
+    }
+
+    /// A one-shot run in our working directory with the user's own configuration (provider,
+    /// model, keys).
+    fn summaries_run(
+        &self,
+        args: Vec<String>,
+        _work_dir: &Path,
+        _homes: &crate::harness::Homes<'_>,
+    ) -> Result<crate::harness::Prepared, String> {
+        Ok((exec_args(&args), Vec::new()))
+    }
+
+    fn answer(&self, stdout: &str, command: &[String]) -> String {
+        normalize_exec_output(stdout, local_model(command)).to_string()
+    }
+
+    fn bench_refusal(&self, _command: &[String]) -> Option<(&'static str, &'static str)> {
+        Some((
+            "the bench does not run through CodeWhale yet (planned).",
+            NO_BENCH,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

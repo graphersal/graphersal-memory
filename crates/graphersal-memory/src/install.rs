@@ -2435,16 +2435,15 @@ pub fn summaries_command(config: &Config, harnesses: &[Kind]) -> Vec<String> {
     let command = &config.summaries.harness_command;
     let claude_default = crate::config::split_command(crate::config::DEFAULT_HARNESS_COMMAND)
         .is_ok_and(|default| default == *command);
-    let other = if !claude_default || harnesses.contains(&Kind::ClaudeCode) {
+    // The default command is the default harness's: with that harness not chosen, the first
+    // chosen one that has a headless command of its own.
+    let other = if !claude_default || harnesses.contains(&Kind::default()) {
         None
-    } else if harnesses.contains(&Kind::OpenCode) {
-        Some(crate::opencode::DEFAULT_HEADLESS_COMMAND)
-    } else if harnesses.contains(&Kind::Codex) {
-        Some(crate::codex::DEFAULT_HEADLESS_COMMAND)
-    } else if harnesses.contains(&Kind::CodeWhale) {
-        Some(crate::codewhale::DEFAULT_HEADLESS_COMMAND)
     } else {
-        None
+        Kind::ALL
+            .into_iter()
+            .filter(|kind| harnesses.contains(kind))
+            .find_map(|kind| crate::harnesses::driver(kind).headless?.default_command())
     };
     match other {
         Some(other) => crate::config::split_command(other).unwrap_or_default(),
@@ -3436,11 +3435,8 @@ pub fn install(
             "summaries run through `{}` when you switch them on ({}; summaries.harness_command in \
              config.json)",
             command.join(" "),
-            if crate::opencode::is_opencode(&command) {
-                "opencode only; a free model of opencode Zen"
-            } else {
-                "Codex only; the model of your Codex configuration"
-            }
+            crate::harness::headless_of(&command)
+                .map_or("", |(_, headless)| headless.default_command_note())
         ));
     }
 
