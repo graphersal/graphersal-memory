@@ -320,7 +320,10 @@ fn call_args(
             crate::install::jsonedit::render(value, Some("  "), 0)
         )
     };
-    crate::fsutil::write_atomic(&settings, pretty(&super::arms::settings()).as_bytes())?;
+    crate::fsutil::write_atomic(
+        &settings,
+        pretty(&crate::harnesses::claude_code::bench::settings()).as_bytes(),
+    )?;
     let data = arm_dir.join("data");
     let project = project_dir(arm_dir, scenario);
     crate::fsutil::write_atomic(
@@ -343,7 +346,7 @@ fn call_args(
         ));
     }
     crate::fsutil::write_atomic(&system, text.as_bytes())?;
-    let mut args = super::arms::common_args(&settings, &mcp);
+    let mut args = crate::harnesses::claude_code::bench::common_args(&settings, &mcp);
     args.extend([
         "--tools".to_string(),
         String::new(),

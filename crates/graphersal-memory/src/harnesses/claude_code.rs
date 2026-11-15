@@ -5,6 +5,7 @@
 //! import in `crate::memory::import`, its transcript parser in `crate::memory::transcript` and its hook in
 //! `crate::memory::hook`.
 
+pub mod bench;
 pub mod hook;
 pub mod import;
 pub mod install;
@@ -123,6 +124,10 @@ impl Harness for ClaudeCode {
 
     fn hook(&self) -> Option<&dyn HookHandler> {
         Some(self)
+    }
+
+    fn bench(&self) -> Option<std::sync::Arc<dyn crate::bench::BenchSupport>> {
+        Some(std::sync::Arc::new(self.clone()))
     }
 
     fn memory_dirs(&self) -> Result<Vec<crate::memory::import::MemoryDir>, String> {
@@ -301,6 +306,10 @@ impl crate::harnesses::headless::Headless for ClaudeHeadless {
 
     fn default_command(&self) -> Option<&'static str> {
         Some(crate::config::DEFAULT_HARNESS_COMMAND)
+    }
+
+    fn bench_command(&self) -> Option<&'static str> {
+        Some("claude -p")
     }
 }
 

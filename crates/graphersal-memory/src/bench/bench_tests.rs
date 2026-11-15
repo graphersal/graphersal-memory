@@ -176,6 +176,13 @@ impl Machine {
         .unwrap()
     }
 
+    fn harnesses(&self) -> crate::harnesses::Harnesses {
+        let mut harnesses =
+            crate::harnesses::Harnesses::of_home(self.home.path(), self.data.path());
+        harnesses.set_claude_paths(self.claude());
+        harnesses
+    }
+
     fn options(&self) -> Options {
         Options {
             arms: vec![BenchArm::None, BenchArm::Files, BenchArm::Graph],
@@ -187,9 +194,7 @@ impl Machine {
             interactive: false,
             color: false,
             project: PROJECT.to_string(),
-            claude: self.claude(),
-            opencode: crate::harnesses::opencode::OpenCodePaths::of_home(self.home.path()),
-            codex: crate::harnesses::codex::CodexPaths::of_home(self.home.path()),
+            harnesses: self.harnesses(),
             data_dir: self.data.path().to_path_buf(),
             exe: PathBuf::from("/opt/gm/bin/graphersal-memory"),
             harness_command: vec![
@@ -717,9 +722,7 @@ fn a_codewhale_command_is_refused_with_commands_to_copy_and_the_flag_replaces_it
         };
         crate::commands::bench_options(
             machine.data.path(),
-            machine.claude(),
-            crate::harnesses::opencode::OpenCodePaths::of_home(machine.home.path()),
-            crate::harnesses::codex::CodexPaths::of_home(machine.home.path()),
+            machine.harnesses(),
             PathBuf::from("/opt/gm/bin/graphersal-memory"),
             PROJECT.to_string(),
             &request,

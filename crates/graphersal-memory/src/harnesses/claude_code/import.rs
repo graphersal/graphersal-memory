@@ -19,9 +19,7 @@ const DECODE_BUDGET: usize = 4000;
 /// Claude Code's name for the project directory of `path`: every character that is not an
 /// ASCII letter or digit becomes `-`.
 pub fn claude_slug(path: &str) -> String {
-    path.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+    crate::fsutil::path_slug(path)
 }
 
 /// The memory directories under the harness's `projects` directory, sorted by name.

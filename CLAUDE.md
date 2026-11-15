@@ -330,7 +330,12 @@ Unit tests that need more than one module's helpers sit beside their module as
     `claude` resolved through `PATH`/`PATHEXT`, so npm's `claude.cmd` is found; std runs a
     `.cmd` through `cmd.exe` with safe quoting, so keep line breaks out of arguments) and `run`
     (stdin prompt, timeout, output);
-  - `src/bench/mod.rs` + `src/bench/`: the built-in A/B (`bench`, `bench questions`): `Options`, the
+  - `src/bench/mod.rs` + `src/bench/`: the built-in A/B (`bench`, `bench questions`): `Options` (the
+    harnesses; `Options::bench()` = the harness command's `BenchSupport`, through
+    `Harnesses::bench_for`: its sessions' excerpt and place, other projects to suggest, its
+    instruction files and memory directory, its arm sandboxes and tool-free calls, the cost cap
+    and free note; each in `src/harnesses/<harness>/bench.rs` with its sandboxes and transcript
+    readers, Claude Code's also with `settings`/`common_args`), the
     `Harness` trait (`Process`: the real `claude -p` through `harness::run`; `DryRun`: canned,
     no cost), the estimate and the cost guard (refuse above the budget, `--max-budget-usd` per
     call, stop at the budget), the run (warm-up per arm, run id at the start of every prompt,
@@ -342,7 +347,7 @@ Unit tests that need more than one module's helpers sit beside their module as
     transcripts|user|pending|not_found; format 1 loads as all generated; generated from RAW
     transcripts with turn ids, never from our summaries; `bench/questions/<project slug>.json`,
     user-editable, confirmed by `--review`; a regeneration keeps the user's questions;
-    `parse_import` of text, `Q:`/`A:` and JSON); `bench/arms.rs` the sandbox per arm (`mcp.json`, `settings.json`, `system.md`,
+    `parse_import` of text, `Q:`/`A:` and JSON); `bench/arms.rs` what every arm's sandbox shares (`Sources`, `Sandbox`, the store fork, the instruction section; each harness builds its own: `mcp.json`, `settings.json`, `system.md`,
     `cwd/`; the graph arm on `Store::fork_dir` of the live store served by `mcp --no-daemon`);
     `bench/report.rs` the aggregation (per category, per origin, unjudged rows in no mean) and
     `report.md`/`report.json` in `bench/<timestamp>/`; `bench/rule_changes.rs` `bench

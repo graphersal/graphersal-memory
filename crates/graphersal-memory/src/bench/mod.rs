@@ -78,20 +78,73 @@ pub struct Options {
     pub color: bool,
     /// The project key.
     pub project: String,
-    /// Where the memory files, instruction files and transcripts are read from.
-    pub claude: crate::harnesses::claude_code::install::ClaudePaths,
-    /// Where opencode's instruction files and sessions are read from (when the harness command
-    /// is opencode's).
-    pub opencode: crate::harnesses::opencode::OpenCodePaths,
-    /// Where Codex's instruction files, sessions, model settings and login are read from (when
-    /// the harness command is Codex's).
-    pub codex: crate::harnesses::codex::CodexPaths,
+    /// The harnesses with their files (`--claude-dir` replaces Claude Code's): the harness
+    /// command's one is the one the run goes through ([`Options::bench`]).
+    pub harnesses: crate::harnesses::Harnesses,
     /// The data directory (the live store is forked from it; reports go into it).
     pub data_dir: PathBuf,
     /// This binary (the graph arm's MCP server).
     pub exe: PathBuf,
     /// The harness command (`claude -p --model sonnet`).
     pub harness_command: Vec<String>,
+}
+
+impl Options {
+    /// The harness the run goes through: the harness command's (Claude Code's when the
+    /// command is no harness's the bench knows; `check_harness_in` refuses those first).
+    pub fn bench(&self) -> std::sync::Arc<dyn BenchSupport> {
+        self.harnesses.bench_for(&self.harness_command)
+    }
+}
+
+/// A harness the bench runs through (`Harness::bench`; Claude Code's, opencode's, Codex's):
+/// where the project's finished sessions, instruction files and memory files are, how an arm
+/// and a tool-free call (the generator, the judge) are sandboxed, and what a run costs.
+pub trait BenchSupport: std::fmt::Debug + Send + Sync {
+    /// The excerpt of the project's finished sessions, from the harness's own store.
+    fn excerpt(&self, project: &str, now: SystemTime) -> Excerpt;
+    /// Where its finished sessions of `project` are looked for: what one is called, and where.
+    fn sessions_place(&self, project: &str) -> (&'static str, PathBuf);
+    /// Up to three other projects (git repositories) with finished sessions, the one with the
+    /// most first, to suggest when `project` has none.
+    fn other_projects_with_sessions(&self, _project: &str, _now: SystemTime) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    /// The project's instruction files (label, text), the managed block removed.
+    fn instructions(&self, project: &str) -> Vec<(String, String)>;
+    /// The project's memory directory, when the harness has a file memory and the project one.
+    fn memory_dir(&self, _project: &str) -> Option<PathBuf> {
+        None
+    }
+    /// The report's note when the files arm holds the instruction files only, because the
+    /// harness has no file memory.
+    fn no_file_memory_note(&self) -> Option<&'static str> {
+        None
+    }
+    /// The sandbox of one arm in `arms_dir`.
+    fn build_arm(
+        &self,
+        arm: BenchArm,
+        arms_dir: &Path,
+        sources: &arms::Sources,
+    ) -> Result<arms::Sandbox, String>;
+    /// A tool-free call of `command` in `dir` (the generator, the judge): its working
+    /// directory, command line and environment; `schema` and `cap` where its CLI takes them.
+    fn tool_free_call(
+        &self,
+        dir: &Path,
+        command: Vec<String>,
+        schema: Value,
+        cap: f64,
+    ) -> Result<ToolFreeCall, String>;
+    /// The arguments that cap one answer's cost, when its CLI takes them.
+    fn cost_cap(&self, _cap: f64) -> Vec<String> {
+        Vec::new()
+    }
+    /// The line that says the run costs nothing, when `command` runs a free or local model.
+    fn free_note(&self, _command: &[String]) -> Option<String> {
+        None
+    }
 }
 
 /// What a call is for.
@@ -461,12 +514,14 @@ impl Estimate {
     }
 }
 
-/// The harness commands the bench runs through, as `--harness-command` takes them.
-const BENCH_HARNESSES: [&str; 3] = [
-    "claude -p",
-    "opencode run",
-    "codex exec --oss --local-provider lmstudio",
-];
+/// The harness commands the bench runs through, as `--harness-command` takes them (each
+/// harness's `Headless::bench_command`).
+fn bench_harnesses() -> Vec<&'static str> {
+    crate::harnesses::agent::Kind::ALL
+        .into_iter()
+        .filter_map(|kind| crate::harnesses::driver(kind).headless?.bench_command())
+        .collect()
+}
 
 /// Refuses a harness that is neither Claude Code's `claude`, opencode's `opencode` nor Codex's
 /// `codex` with a local model (the arms are built with their flags and configuration). Codex
@@ -520,7 +575,7 @@ fn harness_refusal(headline: &str, why: &str, command: &[String], config: Option
     lines.push(String::new());
     lines.push("Run the bench through one of these instead:".to_string());
     lines.push(String::new());
-    for harness in BENCH_HARNESSES {
+    for harness in bench_harnesses() {
         lines.push(format!(
             "  graphersal-memory bench --harness-command \"{harness}\""
         ));
@@ -528,48 +583,13 @@ fn harness_refusal(headline: &str, why: &str, command: &[String], config: Option
     lines.join("\n")
 }
 
-/// Whether the run goes through opencode.
-fn opencode(options: &Options) -> bool {
-    crate::harnesses::opencode::is_opencode(&options.harness_command)
-}
-
-/// Whether the run goes through Codex.
-fn codex(options: &Options) -> bool {
-    crate::harnesses::codex::is_codex(&options.harness_command)
-}
-
 /// The excerpt of the project's finished sessions, from the harness's own store.
 fn excerpt_for(options: &Options) -> Excerpt {
-    if codex(options) {
-        Excerpt::of_transcripts(
-            &questions::codex_transcripts(
-                &options.codex.sessions,
-                &options.project,
-                SystemTime::now(),
-            ),
-            questions::EXCERPT_BUDGET,
-        )
-    } else if opencode(options) {
-        Excerpt::of_transcripts(
-            &questions::opencode_transcripts(
-                &options.opencode.db,
-                &options.project,
-                SystemTime::now(),
-            ),
-            questions::EXCERPT_BUDGET,
-        )
-    } else {
-        let transcripts = questions::transcripts(
-            &options.claude.projects,
-            &options.project,
-            SystemTime::now(),
-        );
-        Excerpt::of(&transcripts, questions::EXCERPT_BUDGET)
-    }
+    options.bench().excerpt(&options.project, SystemTime::now())
 }
 
 /// The working directory, the command line and the environment of a tool-free call.
-type ToolFreeCall = (PathBuf, Vec<String>, Vec<(String, String)>);
+pub type ToolFreeCall = (PathBuf, Vec<String>, Vec<(String, String)>);
 
 /// A call of the generator or the judge: the harness command, the tool-free sandbox's
 /// arguments, and for `claude` the schema and the cost cap of the call.
@@ -579,25 +599,9 @@ fn tool_free_call(
     schema: Value,
     cap: f64,
 ) -> Result<ToolFreeCall, String> {
-    let mut command = options.harness_command.clone();
-    if codex(options) {
-        let (cwd, env) = arms::tool_free_codex(dir, &options.codex)?;
-        return Ok((cwd, command, env));
-    }
-    if opencode(options) {
-        let (cwd, env) = arms::tool_free_opencode(dir, &options.opencode.db)?;
-        command.extend(["--format".to_string(), "json".to_string()]);
-        return Ok((cwd, command, env));
-    }
-    let (cwd, args) = arms::tool_free(dir)?;
-    command.extend(args);
-    command.extend([
-        "--json-schema".to_string(),
-        schema.to_string(),
-        "--max-budget-usd".to_string(),
-        format!("{cap:.2}"),
-    ]);
-    Ok((cwd, command, Vec::new()))
+    options
+        .bench()
+        .tool_free_call(dir, options.harness_command.clone(), schema, cap)
 }
 
 /// A short run id: 12 hex digits of the time and the process.
@@ -1176,21 +1180,7 @@ pub fn questions_command(
 /// Why the bench has nothing to write questions from, where it looked, and what to run
 /// instead (`command`: `bench` or `bench questions`), ready to copy.
 fn no_transcripts(options: &Options, command: &str) -> String {
-    let (what, place) = if codex(options) {
-        ("Codex session", options.codex.sessions.clone())
-    } else if opencode(options) {
-        ("opencode session", options.opencode.db.clone())
-    } else {
-        (
-            "session transcript",
-            options
-                .claude
-                .projects
-                .join(crate::harnesses::claude_code::import::claude_slug(
-                    &options.project,
-                )),
-        )
-    };
+    let (what, place) = options.bench().sessions_place(&options.project);
     let home = crate::runtime::store::home_dir(&|name| std::env::var(name).ok()).ok();
     let shown = |path: &Path| {
         let text = path.display().to_string();
@@ -1219,11 +1209,9 @@ fn no_transcripts(options: &Options, command: &str) -> String {
     lines.push(String::new());
     lines.push("What you can do:".to_string());
     lines.push(String::new());
-    let others = if codex(options) || opencode(options) {
-        Vec::new()
-    } else {
-        claude_projects_with_sessions(options, SystemTime::now())
-    };
+    let others = options
+        .bench()
+        .other_projects_with_sessions(&options.project, SystemTime::now());
     if let Some(first) = others.first() {
         lines.push("  Run it in a project with finished sessions, for example:".to_string());
         lines.push(String::new());
@@ -1293,36 +1281,6 @@ fn shell_word(text: &str) -> String {
             .collect();
         format!("\"{escaped}\"")
     }
-}
-
-/// Up to three other projects (git repositories) with finished Claude Code sessions, the one
-/// with the most first.
-fn claude_projects_with_sessions(options: &Options, now: SystemTime) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(&options.claude.projects) else {
-        return Vec::new();
-    };
-    let mut found: Vec<(usize, PathBuf)> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|dir| dir.is_dir())
-        .filter_map(|dir| crate::harnesses::claude_code::import::resolve_project_dir(&dir))
-        .filter(|project| project.join(".git").exists())
-        .filter_map(|project| {
-            let text = project.display().to_string();
-            if text == options.project {
-                return None;
-            }
-            let count = questions::transcripts(&options.claude.projects, &text, now).len();
-            (count > 0).then_some((count, project))
-        })
-        .collect();
-    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    found.dedup_by(|a, b| a.1 == b.1);
-    found
-        .into_iter()
-        .take(3)
-        .map(|(_, project)| project)
-        .collect()
 }
 
 /// `bench`: plans, asks, runs every arm, writes the report. Returns the exit code.
@@ -1487,19 +1445,8 @@ pub fn run(
             pending.len()
         );
     }
-    if free && crate::harnesses::codex::local_model(&options.harness_command) {
-        let _ = writeln!(
-            out,
-            "`{}` runs a local model on this machine: this run costs $0.00.",
-            options.harness_command.join(" ")
-        );
-    } else if free {
-        let _ = writeln!(
-            out,
-            "`{}` uses a free model of opencode Zen (free for a limited time): this run costs \
-             $0.00; the budget still stops it if opencode reports a cost.",
-            options.harness_command.join(" ")
-        );
+    if free && let Some(note) = options.bench().free_note(&options.harness_command) {
+        let _ = writeln!(out, "{note}");
     }
     let _ = writeln!(
         out,
@@ -1626,36 +1573,15 @@ pub fn run(
     }
     let sources = arms::Sources {
         project: options.project.clone(),
-        instructions: if codex(options) {
-            arms::Sources::codex_instructions_of(&options.codex, &options.project)
-        } else if opencode(options) {
-            arms::Sources::opencode_instructions_of(&options.opencode, &options.project)
-        } else {
-            arms::Sources::instructions_of(&options.claude.instructions, &options.project)
-        },
-        memory_dir: Some(
-            options
-                .claude
-                .projects
-                .join(crate::harnesses::claude_code::import::claude_slug(
-                    &options.project,
-                ))
-                .join("memory"),
-        )
-        .filter(|dir| dir.is_dir() && !opencode(options) && !codex(options)),
+        instructions: options.bench().instructions(&options.project),
+        memory_dir: options.bench().memory_dir(&options.project),
         store_dir,
         exe: options.exe.clone(),
     };
     let arms_dir = run_dir.join("arms");
     let mut sandboxes = Vec::new();
     for arm in &arms_list {
-        sandboxes.push(if codex(options) {
-            arms::build_codex(*arm, &arms_dir, &sources, &options.codex)?
-        } else if opencode(options) {
-            arms::build_opencode(*arm, &arms_dir, &sources, &options.opencode.db)?
-        } else {
-            arms::build(*arm, &arms_dir, &sources)?
-        });
+        sandboxes.push(options.bench().build_arm(*arm, &arms_dir, &sources)?);
     }
     let judge_dir = run_dir.join("judge");
     let id = run_id();
@@ -1677,18 +1603,10 @@ pub fn run(
         notes: Vec::new(),
         ..Meta::default()
     };
-    if codex(options) && arms_list.contains(&BenchArm::Files) {
-        meta.notes.push(
-            "Codex has no file memory: the files arm holds its instruction files (AGENTS.md) \
-             only."
-                .to_string(),
-        );
-    } else if opencode(options) && arms_list.contains(&BenchArm::Files) {
-        meta.notes.push(
-            "opencode has no file memory: the files arm holds its instruction files (AGENTS.md) \
-             only."
-                .to_string(),
-        );
+    if let Some(note) = options.bench().no_file_memory_note()
+        && arms_list.contains(&BenchArm::Files)
+    {
+        meta.notes.push(note.to_string());
     } else if sources.memory_dir.is_none() && arms_list.contains(&BenchArm::Files) {
         meta.notes.push(
             "The project has no memory directory: the files arm holds the instruction files only."
@@ -1698,9 +1616,7 @@ pub fn run(
     let answer_call = |sandbox: &arms::Sandbox, kind: Kind, prompt: String, cap: f64| {
         let mut args = options.harness_command.clone();
         args.extend(sandbox.args.iter().cloned());
-        if !opencode(options) && !codex(options) {
-            args.extend(["--max-budget-usd".to_string(), format!("{cap:.2}")]);
-        }
+        args.extend(options.bench().cost_cap(cap));
         Call {
             kind,
             args,

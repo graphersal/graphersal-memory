@@ -128,6 +128,14 @@ pub fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
+/// A path as one file name: every character other than ASCII letters and digits becomes `-`
+/// (Claude Code names its project directories so; the bench names its question files so).
+pub fn path_slug(path: &str) -> String {
+    path.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

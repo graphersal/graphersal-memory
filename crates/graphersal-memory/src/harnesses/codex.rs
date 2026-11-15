@@ -47,6 +47,7 @@
 //!   could write back into: the export of `uninstall` writes readable Markdown files into
 //!   `~/graphersal-memory-export/codex/`.
 
+pub mod bench;
 pub mod hook;
 pub mod install;
 pub mod other;
@@ -348,6 +349,10 @@ impl Harness for Codex {
     #[cfg(test)]
     fn user_files(&self, home: &Path) {
         fixture::user_files(home);
+    }
+
+    fn bench(&self) -> Option<std::sync::Arc<dyn crate::bench::BenchSupport>> {
+        Some(std::sync::Arc::new(self.clone()))
     }
 
     fn has_sessions(&self) -> bool {
@@ -724,6 +729,10 @@ impl crate::harnesses::headless::Headless for HeadlessRun {
 
     fn default_command(&self) -> Option<&'static str> {
         Some(DEFAULT_HEADLESS_COMMAND)
+    }
+
+    fn bench_command(&self) -> Option<&'static str> {
+        Some("codex exec --oss --local-provider lmstudio")
     }
 
     fn default_command_note(&self) -> &'static str {

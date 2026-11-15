@@ -34,7 +34,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::cli::BenchArm;
 use crate::fsutil;
@@ -60,101 +60,9 @@ pub struct Sources {
     pub exe: PathBuf,
 }
 
-impl Sources {
-    /// The instruction files of `project`: the user's (`<claude dir>/CLAUDE.md`) and the
-    /// project's (`CLAUDE.md`, `CLAUDE.local.md` in its root), those that exist, each without
-    /// graphersal-memory's managed block.
-    pub fn instructions_of(claude_md: &Path, project: &str) -> Vec<(String, String)> {
-        let root = Path::new(project);
-        let mut out = Vec::new();
-        for (label, path) in [
-            ("user CLAUDE.md".to_string(), claude_md.to_path_buf()),
-            ("project CLAUDE.md".to_string(), root.join("CLAUDE.md")),
-            (
-                "project CLAUDE.local.md".to_string(),
-                root.join("CLAUDE.local.md"),
-            ),
-        ] {
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let text = without_block(&text);
-            if !text.trim().is_empty() {
-                out.push((label, text));
-            }
-        }
-        out
-    }
-}
-
-impl Sources {
-    /// opencode's instruction files of `project`: the global `AGENTS.md` and the project's
-    /// `AGENTS.md` (1.x falls back to Claude Code's `~/.claude/CLAUDE.md` and the project's
-    /// `CLAUDE.md`; 2.x has no such fallback), those that exist, each without
-    /// graphersal-memory's managed block.
-    pub fn opencode_instructions_of(
-        paths: &crate::harnesses::opencode::OpenCodePaths,
-        project: &str,
-    ) -> Vec<(String, String)> {
-        let root = Path::new(project);
-        let mut out = Vec::new();
-        let fallback = paths.major() == crate::harnesses::opencode::Major::V1;
-        let mut global = vec![paths.config_dir.join("AGENTS.md")];
-        let mut local = vec![root.join("AGENTS.md")];
-        if fallback {
-            global.push(paths.home.join(".claude").join("CLAUDE.md"));
-            local.push(root.join("CLAUDE.md"));
-        }
-        for (label, candidates) in [("global AGENTS.md", global), ("project AGENTS.md", local)] {
-            let Some(text) = candidates
-                .iter()
-                .find_map(|path| std::fs::read_to_string(path).ok())
-            else {
-                continue;
-            };
-            let text = without_block(&text);
-            if !text.trim().is_empty() {
-                out.push((label.to_string(), text));
-            }
-        }
-        out
-    }
-}
-
-impl Sources {
-    /// Codex's instruction files of `project`: the global one (`AGENTS.override.md` when it
-    /// holds text, else `AGENTS.md`, in the Codex home) and the project's (the same two names
-    /// in its root), those that exist, each without graphersal-memory's managed block.
-    pub fn codex_instructions_of(
-        paths: &crate::harnesses::codex::CodexPaths,
-        project: &str,
-    ) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        for (label, path) in [
-            (
-                "global AGENTS.md",
-                crate::harnesses::codex::instruction_file(&paths.codex_home),
-            ),
-            (
-                "project AGENTS.md",
-                crate::harnesses::codex::instruction_file(Path::new(project)),
-            ),
-        ] {
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let text = without_block(&text);
-            if !text.trim().is_empty() {
-                out.push((label.to_string(), text));
-            }
-        }
-        out
-    }
-}
-
 /// `text` without graphersal-memory's managed rule block (a broken block stays).
 pub fn without_block(text: &str) -> String {
-    match crate::harnesses::claude_code::install::find_block(text) {
+    match crate::install::find_block_in(text, "", &[], &[]) {
         Ok(Some(block)) => format!("{}{}", &text[..block.start], &text[block.end..]),
         _ => text.to_string(),
     }
@@ -177,36 +85,7 @@ pub struct Sandbox {
     pub env: Vec<(String, String)>,
 }
 
-/// The settings every call gets (with `--setting-sources ""`, the only settings).
-pub fn settings() -> Value {
-    json!({
-        "disableAllHooks": true,
-        "permissions": {"deny": ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]},
-    })
-}
-
-/// The arguments every call gets after the harness command: JSON output, no transcript, no
-/// settings but `settings`, no MCP servers but those of `mcp_config`, no slash commands.
-pub fn common_args(settings: &Path, mcp_config: &Path) -> Vec<String> {
-    [
-        "--output-format",
-        "json",
-        "--no-session-persistence",
-        "--setting-sources",
-        "",
-        "--settings",
-        &settings.display().to_string(),
-        "--strict-mcp-config",
-        "--mcp-config",
-        &mcp_config.display().to_string(),
-        "--disable-slash-commands",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
-}
-
-fn write(path: &Path, text: &str) -> Result<(), String> {
+pub fn write(path: &Path, text: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
@@ -214,7 +93,7 @@ fn write(path: &Path, text: &str) -> Result<(), String> {
     fsutil::write_atomic(path, text.as_bytes())
 }
 
-fn pretty(value: &Value) -> String {
+pub fn pretty(value: &Value) -> String {
     format!(
         "{}\n",
         crate::install::jsonedit::render(value, Some("  "), 0)
@@ -222,7 +101,7 @@ fn pretty(value: &Value) -> String {
 }
 
 /// The instruction files as one section of the system prompt.
-fn instruction_section(sources: &Sources) -> String {
+pub fn instruction_section(sources: &Sources) -> String {
     let mut out = String::new();
     for (label, text) in &sources.instructions {
         out.push_str(&format!(
@@ -231,371 +110,6 @@ fn instruction_section(sources: &Sources) -> String {
         ));
     }
     out
-}
-
-/// Builds the sandbox of `arm` in `<arms_dir>/<arm>/`.
-pub fn build(arm: BenchArm, arms_dir: &Path, sources: &Sources) -> Result<Sandbox, String> {
-    let dir = arms_dir.join(arm.name());
-    let cwd = dir.join("cwd");
-    std::fs::create_dir_all(&cwd)
-        .map_err(|err| format!("cannot create {}: {err}", cwd.display()))?;
-    let settings_file = dir.join("settings.json");
-    write(&settings_file, &pretty(&settings()))?;
-    let mcp_file = dir.join("mcp.json");
-    let system_file = dir.join("system.md");
-    let mut args = common_args(&settings_file, &mcp_file);
-    let mut scratch = None;
-    let (servers, system, description) = match arm {
-        BenchArm::None => {
-            args.extend(["--tools".to_string(), String::new()]);
-            (
-                json!({}),
-                "# Memory\n\nYou have no memory of earlier sessions with this developer.\n"
-                    .to_string(),
-                "no memory: no instruction files, no tools".to_string(),
-            )
-        }
-        BenchArm::Files => {
-            let mut copied = 0;
-            let mut index = String::new();
-            if let Some(memory_dir) = &sources.memory_dir {
-                let entries = std::fs::read_dir(memory_dir)
-                    .map_err(|err| format!("cannot read {}: {err}", memory_dir.display()))?;
-                for path in entries.filter_map(Result::ok).map(|e| e.path()) {
-                    if !path.is_file() || path.extension().is_none_or(|ext| ext != "md") {
-                        continue;
-                    }
-                    let Some(name) = path.file_name() else {
-                        continue;
-                    };
-                    std::fs::copy(&path, cwd.join(name))
-                        .map_err(|err| format!("cannot copy {}: {err}", path.display()))?;
-                    copied += 1;
-                }
-                index = std::fs::read_to_string(memory_dir.join("MEMORY.md")).unwrap_or_default();
-            }
-            args.extend(["--tools".to_string(), "Read,Grep,Glob".to_string()]);
-            (
-                json!({}),
-                format!(
-                    "{}# Memory\n\nYou have a persistent memory from earlier sessions on this \
-                     project. Its index, MEMORY.md, is shown below. Each line links a memory \
-                     file; the files are in your current working directory. Read them with \
-                     Read/Grep/Glob.\n\nContents of MEMORY.md:\n{index}\n",
-                    instruction_section(sources)
-                ),
-                format!(
-                    "file memory: {} instruction file(s), MEMORY.md and {copied} memory file(s) \
-                     copied, tools Read/Grep/Glob",
-                    sources.instructions.len()
-                ),
-            )
-        }
-        BenchArm::Graph => {
-            let data = dir.join("data");
-            let fork = crate::runtime::store::default_store_dir(&data);
-            fork_store(&sources.store_dir, &fork)?;
-            scratch = Some(data.clone());
-            args.extend([
-                "--tools".to_string(),
-                String::new(),
-                "--allowedTools".to_string(),
-                READ_FUNCTIONS
-                    .iter()
-                    .map(|f| format!("mcp__{SERVER}__{f}"))
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ]);
-            (
-                json!({SERVER: {
-                    "type": "stdio",
-                    "command": sources.exe.display().to_string(),
-                    "args": ["mcp", "--no-daemon", "--data-dir", data.display().to_string(),
-                             "--project", sources.project],
-                    "env": {crate::memory::summaries::HOOK_ENV: "off"},
-                }}),
-                format!(
-                    "{}# Memory\n\nYour memory of this developer and every past session of this \
-                     project is kept in a graph behind your MCP tools (server {SERVER}): \
-                     memories, memory, sessions, session, recall. Look up what you need. The \
-                     memory is read-only in this task.\n",
-                    instruction_section(sources)
-                ),
-                format!(
-                    "graph memory: {} instruction file(s), the use tools {} on a fork of the \
-                     store",
-                    sources.instructions.len(),
-                    READ_FUNCTIONS.join("/")
-                ),
-            )
-        }
-        BenchArm::Current => {
-            return Err(
-                "the arm `current` (a copy of your own MCP setup) is not built yet: copying \
-                 another tool's server could let it write to its live data. Use none, files \
-                 and graph."
-                    .to_string(),
-            );
-        }
-    };
-    write(&mcp_file, &pretty(&json!({"mcpServers": servers})))?;
-    write(&system_file, &system)?;
-    args.extend([
-        "--append-system-prompt-file".to_string(),
-        system_file.display().to_string(),
-    ]);
-    Ok(Sandbox {
-        arm,
-        cwd,
-        args,
-        description,
-        scratch,
-        env: Vec::new(),
-    })
-}
-
-/// The sandbox of `arm` for opencode in `<arms_dir>/<arm>/`: `opencode run --format json` in
-/// its own configuration and data directories (`user_db`: whose `auth.json` is copied).
-pub fn build_opencode(
-    arm: BenchArm,
-    arms_dir: &Path,
-    sources: &Sources,
-    user_db: &Path,
-) -> Result<Sandbox, String> {
-    let dir = arms_dir.join(arm.name());
-    let cwd = dir.join("cwd");
-    std::fs::create_dir_all(&cwd)
-        .map_err(|err| format!("cannot create {}: {err}", cwd.display()))?;
-    let system_file = dir.join("system.md");
-    let mut scratch = None;
-    let (mcp, allow, system, description): (Value, Vec<String>, String, String) = match arm {
-        BenchArm::None => (
-            json!({}),
-            Vec::new(),
-            "# Memory\n\nYou have no memory of earlier sessions with this developer.\n".to_string(),
-            "no memory: no instruction files, no tools".to_string(),
-        ),
-        BenchArm::Files => (
-            json!({}),
-            Vec::new(),
-            format!(
-                "{}# Memory\n\nYour memory of this developer is the instructions above (opencode \
-                 keeps no other memory).\n",
-                instruction_section(sources)
-            ),
-            format!(
-                "file memory: {} instruction file(s) (opencode has no memory files), no tools",
-                sources.instructions.len()
-            ),
-        ),
-        BenchArm::Graph => {
-            let data = dir.join("data-store");
-            let fork = crate::runtime::store::default_store_dir(&data);
-            fork_store(&sources.store_dir, &fork)?;
-            scratch = Some(data.clone());
-            (
-                json!({SERVER: {
-                    "type": "local",
-                    "command": [sources.exe.display().to_string(), "mcp", "--no-daemon",
-                                "--data-dir", data.display().to_string(),
-                                "--project", sources.project],
-                    "environment": {crate::memory::summaries::HOOK_ENV: "off"},
-                    "enabled": true,
-                }}),
-                READ_FUNCTIONS
-                    .iter()
-                    .map(|f| format!("{SERVER}_{f}"))
-                    .collect(),
-                format!(
-                    "{}# Memory\n\nYour memory of this developer and every past session of this \
-                     project is kept in a graph behind your MCP tools (server {SERVER}): \
-                     memories, memory, sessions, session, recall. Look up what you need. The \
-                     memory is read-only in this task.\n",
-                    instruction_section(sources)
-                ),
-                format!(
-                    "graph memory: {} instruction file(s), the use tools {} on a fork of the \
-                     store",
-                    sources.instructions.len(),
-                    READ_FUNCTIONS.join("/")
-                ),
-            )
-        }
-        BenchArm::Current => {
-            return Err(
-                "the arm `current` (a copy of your own MCP setup) is not built yet. Use none, \
-                 files and graph."
-                    .to_string(),
-            );
-        }
-    };
-    write(&system_file, &system)?;
-    let allow: Vec<&str> = allow.iter().map(String::as_str).collect();
-    let env = crate::harnesses::opencode::build_sandbox(
-        &dir.join("opencode"),
-        &json!({"mcp": mcp, "permission": crate::harnesses::opencode::permissions(&allow),
-                "instructions": [system_file.display().to_string()]}),
-        Some(user_db),
-    )?;
-    Ok(Sandbox {
-        arm,
-        cwd,
-        args: vec!["--format".to_string(), "json".to_string()],
-        description,
-        scratch,
-        env,
-    })
-}
-
-/// The opencode sandbox of the generator and the judge: no tools, no MCP servers, no context,
-/// in `<dir>/`. Returns the working directory and the environment.
-pub fn tool_free_opencode(
-    dir: &Path,
-    user_db: &Path,
-) -> Result<(PathBuf, Vec<(String, String)>), String> {
-    let cwd = dir.join("cwd");
-    std::fs::create_dir_all(&cwd)
-        .map_err(|err| format!("cannot create {}: {err}", cwd.display()))?;
-    let env = crate::harnesses::opencode::build_sandbox(
-        &dir.join("opencode"),
-        &json!({"mcp": {}, "permission": crate::harnesses::opencode::permissions(&[])}),
-        Some(user_db),
-    )?;
-    Ok((cwd, env))
-}
-
-/// The `config.toml` of a Codex sandbox with `tables` (the graph arm's server).
-fn codex_config(user_config: &Path, tables: &str) -> String {
-    crate::harnesses::codex::sandbox_config(Some(user_config), tables)
-}
-
-/// The sandbox of `arm` for Codex in `<arms_dir>/<arm>/`: `codex exec --json` with a
-/// `CODEX_HOME` of its own (`paths`: the user's Codex home, whose model settings and login are
-/// copied).
-pub fn build_codex(
-    arm: BenchArm,
-    arms_dir: &Path,
-    sources: &Sources,
-    paths: &crate::harnesses::codex::CodexPaths,
-) -> Result<Sandbox, String> {
-    let dir = arms_dir.join(arm.name());
-    let cwd = dir.join("cwd");
-    std::fs::create_dir_all(&cwd)
-        .map_err(|err| format!("cannot create {}: {err}", cwd.display()))?;
-    let mut scratch = None;
-    let (tables, system, description) = match arm {
-        BenchArm::None => (
-            String::new(),
-            "# Memory\n\nYou have no memory of earlier sessions with this developer.\n".to_string(),
-            "no memory: no instruction files, no tools".to_string(),
-        ),
-        BenchArm::Files => (
-            String::new(),
-            format!(
-                "{}# Memory\n\nYour memory of this developer is the instructions above (Codex \
-                 keeps no memory files).\n",
-                instruction_section(sources)
-            ),
-            format!(
-                "file memory: {} instruction file(s) (Codex has no memory files), no tools",
-                sources.instructions.len()
-            ),
-        ),
-        BenchArm::Graph => {
-            let data = dir.join("data-store");
-            let fork = crate::runtime::store::default_store_dir(&data);
-            fork_store(&sources.store_dir, &fork)?;
-            scratch = Some(data.clone());
-            let args = [
-                "mcp".to_string(),
-                "--no-daemon".to_string(),
-                "--data-dir".to_string(),
-                data.display().to_string(),
-                "--project".to_string(),
-                sources.project.clone(),
-            ];
-            let tools: Vec<String> = READ_FUNCTIONS.iter().map(|f| f.to_string()).collect();
-            (
-                format!(
-                    "[mcp_servers.{SERVER}]\ncommand = {}\nargs = {}\nstartup_timeout_sec = {}\n\
-                     enabled_tools = {}\ndefault_tools_approval_mode = \"approve\"\n\
-                     env = {{ {} = \"off\" }}\n",
-                    crate::install::tomledit::string(&sources.exe.display().to_string()),
-                    crate::install::tomledit::strings(&args),
-                    crate::harnesses::codex::STARTUP_TIMEOUT_SECS,
-                    crate::install::tomledit::strings(&tools),
-                    crate::memory::summaries::HOOK_ENV
-                ),
-                format!(
-                    "{}# Memory\n\nYour memory of this developer and every past session of this \
-                     project is kept in a graph behind your MCP tools (server {SERVER}): \
-                     memories, memory, sessions, session, recall. Look up what you need. The \
-                     memory is read-only in this task.\n",
-                    instruction_section(sources)
-                ),
-                format!(
-                    "graph memory: {} instruction file(s), the use tools {} on a fork of the \
-                     store",
-                    sources.instructions.len(),
-                    READ_FUNCTIONS.join("/")
-                ),
-            )
-        }
-        BenchArm::Current => {
-            return Err(
-                "the arm `current` (a copy of your own MCP setup) is not built yet. Use none, \
-                 files and graph."
-                    .to_string(),
-            );
-        }
-    };
-    let env = crate::harnesses::codex::build_sandbox(
-        &dir.join("codex"),
-        &codex_config(&paths.config_file, &tables),
-        Some(&system),
-        Some(&paths.auth_file()),
-    )?;
-    Ok(Sandbox {
-        arm,
-        cwd,
-        args: Vec::new(),
-        description,
-        scratch,
-        env,
-    })
-}
-
-/// The Codex sandbox of the generator and the judge: no tools, no MCP servers, no context, in
-/// `<dir>/`. Returns the working directory and the environment.
-pub fn tool_free_codex(
-    dir: &Path,
-    paths: &crate::harnesses::codex::CodexPaths,
-) -> Result<(PathBuf, Vec<(String, String)>), String> {
-    let cwd = dir.join("cwd");
-    std::fs::create_dir_all(&cwd)
-        .map_err(|err| format!("cannot create {}: {err}", cwd.display()))?;
-    let env = crate::harnesses::codex::build_sandbox(
-        &dir.join("codex"),
-        &codex_config(&paths.config_file, ""),
-        None,
-        Some(&paths.auth_file()),
-    )?;
-    Ok((cwd, env))
-}
-
-/// The sandbox of the generator and the judge: no tools, no MCP servers, no context, in
-/// `<run dir>/<name>/`.
-pub fn tool_free(dir: &Path) -> Result<(PathBuf, Vec<String>), String> {
-    let cwd = dir.join("cwd");
-    std::fs::create_dir_all(&cwd)
-        .map_err(|err| format!("cannot create {}: {err}", cwd.display()))?;
-    let settings_file = dir.join("settings.json");
-    write(&settings_file, &pretty(&settings()))?;
-    let mcp_file = dir.join("mcp.json");
-    write(&mcp_file, &pretty(&json!({"mcpServers": {}})))?;
-    let mut args = common_args(&settings_file, &mcp_file);
-    args.extend(["--tools".to_string(), String::new()]);
-    Ok((cwd, args))
 }
 
 /// Copies the live store in `store_dir` into `fork` (`Store::fork_dir`, read without the
@@ -649,12 +163,14 @@ mod tests {
         let labels =
             |found: Vec<(String, String)>| found.into_iter().map(|(l, _)| l).collect::<Vec<_>>();
         assert_eq!(
-            labels(Sources::opencode_instructions_of(&v1, &project)),
+            labels(crate::harnesses::opencode::bench::instructions(
+                &v1, &project
+            )),
             vec!["global AGENTS.md", "project AGENTS.md"]
         );
         let v2 = OpenCodePaths::of_home_for(home.path(), Major::V2);
         assert_eq!(
-            Sources::opencode_instructions_of(&v2, &project),
+            crate::harnesses::opencode::bench::instructions(&v2, &project),
             vec![(
                 "project AGENTS.md".to_string(),
                 "project rules\n".to_string()
