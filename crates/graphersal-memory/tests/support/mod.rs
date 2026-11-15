@@ -20,7 +20,9 @@ pub use uds_windows::UnixStream;
 #[cfg(unix)]
 pub fn alive(pid: u64) -> bool {
     // `kill -0` answers yes for a zombie too: a process that exited and whose parent (the
-    // shim's waiting thread) has not collected it yet. `ps` tells its state (`Z`: exited).
+    // shim's waiting thread) has not collected it yet. `ps` tells its state (`Z`: exited; the
+    // flag `E`, macOS: exiting, its files and locks already released, so a `daemon stop` that
+    // saw the pid lock free may find it so for a moment).
     Command::new("ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
         .stderr(Stdio::null())
@@ -28,7 +30,10 @@ pub fn alive(pid: u64) -> bool {
         .is_ok_and(|output| {
             let state = String::from_utf8_lossy(&output.stdout);
             let state = state.trim();
-            output.status.success() && !state.is_empty() && !state.starts_with('Z')
+            output.status.success()
+                && !state.is_empty()
+                && !state.starts_with('Z')
+                && !state.contains('E')
         })
 }
 

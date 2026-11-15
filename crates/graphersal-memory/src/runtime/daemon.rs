@@ -1146,8 +1146,16 @@ impl Daemon {
                 return;
             }
         };
-        let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
-        let mut reader = BufReader::new(stream);
+        // Every read through `Patient`: the handshake (and a relayed body) within
+        // `HANDSHAKE_TIMEOUT`, the MCP stream without a limit, neither waiting on the kernel's
+        // wake-up alone (`ipc::Patient`).
+        let mut reader = match ipc::Patient::new(stream, Some(HANDSHAKE_TIMEOUT)) {
+            Ok(patient) => BufReader::new(patient),
+            Err(err) => {
+                log(&format!("cannot use a connection: {err}"));
+                return;
+            }
+        };
         let mut line = Vec::new();
         let limit = u64::try_from(protocol::MAX_HANDSHAKE_BYTES).unwrap_or(u64::MAX) + 1;
         if let Err(err) = (&mut reader).take(limit).read_until(b'\n', &mut line) {
@@ -1286,7 +1294,7 @@ impl Daemon {
             json!({"ok": true, "daemon_version": self.options.version, "store": store.name()})
                 .to_string(),
         );
-        let _ = reader.get_ref().set_read_timeout(None);
+        reader.get_mut().set_limit(None);
         let profile = match handshake.profile {
             crate::cli::Profile::Use => "use",
             crate::cli::Profile::Develop => "develop",
@@ -1378,7 +1386,7 @@ impl Daemon {
     fn relay(
         &self,
         frame: &crate::ui::relay::Frame,
-        reader: &mut BufReader<Stream>,
+        reader: &mut BufReader<ipc::Patient>,
     ) -> Result<RelayAnswer, (Refusal, String)> {
         let body = crate::ui::relay::read_body(reader, frame.body_length)
             .map_err(|err| (Refusal::BadHandshake, err))?;

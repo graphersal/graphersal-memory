@@ -67,6 +67,60 @@ pub type Listener = std::os::unix::net::UnixListener;
 #[cfg(windows)]
 pub type Listener = uds_windows::UnixListener;
 
+/// How long a read on a [`Patient`] stream waits in the kernel before it looks again.
+pub const READ_TICK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A connection's reading side that does not wait on the kernel's wake-up alone.
+///
+/// macOS 27 (Darwin 27.0.0) sometimes loses the wake-up of a thread blocked in `recv` on an
+/// accepted AF_UNIX stream socket when the peer shuts its writing side down: the end of the
+/// stream is there (a non-blocking peek answers it), but the blocked read never returns. Seen
+/// about once in 1,500 shutdowns, reproduced without this program (a plain socket pair through
+/// `listen`/`accept`, one thread blocked in `recv`, the peer's `shutdown(SHUT_WR)`); a shim
+/// whose harness ended its session then waited for the daemon forever, and the daemon's
+/// connection with it. So every read waits at most [`READ_TICK`] in the kernel and then
+/// reads again, which finds the end of the stream at once; a read without data for its
+/// `limit` (when there is one) fails with the timeout as a plain read with that timeout would.
+#[derive(Debug)]
+pub struct Patient {
+    stream: Stream,
+    limit: Option<std::time::Duration>,
+}
+
+impl Patient {
+    /// Reads `stream`, failing a read that gets no data for `limit` (`None`: never).
+    pub fn new(stream: Stream, limit: Option<std::time::Duration>) -> std::io::Result<Self> {
+        stream.set_read_timeout(Some(READ_TICK))?;
+        Ok(Self { stream, limit })
+    }
+
+    /// Changes how long a read may get no data (`None`: no limit).
+    pub fn set_limit(&mut self, limit: Option<std::time::Duration>) {
+        self.limit = limit;
+    }
+}
+
+impl std::io::Read for Patient {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let started = std::time::Instant::now();
+        loop {
+            match self.stream.read(buf) {
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if self.limit.is_some_and(|limit| started.elapsed() >= limit) {
+                        return Err(err);
+                    }
+                }
+                other => return other,
+            }
+        }
+    }
+}
+
 /// Resolves the run directory from the flag, the environment (`env` reads one variable), the
 /// data directory and the platform.
 pub fn resolve_run_dir(
@@ -252,6 +306,58 @@ pub fn daemon_alive(run_dir: &Path) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A connected pair through a listening socket (the daemon's kind) in `dir`.
+    fn connected_pair(dir: &Path) -> (Stream, Stream) {
+        let path = dir.join("p.sock");
+        let listener = Listener::bind(&path).unwrap();
+        let client = Stream::connect(&path).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        (client, accepted)
+    }
+
+    #[test]
+    fn a_patient_read_passes_data_and_finds_the_end_after_a_shutdown() {
+        use std::io::{BufRead, Write};
+        let dir = std::env::temp_dir().join(format!("gm-patient-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut client, accepted) = connected_pair(&dir);
+        let mut reader = std::io::BufReader::new(Patient::new(accepted, None).unwrap());
+        client.write_all(b"one\n").unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line, "one\n");
+        // The peer ends its side later than a tick: the read keeps waiting, then sees the end.
+        let ender = std::thread::spawn(move || {
+            std::thread::sleep(READ_TICK + READ_TICK / 2);
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+            client
+        });
+        line.clear();
+        assert_eq!(reader.read_line(&mut line).unwrap(), 0);
+        drop(ender.join().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_patient_read_without_data_fails_after_its_limit() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("gm-patient-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_client, accepted) = connected_pair(&dir);
+        let mut patient = Patient::new(accepted, Some(READ_TICK / 2)).unwrap();
+        let started = std::time::Instant::now();
+        let err = patient.read(&mut [0u8; 8]).unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "{err}"
+        );
+        assert!(started.elapsed() >= READ_TICK / 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
         move |name| {
