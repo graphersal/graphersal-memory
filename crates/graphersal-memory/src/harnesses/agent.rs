@@ -240,6 +240,11 @@ pub trait Harness {
     fn hook(&self) -> Option<&dyn HookHandler> {
         None
     }
+    /// Its memory directories with their projects, when it has a file memory of its own
+    /// (`has_file_memory`; the import reads them, `crate::memory::import`).
+    fn memory_dirs(&self) -> Result<Vec<crate::memory::import::MemoryDir>, String> {
+        Ok(Vec::new())
+    }
     /// Whether its own start hook delivers the start context now (then the MCP instructions
     /// leave it out: Claude Code's SessionStart hook).
     fn start_hook_installed(&self, _setup: &Setup) -> bool {

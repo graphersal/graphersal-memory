@@ -64,6 +64,7 @@ What a harness may have (the default is "none"):
 | `own_memory_restored` | uninstall switches its own memory back on, with a report line |
 | `action_needed` | the user has to do something in the harness for the install to work fully (Codex: trust the hooks) |
 | `has_plugin` | it gets a session plugin rather than hooks (opencode) |
+| `memory_dirs` | it has a file memory of its own (`has_file_memory`): its memory directories with their projects, which the import reads (the same format as Claude Code's: `MEMORY.md` and one file per memory); `memory_dir(root)` must be where one project's files are |
 | `export_hint` | it has no file memory: how to give the agent an exported file |
 | `Headless` (in `driver`) | its headless command runs the summaries (or the bench), or must be refused |
 
@@ -76,7 +77,8 @@ never asks which harness it is.
   checks once its registry line and `user_files` exist: install then uninstall gives every file
   back byte for byte, a second install and a refresh change nothing, a dry run writes nothing,
   status names the parts, a configuration without the program is a leftover, the develop
-  server goes on and off, a read-only file is refused with nothing written.
+  server goes on and off, a read-only file is refused with nothing written, and, for a harness
+  with a file memory, a memory file written in its `memory_dir` is found by its `memory_dirs`.
 - The harness's own tests cover what is particular to it: the shape of its entries, its rule
   block and where it goes, its own memory switch, its session reader (with a fixture of the
   real format), its hook input.

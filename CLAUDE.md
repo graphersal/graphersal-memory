@@ -52,7 +52,8 @@ Unit tests that need more than one module's helpers sit beside their module as
     (`find_program`), its configuration roots, whether our parts are in its files, its part of an
     install (`plan` -> `install::HarnessPlan` with the state `records` written with their file;
     `PlanInput`), of an uninstall (`removal`, `own_memory_restored`), `status_lines`, `doctor`,
-    `develop_on`, `action_needed`, `has_plugin`, `has_sessions`, `export_hint`, the optional capabilities
+    `develop_on`, `action_needed`, `has_plugin`, `has_sessions`, `export_hint`, `memory_dirs` (with
+    `has_file_memory` and `memory_dir`: a file memory the import reads), the optional capabilities
     `own_memory` (`OwnMemory`), `native_memory` (`NativeMemory`), `other_memory`
     (`coexist::OtherMemory`) and `hook` (`HookHandler`: `hook --harness <id>`; none: "needs no
     hook"), the MCP configuration file, its
@@ -68,9 +69,9 @@ Unit tests that need more than one module's helpers sit beside their module as
     `PREVIOUS_BLOCK_FINGERPRINTS`, `ClaudePaths`, the block helpers, `claude_plan`, the
     structural `claude_removal`, `inspect`, `status_lines`, `claude_doctor`, the Git Bash checks,
     `claude_start_hook_installed`), `claude_code/other.rs` its
-    `OtherMemory`, `claude_code/sessions.rs` its `SessionSource`, `claude_code/import.rs` its
-    file-memory import (`crate::memory::import` keeps `Caller`/`Connect`/`slugify` and the memory-file
-    format), `claude_code/transcript.rs` its JSONL parser (`crate::memory::transcript`
+    `OtherMemory`, `claude_code/sessions.rs` its `SessionSource`, `claude_code/import.rs` where
+    its file memory is (`scan` of `projects/*/memory`, `claude_slug`, the project of a directory:
+    `resolve_project_dir`, `decode`; behind `Harness::memory_dirs`), `claude_code/transcript.rs` its JSONL parser (`crate::memory::transcript`
     keeps the shared `Transcript`, memory writes and path helpers), `claude_code/hook.rs` its
     hook (`crate::memory::hook` keeps the shared events, input and queueing);
   - `src/harnesses/mod.rs`: the registry, the one place that names every harness (`Harnesses`:
@@ -224,8 +225,10 @@ Unit tests that need more than one module's helpers sit beside their module as
   - `src/install/jsonedit.rs`: minimal-change JSON text edits (insert/remove one member or element, keep
     every other byte), used for the harness's files; `claude mcp add` is not used because it
     rewrites the whole file;
-  - `src/memory/import.rs` (shared: `Caller`, `Connect`, `slugify`, the memory-file format) +
-    `src/harnesses/claude_code/import.rs`: the Claude Code file-memory import (parse `MEMORY.md` + memory files, resolve
+  - `src/memory/import.rs`: `Caller`, `Connect`, `slugify`, the memory-file format, and the
+    file-memory import of every harness that has a file memory (`file_memory_dirs`: the
+    harnesses' `memory_dirs`; `import_project` of one `memory_dir` at a session start; Claude
+    Code's directories in `src/harnesses/claude_code/import.rs`) (parse `MEMORY.md` + memory files, resolve
     the project from transcripts or by decoding the directory name, plan new/changed by
     fingerprint in `<data dir>/import/claude-code.json`, write through `remember`, the import lock;
     `<slug>.graphersal.md` files skipped, the export's first-line notes taken off, folded YAML

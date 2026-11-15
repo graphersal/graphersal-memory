@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::harnesses::agent::Kind;
-use crate::harnesses::claude_code::install::ClaudePaths;
 use crate::install::Setup;
 use crate::memory::import::Connect;
 use crate::memory::sessions::Request;
@@ -34,10 +33,10 @@ use crate::memory::sessions::Request;
 pub struct Plan {
     /// The data directory (the import's state and lock).
     pub data_dir: PathBuf,
-    /// Claude Code's files, when its memory files are imported.
-    pub claude: Option<ClaudePaths>,
-    /// The directories whose Claude Code memory files are imported (the session's working
-    /// directory and its project root, when they differ).
+    /// The memory directories imported at the start: of every harness with a file memory of
+    /// its own (Claude Code's), for each of `dirs` (`Harness::memory_dir`).
+    pub memory_dirs: Vec<PathBuf>,
+    /// The session's working directory and its project root (when they differ).
     pub dirs: Vec<PathBuf>,
     /// The project the imported memories belong to (a directory the project key is taken
     /// from).
@@ -49,7 +48,7 @@ pub struct Plan {
 impl Plan {
     /// Whether there is nothing to do.
     pub fn is_empty(&self) -> bool {
-        self.claude.is_none() && self.requests.is_empty()
+        self.memory_dirs.is_empty() && self.requests.is_empty()
     }
 }
 
@@ -75,11 +74,12 @@ pub fn plan(setup: &Setup, harness: &str, cwd: &Path, project: &Path) -> Plan {
     }
     Plan {
         data_dir: setup.data_dir.clone(),
-        // The file memory imported at the session start (Claude Code's).
-        claude: kinds
+        memory_dirs: kinds
             .iter()
-            .any(|kind| setup.agent_of(*kind).has_file_memory())
-            .then(|| setup.paths().clone()),
+            .map(|kind| setup.agent_of(*kind))
+            .filter(|harness| harness.has_file_memory())
+            .flat_map(|harness| dirs.iter().map(|dir| harness.memory_dir(dir)))
+            .collect(),
         dirs,
         project_dir: project.to_path_buf(),
         requests,
@@ -109,19 +109,16 @@ pub fn start(
     deadline: Instant,
 ) -> Done {
     let mut done = Done::default();
-    if let Some(paths) = &plan.claude {
-        for dir in &plan.dirs {
-            let (imported, notes) = crate::harnesses::claude_code::hook::import_project(
-                dir,
-                &plan.project_dir,
-                paths,
-                &plan.data_dir,
-                connect,
-                deadline,
-            );
-            done.imported += imported;
-            done.notes.extend(notes);
-        }
+    for memory_dir in &plan.memory_dirs {
+        let (imported, notes) = crate::memory::import::import_project(
+            memory_dir,
+            &plan.project_dir,
+            &plan.data_dir,
+            connect,
+            deadline,
+        );
+        done.imported += imported;
+        done.notes.extend(notes);
     }
     queue(plan, enqueue, &mut done);
     done
@@ -192,7 +189,7 @@ mod tests {
         let work = home.path().join("work");
         let sub = work.join("src");
         let plan = plan(&setup, "claude-code", &sub, &work);
-        assert!(plan.claude.is_some());
+        assert!(!plan.memory_dirs.is_empty());
         assert_eq!(plan.dirs, vec![sub, work]);
         assert_eq!(plan.requests.len(), 1);
         assert_eq!(plan.requests[0].harness, Kind::ClaudeCode);
@@ -247,7 +244,7 @@ mod tests {
     fn a_failed_request_is_a_note_and_the_rest_still_goes() {
         let plan = Plan {
             data_dir: PathBuf::from("/nowhere"),
-            claude: None,
+            memory_dirs: Vec::new(),
             dirs: Vec::new(),
             project_dir: PathBuf::from("/w"),
             requests: vec![

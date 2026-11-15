@@ -195,3 +195,41 @@ fn a_read_only_configuration_is_refused_and_nothing_is_written() {
         memory.close();
     });
 }
+
+#[test]
+fn a_file_memory_finds_the_memory_files_written_where_the_harness_keeps_them() {
+    each("files", |kind, home, data| {
+        let setup = machine(kind, home, data);
+        let harness = setup.agent_of(kind);
+        if !harness.has_file_memory() {
+            return;
+        }
+        // A project and a memory file where the harness keeps that project's memories.
+        let project = home.join("work").join("app");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        let project = crate::runtime::mcp::canonical(&project);
+        let dir = harness.memory_dir(&project);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("MEMORY.md"),
+            "- [Tabs](tabs.md) — indent with tabs\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("tabs.md"),
+            "---\nname: tabs\ndescription: indent with tabs\nmetadata:\n  type: feedback\n---\n\nTabs.\n",
+        )
+        .unwrap();
+        let dirs = harness.memory_dirs().unwrap();
+        let found = dirs
+            .iter()
+            .find(|d| d.dir == dir)
+            .unwrap_or_else(|| panic!("{kind:?}: memory_dirs misses {}", dir.display()));
+        assert!(
+            found.files.iter().any(|file| file.slug == "tabs"),
+            "{kind:?}: {:?}",
+            found.files.iter().map(|f| &f.slug).collect::<Vec<_>>()
+        );
+        assert!(found.project.is_some(), "{kind:?}: the project is found");
+    });
+}

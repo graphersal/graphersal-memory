@@ -458,7 +458,7 @@ pub fn apply(native: &Native, connect: &mut Connect<'_>, data_dir: &Path) -> Rep
             Ok(answer) if answer["kept"] == "edited" => {
                 report
                     .kept_edited
-                    .push(crate::harnesses::claude_code::import::kept_edited_line(
+                    .push(crate::memory::import::kept_edited_line(
                         &native.store.display().to_string(),
                         &slug,
                     ));

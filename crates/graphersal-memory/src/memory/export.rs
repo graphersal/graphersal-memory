@@ -598,8 +598,7 @@ pub fn write(agent: &dyn Harness, data_dir: &Path, rows: &[Row]) -> Result<Repor
             .or_default()
             .push(row);
     }
-    let imported =
-        crate::harnesses::claude_code::import::ImportState::load(data_dir).unwrap_or_default();
+    let imported = crate::memory::import::ImportState::load(data_dir).unwrap_or_default();
     let mut other_tools = crate::install::coexist::other_import::State::load(data_dir).slugs();
     // A harness's own memory store keeps the entries imported from it too (CodeWhale's).
     for kind in crate::harnesses::agent::Kind::ALL {
