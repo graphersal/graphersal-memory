@@ -636,7 +636,8 @@ session that just ended is indexed once it has been unchanged for 30 minutes (at
 start or end, or `import --sessions`) instead of right away; the imported-files count in the
 start line; and Cursor's transcripts, which are known only from what its hooks report.
 
-The installation code talks to the harness through one interface (`src/agents.rs`: its MCP
-configuration file, settings file, instruction file, projects directory, memory directory of a
-project, global memory file, auto-memory switch and headless command), so the next harness is a
-new implementation of it rather than a new code path.
+The code talks to a harness through one interface (the `Harness` trait in
+`src/harnesses/agent.rs`: its program, files, install and uninstall parts, status and doctor,
+and optional capabilities for its own memory, other memory, sessions, hooks and headless runs),
+and one registry names every harness (`src/harnesses/mod.rs`), so the next harness is a new
+module that implements it rather than a new code path.

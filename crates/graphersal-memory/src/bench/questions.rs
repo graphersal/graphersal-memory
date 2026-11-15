@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{Value, json};
 
 use crate::fsutil;
-use crate::transcript::{self, clip};
+use crate::memory::transcript::{self, clip};
 
 /// The categories the generator writes, in report order.
 pub const CATEGORIES: [&str; 3] = ["rule", "decision", "history"];
@@ -373,7 +373,7 @@ impl QuestionSet {
             file,
             format!(
                 "{}\n",
-                crate::jsonedit::render(&self.to_json(), Some("  "), 0)
+                crate::install::jsonedit::render(&self.to_json(), Some("  "), 0)
             )
             .as_bytes(),
         )
@@ -382,16 +382,16 @@ impl QuestionSet {
 
 /// The question file of `project`.
 pub fn path(data_dir: &Path, project: &str) -> PathBuf {
-    data_dir
-        .join("bench")
-        .join("questions")
-        .join(format!("{}.json", crate::import::claude_slug(project)))
+    data_dir.join("bench").join("questions").join(format!(
+        "{}.json",
+        crate::memory::import::claude_slug(project)
+    ))
 }
 
 /// The finished transcripts of `project` in Claude Code's `projects` directory (its directory
 /// is named after the project's path), newest first.
 pub fn transcripts(projects_dir: &Path, project: &str, now: SystemTime) -> Vec<PathBuf> {
-    let dir = projects_dir.join(crate::import::claude_slug(project));
+    let dir = projects_dir.join(crate::memory::import::claude_slug(project));
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -419,12 +419,12 @@ pub fn opencode_transcripts(
     let now = now
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    crate::opencode::sessions::of_project(db, Path::new(project))
+    crate::harnesses::opencode::sessions::of_project(db, Path::new(project))
         .unwrap_or_default()
         .into_iter()
         .filter(|(_, updated)| now.saturating_sub(*updated) >= RECENT.as_secs())
         .filter_map(|(id, _)| {
-            crate::opencode::sessions::read(db, &id)
+            crate::harnesses::opencode::sessions::read(db, &id)
                 .ok()
                 .map(|t| (id, t))
         })
@@ -442,7 +442,7 @@ pub fn codex_transcripts(
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let mut found: Vec<(u64, PathBuf)> =
-        crate::codex::sessions::of_project(sessions, Path::new(project))
+        crate::harnesses::codex::sessions::of_project(sessions, Path::new(project))
             .into_iter()
             .filter(|(_, modified)| now.saturating_sub(*modified) >= RECENT.as_secs())
             .map(|(path, modified)| (modified, path))
@@ -451,9 +451,9 @@ pub fn codex_transcripts(
     found
         .into_iter()
         .filter_map(|(_, path)| {
-            crate::codex::sessions::read(&path)
+            crate::harnesses::codex::sessions::read(&path)
                 .ok()
-                .map(|t| (crate::codex::sessions::thread_id(&path), t))
+                .map(|t| (crate::harnesses::codex::sessions::thread_id(&path), t))
         })
         .collect()
 }
@@ -482,7 +482,7 @@ impl Excerpt {
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
-                let parsed = crate::claude_code::transcript::parse(&bytes, &uuid);
+                let parsed = crate::harnesses::claude_code::transcript::parse(&bytes, &uuid);
                 Some((uuid, parsed))
             })
             .collect();
@@ -1018,7 +1018,7 @@ mod tests {
 
     #[test]
     fn a_question_set_round_trips_and_an_edit_is_validated() {
-        let dir = crate::mcp_tests::TempDir::new("qset");
+        let dir = crate::runtime::mcp_tests::TempDir::new("qset");
         let set = QuestionSet {
             project: "/w/p".into(),
             generated_at: "2026-11-10T00:00:00Z".into(),
@@ -1053,9 +1053,13 @@ mod tests {
 
     #[test]
     fn the_excerpt_marks_turn_ids_and_respects_its_budget() {
-        let dir = crate::mcp_tests::TempDir::new("excerpt");
+        let dir = crate::runtime::mcp_tests::TempDir::new("excerpt");
         let file = dir.path().join("0f0e0d0c-aaaa.jsonl");
-        std::fs::write(&file, crate::claude_code::transcript::tests::fixture()).unwrap();
+        std::fs::write(
+            &file,
+            crate::harnesses::claude_code::transcript::tests::fixture(),
+        )
+        .unwrap();
         let excerpt = Excerpt::of(std::slice::from_ref(&file), EXCERPT_BUDGET);
         assert_eq!(excerpt.sessions, 1);
         assert!(
@@ -1074,7 +1078,7 @@ mod tests {
 
     #[test]
     fn only_finished_transcripts_of_the_project_are_taken_newest_first() {
-        let dir = crate::mcp_tests::TempDir::new("transcripts");
+        let dir = crate::runtime::mcp_tests::TempDir::new("transcripts");
         let project_dir = dir.path().join("-w-p");
         std::fs::create_dir_all(&project_dir).unwrap();
         for name in ["a.jsonl", "b.jsonl", "notes.txt"] {
