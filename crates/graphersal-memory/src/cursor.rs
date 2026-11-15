@@ -52,6 +52,7 @@
 //!   to export old ones. Cursor has no file memory to write back into: the export of
 //!   `uninstall` writes readable Markdown files into `~/graphersal-memory-export/cursor/`.
 
+pub mod hook;
 pub mod install;
 pub mod other;
 pub mod sessions;
@@ -199,7 +200,7 @@ impl crate::agents::HookHandler for Cursor {
         stdout: &mut dyn std::io::Write,
         stderr: &mut dyn std::io::Write,
     ) -> u8 {
-        crate::hook::run_cursor_with_context(
+        hook::run_cursor_with_context(
             event,
             self.paths.registry.clone(),
             std::env::var("CURSOR_PROJECT_DIR").ok(),
@@ -369,6 +370,13 @@ impl crate::harness::Headless for HeadlessRun {
 
     fn summaries_refusal(&self) -> Option<&'static str> {
         Some(NO_HEADLESS)
+    }
+
+    fn wizard_summaries_note(&self) -> Option<&'static [&'static str]> {
+        Some(&[
+            "Cursor's own CLI is not used for summaries (it reports no cost); say yes only if",
+            "the command above is installed and logged in.",
+        ])
     }
 
     fn bench_refusal(&self, _command: &[String]) -> Option<(&'static str, &'static str)> {

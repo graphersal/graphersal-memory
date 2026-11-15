@@ -52,6 +52,11 @@ pub trait Headless: Sync {
     fn free_note(&self, _command: &[String]) -> Option<String> {
         None
     }
+    /// The wizard's note under the summaries question when it is the only harness chosen and
+    /// the summaries do not use its own CLI (lines of the wizard's width).
+    fn wizard_summaries_note(&self) -> Option<&'static [&'static str]> {
+        None
+    }
     /// Why the summaries do not run through it (Cursor's CLI); `None` when they do.
     fn summaries_refusal(&self) -> Option<&'static str> {
         None
@@ -81,23 +86,6 @@ pub trait Headless: Sync {
     /// Why the bench does not run through `command`: (headline, why); `None` when it does.
     fn bench_refusal(&self, _command: &[String]) -> Option<(&'static str, &'static str)> {
         None
-    }
-}
-
-/// Claude Code's `claude -p` (its flags added by `crate::summaries::harness_args`).
-pub struct ClaudeHeadless;
-
-impl Headless for ClaudeHeadless {
-    fn matches(&self, command: &[String]) -> bool {
-        command.first().is_some_and(|program| {
-            Path::new(program)
-                .file_stem()
-                .is_some_and(|stem| stem == "claude")
-        })
-    }
-
-    fn default_command(&self) -> Option<&'static str> {
-        Some(crate::config::DEFAULT_HARNESS_COMMAND)
     }
 }
 

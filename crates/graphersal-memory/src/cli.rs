@@ -613,7 +613,7 @@ impl ValueEnum for Harness {
 
 impl Harness {
     /// The default harness.
-    pub const DEFAULT: Harness = Harness::One(crate::agents::Kind::ClaudeCode);
+    pub const DEFAULT: Harness = Harness::One(crate::agents::Kind::DEFAULT);
 
     /// The supported harnesses this choice names.
     pub fn kinds(self) -> Option<Vec<crate::agents::Kind>> {

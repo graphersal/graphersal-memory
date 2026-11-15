@@ -74,8 +74,10 @@ pub fn plan(setup: &Setup, harness: &str, cwd: &Path, project: &Path) -> Plan {
     }
     Plan {
         data_dir: setup.data_dir.clone(),
+        // The file memory imported at the session start (Claude Code's).
         claude: kinds
-            .contains(&Kind::ClaudeCode)
+            .iter()
+            .any(|kind| setup.agent_of(*kind).has_file_memory())
             .then(|| setup.paths.clone()),
         dirs,
         project_dir: project.to_path_buf(),
