@@ -201,7 +201,7 @@ pub fn block_body(setup: &Setup, develop: bool) -> String {
 }
 
 /// The rows of the `insert` items among `items`.
-fn inserted(items: &[Value]) -> Vec<&Value> {
+pub(crate) fn inserted(items: &[Value]) -> Vec<&Value> {
     items
         .iter()
         .filter_map(|item| item["insert"].as_array())

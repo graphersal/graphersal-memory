@@ -8,7 +8,8 @@
 //! - **Other memory tools** ([`Server`]): the MCP entries of every harness configuration
 //!   (Claude Code's user and local scopes and a project's `.mcp.json`, opencode's `mcp` /
 //!   `mcp.servers`, Codex's `[mcp_servers.*]`, Cursor's `mcpServers` and a project's
-//!   `.cursor/mcp.json`) whose name, command or package names a known memory tool ([`TOOLS`]), or
+//!   `.cursor/mcp.json`, CodeWhale's `mcp.json`, dsh's inserted MCP client rows and `mcp-manager`
+//!   servers of its home and profile layers) whose name, command or package names a known memory tool ([`TOOLS`]), or
 //!   whose name says memory, or whose tool names (from the entry itself, or Claude Code's
 //!   `permissions.allow` rules `mcp__<server>__<tool>`) look like memory tools
 //!   ([`MEMORY_TOOL_NAMES`]). Other servers are never started to find out. Memory plugins
@@ -1497,13 +1498,26 @@ pub fn doctor_findings(setup: &Setup, findings: &Findings) -> Vec<Finding> {
                 format!("to switch it off: {}", off_by_hand(setup, server)),
             ));
         } else if undecided {
+            // Install switches it off only where its harness can do it in place.
+            let in_place = read_text(&server.file)
+                .ok()
+                .flatten()
+                .is_some_and(|file| matches!(disable_edit(setup, server, &file), Ok(Some(_))));
+            let off = if in_place {
+                format!(
+                    "or switch it off (uninstall switches it on again): `graphersal-memory \
+                     install --disable-other {}`",
+                    server.name
+                )
+            } else {
+                format!("or switch it off by hand: {}", off_by_hand(setup, server))
+            };
             out.push(crate::install::note(
                 format!("{text}; the agent sees two memories and may split facts between them"),
                 format!(
                     "name it read-only in the rule block: `graphersal-memory install \
-                     --other-read-only {}`; or switch it off (uninstall switches it on again): \
-                     `graphersal-memory install --disable-other {}`",
-                    server.name, server.name
+                     --other-read-only {}`; {off}",
+                    server.name
                 ),
             ));
         } else {

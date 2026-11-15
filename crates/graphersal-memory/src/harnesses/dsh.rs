@@ -100,6 +100,9 @@
 //! - **Memory**: none of its own (no memory package; the "memory" rows are SQLite `:memory:`
 //!   indexes, `packages/bundle/base/cordis.patch.yml:160`). The export of `uninstall` writes
 //!   readable Markdown files into `~/graphersal-memory-export/dsh/`.
+//! - **Other memory** ([`other`]): other memory tools' servers in the home and profile layers
+//!   (inserted rows and `mcp-manager` servers) are reported with how to switch them off by
+//!   hand; install never switches one off.
 //! - **Headless runs**: `dsh --profile headless --json -` (`packages/bundle/headless/src/
 //!   startup.ts:53-75`) has no way to run without tools (no flag; the tool rows change per
 //!   version, `docs/upgrade-guide/`), no cost and saves every run as a session: the summaries
@@ -119,6 +122,7 @@
 //!   `doctor` names a rejected one.
 
 pub mod install;
+pub mod other;
 pub mod sessions;
 
 use std::path::{Path, PathBuf};
@@ -129,6 +133,9 @@ use crate::harnesses::agent::{Harness, Kind};
 
 /// The variable that moves the dsh home.
 pub const HOME_ENV: &str = "DSH_HOME";
+
+/// The variable that moves dsh's second instruction root (`~/.agents`).
+pub const AGENTS_HOME_ENV: &str = "DSH_AGENTS_HOME";
 
 /// The patch file of the home layer (and of each profile).
 pub const PATCH_FILE: &str = "cordis.patch.yml";
@@ -196,6 +203,9 @@ pub struct DshPaths {
     pub patch_file: PathBuf,
     /// The global instruction file of dsh's home (the rule block goes there).
     pub instruction_file: PathBuf,
+    /// The second root dsh reads instructions from (`$DSH_AGENTS_HOME` or `~/.agents`; read by
+    /// other memory's detection only, never written).
+    pub agents_home: PathBuf,
     /// The sessions.
     pub sessions: PathBuf,
     /// The profiles (`<name>/cordis.patch.yml` each): read by `status` and `doctor` only.
@@ -223,12 +233,20 @@ impl DshPaths {
     /// ([`crate::runtime::store::home_dir`]) and `DSH_HOME`.
     pub fn resolve(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         let home = crate::runtime::store::home_dir(env)?;
-        let explicit = env(HOME_ENV)
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .map(|value| expand(&value, &home))
-            .filter(|dir| dir.is_absolute());
-        Ok(Self::with(home, explicit))
+        let dir_of = |name: &str| {
+            env(name)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .map(|value| expand(&value, &home))
+                .filter(|dir| dir.is_absolute())
+        };
+        let explicit = dir_of(HOME_ENV);
+        let agents = dir_of(AGENTS_HOME_ENV);
+        let mut paths = Self::with(home, explicit);
+        if let Some(agents) = agents {
+            paths.agents_home = agents;
+        }
+        Ok(paths)
     }
 
     /// The paths of a home directory without environment overrides (tests).
@@ -243,6 +261,7 @@ impl DshPaths {
         Self {
             patch_file: dsh_home.join(PATCH_FILE),
             instruction_file: dsh_home.join("AGENTS.md"),
+            agents_home: home.join(".agents"),
             sessions: dsh_home.join("sessions"),
             profiles: dsh_home.join("profiles"),
             env_file: dsh_home.join(".env"),
@@ -430,6 +449,10 @@ impl Harness for Dsh {
         conflicts: &mut Vec<String>,
     ) -> Result<Vec<(crate::install::Change, &'static str)>, String> {
         install::removal(setup, state, develop_only, conflicts)
+    }
+
+    fn other_memory(&self) -> Option<&dyn crate::install::coexist::OtherMemory> {
+        Some(self)
     }
 
     fn develop_on(&self, setup: &crate::install::Setup) -> bool {
@@ -640,6 +663,13 @@ mod tests {
             ]);
             assert_eq!(DshPaths::resolve(&env).unwrap().dsh_home, dsh, "{value:?}");
         }
+        assert_eq!(paths.agents_home, home.join(".agents"));
+        let agents = pb("/a");
+        let env = env_of(&[
+            (var, home.display().to_string()),
+            ("DSH_AGENTS_HOME", agents.display().to_string()),
+        ]);
+        assert_eq!(DshPaths::resolve(&env).unwrap().agents_home, agents);
         // DSH_HOME moves every file, `~` expanded.
         let own = pb("/elsewhere/dsh");
         for (value, want) in [
