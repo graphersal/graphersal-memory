@@ -1147,8 +1147,8 @@ impl Daemon {
             }
         };
         // Every read through `Patient`: the handshake (and a relayed body) within
-        // `HANDSHAKE_TIMEOUT`, the MCP stream without a limit, neither waiting on the kernel's
-        // wake-up alone (`ipc::Patient`).
+        // `HANDSHAKE_TIMEOUT`, the MCP stream without a limit; on macOS neither waits on the
+        // kernel's wake-up alone (`ipc::Patient`).
         let mut reader = match ipc::Patient::new(stream, Some(HANDSHAKE_TIMEOUT)) {
             Ok(patient) => BufReader::new(patient),
             Err(err) => {

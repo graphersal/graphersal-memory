@@ -67,40 +67,73 @@ pub type Listener = std::os::unix::net::UnixListener;
 #[cfg(windows)]
 pub type Listener = uds_windows::UnixListener;
 
-/// How long a read on a [`Patient`] stream waits in the kernel before it looks again.
+/// How long a read on a [`Patient`] stream waits in the kernel before it looks again (macOS
+/// only).
+#[cfg(target_os = "macos")]
 pub const READ_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// A connection's reading side that does not wait on the kernel's wake-up alone.
+/// A connection's reading side with a limit on how long a read may get no data.
 ///
-/// macOS 27 (Darwin 27.0.0) sometimes loses the wake-up of a thread blocked in `recv` on an
-/// accepted AF_UNIX stream socket when the peer shuts its writing side down: the end of the
-/// stream is there (a non-blocking peek answers it), but the blocked read never returns. Seen
-/// about once in 1,500 shutdowns, reproduced without this program (a plain socket pair through
-/// `listen`/`accept`, one thread blocked in `recv`, the peer's `shutdown(SHUT_WR)`); a shim
-/// whose harness ended its session then waited for the daemon forever, and the daemon's
-/// connection with it. So every read waits at most [`READ_TICK`] in the kernel and then
-/// reads again, which finds the end of the stream at once; a read without data for its
-/// `limit` (when there is one) fails with the timeout as a plain read with that timeout would.
+/// On every platform but macOS this is the socket itself with its read timeout set to the limit
+/// (`None`: a blocking read), exactly as a plain stream: a read without data for the limit
+/// fails with the timeout. Windows in particular gets no shorter timeout, because a blocking
+/// receive that timed out leaves a Winsock socket in an indeterminate state (Microsoft's
+/// `SO_RCVTIMEO` documentation), so it must not be read again after one.
+///
+/// On macOS the read does not wait on the kernel's wake-up alone: macOS 27 (Darwin 27.0.0)
+/// sometimes loses the wake-up of a thread blocked in `recv` on an accepted AF_UNIX stream
+/// socket when the peer shuts its writing side down: the end of the stream is there (a
+/// non-blocking peek answers it), but the blocked read never returns. Seen about once in 1,500
+/// shutdowns, reproduced without this program (a plain socket pair through `listen`/`accept`,
+/// one thread blocked in `recv`, the peer's `shutdown(SHUT_WR)`); a shim whose harness ended
+/// its session then waited for the daemon forever, and the daemon's connection with it. So
+/// there every read waits at most [`READ_TICK`] in the kernel and then reads again, which finds
+/// the end of the stream at once; a read without data for its `limit` (when there is one) fails
+/// with the timeout as a plain read with that timeout would.
 #[derive(Debug)]
 pub struct Patient {
     stream: Stream,
+    #[cfg(target_os = "macos")]
     limit: Option<std::time::Duration>,
 }
 
 impl Patient {
     /// Reads `stream`, failing a read that gets no data for `limit` (`None`: never).
     pub fn new(stream: Stream, limit: Option<std::time::Duration>) -> std::io::Result<Self> {
-        stream.set_read_timeout(Some(READ_TICK))?;
-        Ok(Self { stream, limit })
+        #[cfg(target_os = "macos")]
+        {
+            stream.set_read_timeout(Some(READ_TICK))?;
+            Ok(Self { stream, limit })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            stream.set_read_timeout(limit)?;
+            Ok(Self { stream })
+        }
     }
 
-    /// Changes how long a read may get no data (`None`: no limit).
+    /// Changes how long a read may get no data (`None`: no limit). Off macOS this sets the
+    /// socket's read timeout; a socket that refuses it keeps its former one, as the daemon's
+    /// plain stream did before (its next read then fails or ends as that timeout says).
     pub fn set_limit(&mut self, limit: Option<std::time::Duration>) {
-        self.limit = limit;
+        #[cfg(target_os = "macos")]
+        {
+            self.limit = limit;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = self.stream.set_read_timeout(limit);
+        }
     }
 }
 
 impl std::io::Read for Patient {
+    #[cfg(not(target_os = "macos"))]
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.read(buf)
+    }
+
+    #[cfg(target_os = "macos")]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let started = std::time::Instant::now();
         loop {
@@ -327,9 +360,9 @@ mod tests {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         assert_eq!(line, "one\n");
-        // The peer ends its side later than a tick: the read keeps waiting, then sees the end.
+        // The peer ends its side a while later: the read keeps waiting, then sees the end.
         let ender = std::thread::spawn(move || {
-            std::thread::sleep(READ_TICK + READ_TICK / 2);
+            std::thread::sleep(std::time::Duration::from_millis(1500));
             client.shutdown(std::net::Shutdown::Write).unwrap();
             client
         });
@@ -345,7 +378,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gm-patient-limit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (_client, accepted) = connected_pair(&dir);
-        let mut patient = Patient::new(accepted, Some(READ_TICK / 2)).unwrap();
+        let limit = std::time::Duration::from_millis(500);
+        let mut patient = Patient::new(accepted, Some(limit)).unwrap();
         let started = std::time::Instant::now();
         let err = patient.read(&mut [0u8; 8]).unwrap_err();
         assert!(
@@ -355,6 +389,62 @@ mod tests {
             ),
             "{err}"
         );
+        // Timers may fire a little early; never far before the limit.
+        assert!(started.elapsed() >= limit / 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_patient_limit_changes_with_set_limit() {
+        use std::io::{Read, Write};
+        let dir = std::env::temp_dir().join(format!("gm-patient-set-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut client, accepted) = connected_pair(&dir);
+        let mut patient =
+            Patient::new(accepted, Some(std::time::Duration::from_millis(200))).unwrap();
+        // Lifted: a read waits longer than the old limit for its data.
+        patient.set_limit(None);
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            client.write_all(b"x").unwrap();
+            client
+        });
+        let mut buf = [0u8; 1];
+        assert_eq!(patient.read(&mut buf).unwrap(), 1);
+        assert_eq!(&buf, b"x");
+        let _client = writer.join().unwrap();
+        // Set again: a read without data fails.
+        patient.set_limit(Some(std::time::Duration::from_millis(200)));
+        assert!(patient.read(&mut buf).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// macOS only: the read waits in ticks, and a limit shorter than a tick still holds.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_patient_read_on_macos_looks_again_after_each_tick() {
+        use std::io::{BufRead, Write};
+        let dir = std::env::temp_dir().join(format!("gm-patient-tick-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut client, accepted) = connected_pair(&dir);
+        let mut reader = std::io::BufReader::new(Patient::new(accepted, None).unwrap());
+        let ender = std::thread::spawn(move || {
+            std::thread::sleep(READ_TICK * 2 + READ_TICK / 2);
+            client.write_all(b"late\n").unwrap();
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+            client
+        });
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line, "late\n");
+        line.clear();
+        assert_eq!(reader.read_line(&mut line).unwrap(), 0);
+        drop(ender.join().unwrap());
+        std::fs::remove_file(dir.join("p.sock")).unwrap();
+        let (_client, accepted) = connected_pair(&dir);
+        let mut patient = Patient::new(accepted, Some(READ_TICK / 2)).unwrap();
+        let started = std::time::Instant::now();
+        assert!(std::io::Read::read(&mut patient, &mut [0u8; 8]).is_err());
         assert!(started.elapsed() >= READ_TICK / 2);
         let _ = std::fs::remove_dir_all(&dir);
     }

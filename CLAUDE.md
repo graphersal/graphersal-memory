@@ -430,9 +430,11 @@ Unit tests that need more than one module's helpers sit beside their module as
     control request (never by `restart`), removed by the next daemon's start; `stopped_on_purpose`); a default whose socket path is too long
     becomes `short_run_dir`, `/tmp/graphersal-memory-<fingerprint of the data dir>`), the socket types per platform (std on
     Unix, `uds_windows` on Windows), `LockFile` (`fd-lock`), `Patient` (the daemon reads every
-    connection through it: a 1 s read timeout, `READ_TICK`, and a timed-out read reads again, with
-    the handshake's limit kept per read; macOS 27 sometimes never wakes a `recv` blocked when the
-    peer shuts its writing side down);
+    connection through it with a limit per read, the handshake's, then none; on macOS only a 1 s
+    read timeout, `READ_TICK`, and a timed-out read reads again, because macOS 27 sometimes never
+    wakes a `recv` blocked when the peer shuts its writing side down; elsewhere the socket's read
+    timeout is the limit, as a plain stream: Windows documents a timed-out blocking receive as
+    leaving the socket in an indeterminate state);
   - `src/ui/mod.rs`: `graphersal-memory ui` (stage UI): the loopback HTTP server (`tiny_http`, port 0 or
     `--port`), the per-run token (256 bits, `ring`, header only, constant-time compare), the
     Host/Origin check (`graphersal_serve::HostCheck`, loopback, this port), the launch file
