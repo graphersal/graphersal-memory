@@ -274,7 +274,15 @@ pub fn plan(
                 continue;
             }
             let word = if on { "enabled" } else { "disabled" };
-            match jsonedit::set_member(&text, &[key], name, &mcp_entry(setup, profile, on))
+            let wanted = mcp_entry(setup, profile, on);
+            // `/mcp enable` leaves `"disabled": false` in an entry: the same entry, kept.
+            if !existing.is_null() && without_default_switches(existing) == wanted {
+                lines.push(format!(
+                    "{name} ({profile} profile): already registered ({word})"
+                ));
+                continue;
+            }
+            match jsonedit::set_member(&text, &[key], name, &wanted)
                 .map_err(|e| crate::install::in_file(path, e))?
             {
                 Some((new, made)) => {

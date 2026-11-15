@@ -5720,6 +5720,41 @@ fn codewhale_develop_server_is_switched_by_disabled() {
 }
 
 #[test]
+fn codewhale_entries_switched_on_by_mcp_enable_are_kept_by_install_and_refresh() {
+    let home = TempDir::new("cw-enable-home");
+    let data = TempDir::new("cw-enable-data");
+    let setup = setup_in(home.path(), data.path());
+    let memory = Memory::open(data.path());
+    let develop = InstallOptions {
+        enable_develop: true,
+        ..codewhale_only()
+    };
+    let (code, out) = run_install(&setup, &memory, develop.clone());
+    assert_eq!(code, 0, "{out}");
+    // CodeWhale's `/mcp enable` writes `"disabled": false` into the entry it switches on.
+    let text = read(&setup.codewhale.mcp_file);
+    let (enabled, _) = crate::jsonedit::set_member(
+        &text,
+        &["servers", "graphersal-memory-develop"],
+        "disabled",
+        &json!(false),
+    )
+    .unwrap()
+    .unwrap();
+    std::fs::write(&setup.codewhale.mcp_file, &enabled).unwrap();
+    for options in [develop, refresh()] {
+        let (code, out) = run_install(&setup, &memory, options);
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            !out.contains("graphersal-memory-develop (develop profile): update"),
+            "{out}"
+        );
+        assert_eq!(read(&setup.codewhale.mcp_file), enabled, "{out}");
+    }
+    memory.close();
+}
+
+#[test]
 fn codewhale_is_detected_by_its_program_and_exported_as_markdown() {
     let home = TempDir::new("cw-det-home");
     let data = TempDir::new("cw-det-data");
