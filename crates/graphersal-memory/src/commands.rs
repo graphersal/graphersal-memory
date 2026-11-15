@@ -331,7 +331,7 @@ pub fn run_cli(
                 let harness = shim::harness_name(&|name| std::env::var(name).ok());
                 let hook = harness == "claude-code"
                     && setup_with(cli, false)
-                        .is_ok_and(|setup| install::claude_start_hook_installed(&setup.paths));
+                        .is_ok_and(|setup| install::claude_start_hook_installed(setup.paths()));
                 mcp::serve_in_mode(
                     &options,
                     start_context_mode(harness, hook),
@@ -542,12 +542,8 @@ fn setup(cli: &Cli) -> Result<Setup, String> {
 fn setup_with(cli: &Cli, probe: bool) -> Result<Setup, String> {
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let (data_dir, run_dir) = dirs(cli)?;
-    let paths = ClaudePaths::resolve(&env)?;
-    let detected = crate::harnesses::opencode::detect(&env, None, probe)?;
-    let opencode = crate::harnesses::opencode::OpenCodePaths::resolve_for(&env, detected)?;
-    let codex = crate::harnesses::codex::CodexPaths::resolve(&env)?;
-    let cursor = crate::harnesses::cursor::CursorPaths::resolve(&env, &data_dir)?;
-    let codewhale = crate::harnesses::codewhale::CodeWhalePaths::resolve(&env)?;
+    let home = store::home_dir(&env)?;
+    let harnesses = crate::harnesses::Harnesses::resolve(&env, &data_dir, probe)?;
     let exe =
         std::env::current_exe().map_err(|err| format!("cannot find this program's path: {err}"))?;
     let mut dir_args = Vec::new();
@@ -560,11 +556,8 @@ fn setup_with(cli: &Cli, probe: bool) -> Result<Setup, String> {
         dir_args.push(absolute(&run_dir).display().to_string());
     }
     Ok(Setup {
-        paths,
-        opencode,
-        codex,
-        cursor,
-        codewhale,
+        home,
+        harnesses,
         search_path: None,
         data_dir,
         run_dir,
@@ -628,7 +621,6 @@ pub fn export_files(
     };
     let rows = source.memories(&id)?;
     let agent = setup.agent_of(kind);
-    let agent = agent.as_ref();
     if dry_run {
         let projects: std::collections::BTreeSet<&str> = rows
             .iter()
@@ -801,7 +793,7 @@ pub fn run_import(
     out: &mut dyn Write,
 ) -> Result<u8, String> {
     let state = ImportState::load(&setup.data_dir)?;
-    let plans = import::plan(import::scan(&setup.paths.projects)?, &state);
+    let plans = import::plan(import::scan(&setup.paths().projects)?, &state);
     let (with_project, skipped, new, changed, unchanged) = import::totals(&plans);
     let _ = writeln!(
         out,
@@ -813,7 +805,7 @@ pub fn run_import(
         } else {
             "ies"
         },
-        setup.paths.projects.display(),
+        setup.paths().projects.display(),
         if skipped > 0 {
             format!("; {skipped} skipped (the project's directory no longer exists)")
         } else {
@@ -1582,7 +1574,7 @@ fn shim_options(
     let harness = shim::harness_name(&|name| std::env::var(name).ok()).to_string();
     let hook_installed = harness == "claude-code"
         && setup_with(cli, false)
-            .is_ok_and(|setup| install::claude_start_hook_installed(&setup.paths));
+            .is_ok_and(|setup| install::claude_start_hook_installed(setup.paths()));
     Ok(ShimOptions {
         location: location(cli)?,
         profile,

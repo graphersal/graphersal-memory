@@ -213,7 +213,7 @@ pub(crate) fn claude_own_memory_now(
 
 /// Whether Claude Code's develop server is registered (an entry of ours).
 pub(crate) fn claude_develop_on(setup: &Setup) -> bool {
-    let user_config = read_json(&setup.paths.user_config, &mut Vec::new());
+    let user_config = read_json(&setup.paths().user_config, &mut Vec::new());
     setup
         .ours()
         .entry(&user_config["mcpServers"][DEVELOP_SERVER])
@@ -226,7 +226,7 @@ pub(crate) fn claude_own_memory_restored(
     setup: &Setup,
     state: &State,
 ) -> Option<(PathBuf, String)> {
-    let settings = setup.paths.settings.clone();
+    let settings = setup.paths().settings.clone();
     if !state
         .file(&settings)
         .is_some_and(|entry| entry.contains_key(AUTO_MEMORY_RECORD))
@@ -265,7 +265,7 @@ pub(crate) fn claude_plan(setup: &Setup, input: &PlanInput<'_>) -> Result<Harnes
     changes.extend(change);
     let mut plan = HarnessPlan::of(steps, changes, conflicts);
     plan.own_memory_off = Some(input.own_memory_off);
-    let settings = setup.paths.settings.clone();
+    let settings = setup.paths().settings.clone();
     match auto_memory {
         AutoMemoryPlan::Keep => {}
         AutoMemoryPlan::SwitchOff { previous } => {
@@ -393,7 +393,7 @@ fn plan_settings(
     start_note: &str,
     state: &State,
 ) -> Result<(Step, Option<Change>, AutoMemoryPlan), String> {
-    let path = &setup.paths.settings;
+    let path = &setup.paths().settings;
     let before = read_text(path)?;
     let mut text = json_start(&before, EMPTY_OBJECT);
     let parsed: Value = serde_json::from_str(&text)
@@ -600,7 +600,7 @@ fn remove_ours(
         .unwrap_or_default();
     let mut current = text.to_string();
     let mut changed = false;
-    if path == setup.paths.user_config {
+    if path == setup.paths().user_config {
         let parsed: Value = serde_json::from_str(text)
             .map_err(|err| format!("{} is not valid JSON: {err}", path.display()))?;
         let names: &[&str] = if develop_only {
@@ -625,7 +625,7 @@ fn remove_ours(
         {
             current = new;
         }
-    } else if path == setup.paths.settings {
+    } else if path == setup.paths().settings {
         let created: Vec<&str> = created.iter().map(String::as_str).collect();
         if let Some(new) = remove_hook_groups(&setup.ours(), &current, &created)
             .map_err(|e| crate::install::in_file(path, e))?
@@ -653,7 +653,7 @@ fn remove_ours(
                 }
             }
         }
-    } else if path == setup.paths.instructions {
+    } else if path == setup.paths().instructions {
         match find_block(text) {
             Ok(Some(found)) if found.intact => {
                 let separator = entry
@@ -688,12 +688,12 @@ pub(crate) fn claude_removal(
 ) -> Result<Vec<(Change, &'static str)>, String> {
     let mut changes = Vec::new();
     let targets: Vec<&Path> = if develop_only {
-        vec![&setup.paths.user_config]
+        vec![&setup.paths().user_config]
     } else {
         vec![
-            &setup.paths.user_config,
-            &setup.paths.settings,
-            &setup.paths.instructions,
+            &setup.paths().user_config,
+            &setup.paths().settings,
+            &setup.paths().instructions,
         ]
     };
     for path in targets {
@@ -804,7 +804,7 @@ impl Inspection {
 pub fn inspect(setup: &Setup) -> Inspection {
     let mut errors = Vec::new();
     let mut missing_binaries = Vec::new();
-    let config = read_json(&setup.paths.user_config, &mut errors);
+    let config = read_json(&setup.paths().user_config, &mut errors);
     let server = |name: &str, profile: &str, missing: &mut Vec<String>| {
         let entry = &config["mcpServers"][name];
         if entry.is_null() {
@@ -835,7 +835,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
             }
         }
     }
-    let settings = read_json(&setup.paths.settings, &mut errors);
+    let settings = read_json(&setup.paths().settings, &mut errors);
     let hooks = HOOK_EVENTS
         .iter()
         .map(|(event, sub)| {
@@ -858,7 +858,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
     let language = Config::load(&setup.data_dir)
         .map(|config| config.language())
         .unwrap_or_default();
-    let block = match read_text(&setup.paths.instructions) {
+    let block = match read_text(&setup.paths().instructions) {
         Ok(Some(text)) => {
             match find_block_with(
                 &text,
@@ -901,7 +901,7 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
         "Claude Code:".to_string(),
         format!(
             "  user configuration: {}",
-            setup.paths.user_config.display()
+            setup.paths().user_config.display()
         ),
     ];
     lines.push(format!(
@@ -920,13 +920,13 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
     for (event, state) in &inspection.hooks {
         lines.push(format!(
             "  hook {event} ({}): {}",
-            setup.paths.settings.display(),
+            setup.paths().settings.display(),
             state.describe()
         ));
     }
     lines.push(format!(
         "  rule block ({}): {}",
-        setup.paths.instructions.display(),
+        setup.paths().instructions.display(),
         inspection.block.describe()
     ));
     let imported = ImportState::load(&setup.data_dir)
@@ -937,11 +937,11 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
     ));
     lines.push(format!(
         "  auto-memory ({}): {}",
-        setup.paths.settings.display(),
+        setup.paths().settings.display(),
         auto_memory_state(setup)
     ));
     if setup.hooks.windows {
-        let settings = read_json(&setup.paths.settings, &mut Vec::new());
+        let settings = read_json(&setup.paths().settings, &mut Vec::new());
         lines.push(git_bash_status(
             &crate::install::winshell::find_git_bash_here(&settings),
             &settings,
@@ -1035,13 +1035,16 @@ pub fn claude_doctor(setup: &Setup) -> Vec<Finding> {
         PartState::Missing => findings.push(problem(
             format!(
                 "rule block missing in {}",
-                setup.paths.instructions.display()
+                setup.paths().instructions.display()
             ),
             reinstall,
         )),
         PartState::Outdated(why) => findings.push(problem(format!("rule block {why}"), reinstall)),
         PartState::Conflict(why) => findings.push(problem(
-            format!("rule block {why} in {}", setup.paths.instructions.display()),
+            format!(
+                "rule block {why} in {}",
+                setup.paths().instructions.display()
+            ),
             "move your text out of the block or delete the block, then run install again",
         )),
     }
@@ -1059,7 +1062,7 @@ pub fn claude_doctor(setup: &Setup) -> Vec<Finding> {
     }
     match ImportState::load(&setup.data_dir).and_then(|state| {
         Ok(import::totals(&import::plan(
-            import::scan(&setup.paths.projects)?,
+            import::scan(&setup.paths().projects)?,
             &state,
         )))
     }) {
@@ -1075,7 +1078,7 @@ pub fn claude_doctor(setup: &Setup) -> Vec<Finding> {
         Err(err) => findings.push(problem(err, "check the file permissions")),
     }
     if setup.hooks.windows {
-        let settings = read_json(&setup.paths.settings, &mut Vec::new());
+        let settings = read_json(&setup.paths().settings, &mut Vec::new());
         findings.extend(git_bash_findings(
             &crate::install::winshell::find_git_bash_here(&settings),
             &settings,

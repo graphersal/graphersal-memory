@@ -221,6 +221,11 @@ impl Codex {
     pub fn new(paths: CodexPaths) -> Self {
         Self { paths }
     }
+
+    /// Its files.
+    pub fn paths(&self) -> &CodexPaths {
+        &self.paths
+    }
 }
 
 impl crate::harnesses::agent::OwnMemory for Codex {

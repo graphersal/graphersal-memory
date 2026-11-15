@@ -14,7 +14,7 @@ use crate::cli::Profile as ProfileKind;
 use crate::harnesses::agent::Kind;
 use crate::harnesses::cursor::fixture::CURSOR_RULE;
 use crate::install::language::Language;
-use crate::install::{self, ClaudePaths, InstallOptions, Setup, UninstallOptions};
+use crate::install::{self, InstallOptions, Setup, UninstallOptions};
 use crate::memory::import::{self, Caller, ImportState};
 use crate::runtime::client::McpClient;
 use crate::runtime::mcp::{self, StoreRuntime};
@@ -56,14 +56,9 @@ pub(crate) fn setup_in(home: &Path, data: &Path) -> Setup {
 
 /// [`setup_in`] without any agent program on its search path.
 pub(crate) fn bare_setup_in(home: &Path, data: &Path) -> Setup {
-    let paths =
-        ClaudePaths::resolve(&|name| (name == "HOME").then(|| home.display().to_string())).unwrap();
     Setup {
-        paths,
-        opencode: crate::harnesses::opencode::OpenCodePaths::of_home(home),
-        codex: crate::harnesses::codex::CodexPaths::of_home(home),
-        cursor: crate::harnesses::cursor::CursorPaths::of_home(home, data),
-        codewhale: crate::harnesses::codewhale::CodeWhalePaths::of_home(home),
+        home: home.to_path_buf(),
+        harnesses: crate::harnesses::Harnesses::of_home(home, data),
         search_path: Some(std::ffi::OsString::new()),
         data_dir: data.to_path_buf(),
         run_dir: short_run_dir(),
@@ -231,7 +226,7 @@ fn install_then_uninstall_leaves_existing_files_byte_identical() {
 
     let (code, out) = run_install(&setup, &memory, yes());
     assert_eq!(code, 0, "{out}");
-    let config: Value = serde_json::from_str(&read(&setup.paths.user_config)).unwrap();
+    let config: Value = serde_json::from_str(&read(&setup.paths().user_config)).unwrap();
     assert_eq!(
         config["mcpServers"]["graphersal-memory"],
         setup.mcp_entry("use")
@@ -239,7 +234,7 @@ fn install_then_uninstall_leaves_existing_files_byte_identical() {
     assert_eq!(config["mcpServers"]["other"]["command"], "x");
     assert!(config["mcpServers"]["graphersal-memory-develop"].is_null());
     assert_eq!(config["theme"], "dark");
-    let settings: Value = serde_json::from_str(&read(&setup.paths.settings)).unwrap();
+    let settings: Value = serde_json::from_str(&read(&setup.paths().settings)).unwrap();
     assert_eq!(
         settings["hooks"]["SessionStart"].as_array().unwrap().len(),
         2
@@ -259,7 +254,7 @@ fn install_then_uninstall_leaves_existing_files_byte_identical() {
             data.path().display()
         )
     );
-    let rules = read(&setup.paths.instructions);
+    let rules = read(&setup.paths().instructions);
     assert!(
         rules.starts_with("# My rules\n\nBe brief.\n\n<!-- graphersal-memory:begin"),
         "{rules}"
@@ -281,12 +276,12 @@ fn install_then_uninstall_on_an_empty_home_leaves_nothing() {
     let memory = Memory::open(data.path());
     let (code, out) = run_install(&setup, &memory, yes());
     assert_eq!(code, 0, "{out}");
-    let config = read(&setup.paths.user_config);
+    let config = read(&setup.paths().user_config);
     assert!(
         config.starts_with("{\n  \"mcpServers\": {\n    \"graphersal-memory\": {"),
         "{config}"
     );
-    assert!(setup.paths.settings.exists() && setup.paths.instructions.exists());
+    assert!(setup.paths().settings.exists() && setup.paths().instructions.exists());
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 0, "{out}");
     assert!(
@@ -330,7 +325,7 @@ fn a_second_install_changes_nothing_and_a_dry_run_changes_nothing() {
     assert!(out.contains("already registered"), "{out}");
 
     // Without --yes and without an answer, nothing happens.
-    std::fs::remove_file(&setup.paths.instructions).unwrap();
+    std::fs::remove_file(&setup.paths().instructions).unwrap();
     let mut connect = memory.connector();
     let mut out = Vec::new();
     let code = install::install(
@@ -342,7 +337,7 @@ fn a_second_install_changes_nothing_and_a_dry_run_changes_nothing() {
     )
     .unwrap();
     assert_eq!(code, 1);
-    assert!(!setup.paths.instructions.exists());
+    assert!(!setup.paths().instructions.exists());
     memory.close();
 }
 
@@ -355,20 +350,20 @@ fn uninstall_after_claude_rewrote_the_files_removes_only_our_parts() {
     let memory = Memory::open(data.path());
     run_install(&setup, &memory, yes());
     // Claude Code rewrites its configuration (here: one more key) and the user adds a rule.
-    let config = read(&setup.paths.user_config).replacen('{', "{\"tipsShown\": 4, ", 1);
-    std::fs::write(&setup.paths.user_config, &config).unwrap();
-    let settings = read(&setup.paths.settings).replacen('{', "{\"theme\": \"light\", ", 1);
-    std::fs::write(&setup.paths.settings, &settings).unwrap();
-    let rules = format!("{}\nMore of mine.\n", read(&setup.paths.instructions));
-    std::fs::write(&setup.paths.instructions, &rules).unwrap();
+    let config = read(&setup.paths().user_config).replacen('{', "{\"tipsShown\": 4, ", 1);
+    std::fs::write(&setup.paths().user_config, &config).unwrap();
+    let settings = read(&setup.paths().settings).replacen('{', "{\"theme\": \"light\", ", 1);
+    std::fs::write(&setup.paths().settings, &settings).unwrap();
+    let rules = format!("{}\nMore of mine.\n", read(&setup.paths().instructions));
+    std::fs::write(&setup.paths().instructions, &rules).unwrap();
 
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 0, "{out}");
-    let config: Value = serde_json::from_str(&read(&setup.paths.user_config)).unwrap();
+    let config: Value = serde_json::from_str(&read(&setup.paths().user_config)).unwrap();
     assert_eq!(config["tipsShown"], 4);
     assert!(config["mcpServers"]["graphersal-memory"].is_null());
     assert_eq!(config["mcpServers"]["other"]["command"], "x");
-    let settings: Value = serde_json::from_str(&read(&setup.paths.settings)).unwrap();
+    let settings: Value = serde_json::from_str(&read(&setup.paths().settings)).unwrap();
     assert_eq!(settings["theme"], "light");
     assert_eq!(
         settings["hooks"]["SessionStart"].as_array().unwrap().len(),
@@ -379,7 +374,7 @@ fn uninstall_after_claude_rewrote_the_files_removes_only_our_parts() {
         "echo mine"
     );
     assert!(settings["hooks"].get("SessionEnd").is_none(), "{settings}");
-    let rules = read(&setup.paths.instructions);
+    let rules = read(&setup.paths().instructions);
     assert!(!rules.contains("graphersal-memory:begin"), "{rules}");
     assert!(
         rules.contains("Be brief.") && rules.contains("More of mine."),
@@ -395,8 +390,8 @@ fn a_hand_edit_in_the_block_is_a_conflict_never_overwritten() {
     let setup = setup_in(home.path(), data.path());
     let memory = Memory::open(data.path());
     run_install(&setup, &memory, yes());
-    let edited = read(&setup.paths.instructions).replace("Save with", "Please save with");
-    std::fs::write(&setup.paths.instructions, &edited).unwrap();
+    let edited = read(&setup.paths().instructions).replace("Save with", "Please save with");
+    std::fs::write(&setup.paths().instructions, &edited).unwrap();
 
     let (code, out) = run_install(&setup, &memory, yes());
     assert_eq!(code, 1, "{out}");
@@ -404,7 +399,7 @@ fn a_hand_edit_in_the_block_is_a_conflict_never_overwritten() {
         out.contains("conflict:") && out.contains("edited by hand"),
         "{out}"
     );
-    assert_eq!(read(&setup.paths.instructions), edited);
+    assert_eq!(read(&setup.paths().instructions), edited);
     let status = install::status_lines(&setup).join("\n");
     assert!(
         status.contains("rule block") && status.contains("CONFLICT"),
@@ -414,10 +409,10 @@ fn a_hand_edit_in_the_block_is_a_conflict_never_overwritten() {
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("not removed"), "{out}");
-    assert_eq!(read(&setup.paths.instructions), edited);
+    assert_eq!(read(&setup.paths().instructions), edited);
     // Everything else went: install created the other files, so they are gone again.
-    assert!(!setup.paths.user_config.exists());
-    assert!(!setup.paths.settings.exists());
+    assert!(!setup.paths().user_config.exists());
+    assert!(!setup.paths().settings.exists());
     memory.close();
 }
 
@@ -435,7 +430,7 @@ fn a_foreign_entry_under_our_name_is_a_conflict() {
     let (code, out) = run_install(&setup, &memory, yes());
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("is not ours"), "{out}");
-    let config: Value = serde_json::from_str(&read(&setup.paths.user_config)).unwrap();
+    let config: Value = serde_json::from_str(&read(&setup.paths().user_config)).unwrap();
     assert_eq!(config["mcpServers"]["graphersal-memory"]["command"], "npx");
     memory.close();
 }
@@ -450,7 +445,7 @@ fn the_develop_server_is_off_until_enabled_and_can_be_disabled_again() {
     let memory = Memory::open(data.path());
     run_install(&setup, &memory, yes());
     let developing = || -> Value {
-        let config: Value = serde_json::from_str(&read(&setup.paths.user_config)).unwrap();
+        let config: Value = serde_json::from_str(&read(&setup.paths().user_config)).unwrap();
         config["mcpServers"]["graphersal-memory-develop"].clone()
     };
     assert!(developing().is_null());
@@ -481,7 +476,7 @@ fn the_develop_server_is_off_until_enabled_and_can_be_disabled_again() {
     );
     assert_eq!(code, 0, "{out}");
     assert!(developing().is_null());
-    let config: Value = serde_json::from_str(&read(&setup.paths.user_config)).unwrap();
+    let config: Value = serde_json::from_str(&read(&setup.paths().user_config)).unwrap();
     assert_eq!(
         config["mcpServers"]["graphersal-memory"],
         setup.mcp_entry("use")
@@ -628,7 +623,7 @@ fn the_session_start_hook_imports_the_projects_changed_files() {
     let outcome = crate::harnesses::claude_code::hook::work(
         hook::HookEvent::SessionStart,
         Some(&project_dir),
-        &setup.paths,
+        setup.paths(),
         data.path(),
         &mut connect,
         deadline,
@@ -647,7 +642,7 @@ fn the_session_start_hook_imports_the_projects_changed_files() {
     let outcome = crate::harnesses::claude_code::hook::work(
         hook::HookEvent::SessionEnd,
         Some(&project_dir),
-        &setup.paths,
+        setup.paths(),
         data.path(),
         &mut connect,
         deadline,
@@ -659,7 +654,7 @@ fn the_session_start_hook_imports_the_projects_changed_files() {
     let outcome = crate::harnesses::claude_code::hook::work(
         hook::HookEvent::SessionStart,
         Some(&project_dir),
-        &setup.paths,
+        setup.paths(),
         data.path(),
         &mut connect,
         deadline,
@@ -817,7 +812,7 @@ fn block_with(text: &str, fingerprint: &str) -> String {
 
 /// The instruction file with the block of `install` replaced by `block`.
 fn with_block(setup: &Setup, block: &str) -> String {
-    let text = read(&setup.paths.instructions);
+    let text = read(&setup.paths().instructions);
     let found = install::find_block(&text).unwrap().unwrap();
     format!("{}{block}{}", &text[..found.start], &text[found.end..])
 }
@@ -907,11 +902,11 @@ fn an_untouched_block_of_an_earlier_version_is_updated_and_uninstalled_cleanly()
     let setup = setup_in(home.path(), data.path());
     let memory = Memory::open(data.path());
     run_install(&setup, &memory, yes());
-    let current = read(&setup.paths.instructions);
+    let current = read(&setup.paths().instructions);
     // The file as an earlier version left it.
     let previous = crate::fsutil::fingerprint(BLOCK_0_0_0.as_bytes());
     let old = with_block(&setup, &block_with(BLOCK_0_0_0, &previous));
-    std::fs::write(&setup.paths.instructions, &old).unwrap();
+    std::fs::write(&setup.paths().instructions, &old).unwrap();
     let status = install::status_lines(&setup).join("\n");
     assert!(
         status.contains("rule block") && status.contains("written by an earlier version"),
@@ -921,7 +916,7 @@ fn an_untouched_block_of_an_earlier_version_is_updated_and_uninstalled_cleanly()
     let (code, out) = run_install(&setup, &memory, yes());
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("update the block to this version"), "{out}");
-    assert_eq!(read(&setup.paths.instructions), current);
+    assert_eq!(read(&setup.paths().instructions), current);
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 0, "{out}");
     assert_eq!(snapshot(home.path()), before, "{out}");
@@ -929,10 +924,14 @@ fn an_untouched_block_of_an_earlier_version_is_updated_and_uninstalled_cleanly()
     // Uninstall straight from the earlier version's block removes it, and only it.
     run_install(&setup, &memory, yes());
     let old = with_block(&setup, &block_with(BLOCK_0_0_0, &previous));
-    std::fs::write(&setup.paths.instructions, format!("{old}\nMore of mine.\n")).unwrap();
+    std::fs::write(
+        &setup.paths().instructions,
+        format!("{old}\nMore of mine.\n"),
+    )
+    .unwrap();
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 0, "{out}");
-    let rules = read(&setup.paths.instructions);
+    let rules = read(&setup.paths().instructions);
     assert!(!rules.contains("graphersal-memory:begin"), "{rules}");
     assert!(
         rules.contains("Be brief.") && rules.contains("More of mine."),
@@ -966,18 +965,18 @@ fn refresh_brings_an_earlier_block_to_this_version_and_keeps_every_choice() {
     let (code, out) = run_install(&setup, &memory, only_claude);
     assert_eq!(code, 0, "{out}");
     // The user switched Claude Code's auto-memory back on after install.
-    let settings = read(&setup.paths.settings);
+    let settings = read(&setup.paths().settings);
     let on = settings.replace(
         "\"autoMemoryEnabled\": false",
         "\"autoMemoryEnabled\": true",
     );
     assert_ne!(on, settings, "{settings}");
-    std::fs::write(&setup.paths.settings, on).unwrap();
+    std::fs::write(&setup.paths().settings, on).unwrap();
     let installed = snapshot(home.path());
     // The rule block as an earlier version left it.
     let previous = crate::fsutil::fingerprint(BLOCK_0_0_0.as_bytes());
     let old = with_block(&setup, &block_with(BLOCK_0_0_0, &previous));
-    std::fs::write(&setup.paths.instructions, &old).unwrap();
+    std::fs::write(&setup.paths().instructions, &old).unwrap();
 
     let (code, out) = run_install(&setup, &memory, refresh());
     assert_eq!(code, 0, "{out}");
@@ -1013,7 +1012,7 @@ fn refresh_dry_run_and_without_an_install_change_nothing_and_uninstall_stays_exa
     run_install(&setup, &memory, yes());
     let previous = crate::fsutil::fingerprint(BLOCK_0_0_0.as_bytes());
     let old = with_block(&setup, &block_with(BLOCK_0_0_0, &previous));
-    std::fs::write(&setup.paths.instructions, &old).unwrap();
+    std::fs::write(&setup.paths().instructions, &old).unwrap();
     let outdated = snapshot(home.path());
     let dry = InstallOptions {
         dry_run: true,
@@ -1039,12 +1038,12 @@ fn refresh_keeps_a_hand_edited_block_and_says_so() {
     let setup = setup_in(home.path(), data.path());
     let memory = Memory::open(data.path());
     run_install(&setup, &memory, yes());
-    let text = read(&setup.paths.instructions).replace("Save with", "Please save with");
-    std::fs::write(&setup.paths.instructions, &text).unwrap();
+    let text = read(&setup.paths().instructions).replace("Save with", "Please save with");
+    std::fs::write(&setup.paths().instructions, &text).unwrap();
     let (code, out) = run_install(&setup, &memory, refresh());
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("conflict:"), "{out}");
-    assert_eq!(read(&setup.paths.instructions), text);
+    assert_eq!(read(&setup.paths().instructions), text);
     memory.close();
 }
 
@@ -1058,7 +1057,7 @@ fn a_hand_edited_block_of_an_earlier_version_is_still_a_conflict() {
     let previous = crate::fsutil::fingerprint(BLOCK_0_0_0.as_bytes());
     let edited = BLOCK_0_0_0.replace("Save with", "Please save with");
     let text = with_block(&setup, &block_with(&edited, &previous));
-    std::fs::write(&setup.paths.instructions, &text).unwrap();
+    std::fs::write(&setup.paths().instructions, &text).unwrap();
 
     let (code, out) = run_install(&setup, &memory, yes());
     assert_eq!(code, 1, "{out}");
@@ -1066,11 +1065,11 @@ fn a_hand_edited_block_of_an_earlier_version_is_still_a_conflict() {
         out.contains("conflict:") && out.contains("edited by hand"),
         "{out}"
     );
-    assert_eq!(read(&setup.paths.instructions), text);
+    assert_eq!(read(&setup.paths().instructions), text);
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("not removed"), "{out}");
-    assert_eq!(read(&setup.paths.instructions), text);
+    assert_eq!(read(&setup.paths().instructions), text);
     memory.close();
 }
 
@@ -1085,19 +1084,19 @@ fn a_block_of_an_unknown_version_is_kept_by_install_and_removed_by_uninstall() {
     let newer = format!("{}- A rule of a newer version.\n", install::RULE_BLOCK);
     let fingerprint = crate::fsutil::fingerprint(newer.as_bytes());
     let text = with_block(&setup, &block_with(&newer, &fingerprint));
-    std::fs::write(&setup.paths.instructions, &text).unwrap();
+    std::fs::write(&setup.paths().instructions, &text).unwrap();
     let status = install::status_lines(&setup).join("\n");
     assert!(status.contains("written by another version"), "{status}");
 
     let (code, out) = run_install(&setup, &memory, yes());
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("conflict:") && out.contains("newer?"), "{out}");
-    assert_eq!(read(&setup.paths.instructions), text);
+    assert_eq!(read(&setup.paths().instructions), text);
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 0, "{out}");
     assert!(
-        !setup.paths.instructions.exists()
-            || !read(&setup.paths.instructions).contains("graphersal-memory:begin")
+        !setup.paths().instructions.exists()
+            || !read(&setup.paths().instructions).contains("graphersal-memory:begin")
     );
     memory.close();
 }
@@ -1146,7 +1145,7 @@ pub(crate) fn run_wizard(setup: &Setup, memory: &Memory, input: &str) -> (u8, St
 }
 
 fn settings_json(setup: &Setup) -> Value {
-    serde_json::from_str(&read(&setup.paths.settings)).unwrap()
+    serde_json::from_str(&read(&setup.paths().settings)).unwrap()
 }
 
 #[test]
@@ -1194,12 +1193,12 @@ fn the_wizard_asks_each_step_and_its_answers_change_what_install_does() {
     );
     assert!(!config.summaries.enabled);
     assert_eq!(settings_json(&setup)["autoMemoryEnabled"], false);
-    let user_config: Value = serde_json::from_str(&read(&setup.paths.user_config)).unwrap();
+    let user_config: Value = serde_json::from_str(&read(&setup.paths().user_config)).unwrap();
     assert_eq!(
         user_config["mcpServers"]["graphersal-memory-develop"],
         setup.mcp_entry("develop")
     );
-    let rules = read(&setup.paths.instructions);
+    let rules = read(&setup.paths().instructions);
     assert!(rules.contains(install::RULE_BLOCK_ANY), "{rules}");
     assert!(out.contains("imported 3 memories"), "{out}");
     let status = [
@@ -1237,7 +1236,7 @@ fn the_wizard_asks_each_step_and_its_answers_change_what_install_does() {
     let (code, out) = run_wizard(&fresh, &memory, "\n\n\n");
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("Aborted: no answer"), "{out}");
-    assert!(!fresh.paths.user_config.exists());
+    assert!(!fresh.paths().user_config.exists());
     memory.close();
 }
 
@@ -1278,8 +1277,8 @@ fn the_auto_memory_switch_goes_back_to_what_it_was() {
     let (code, out) = run_wizard(&setup, &memory, "\n\n1\n\n\n\n");
     assert_eq!(code, 0, "{out}");
     assert_eq!(settings_json(&setup)["autoMemoryEnabled"], false);
-    let edited = read(&setup.paths.settings).replacen('{', "{\"theme\": \"light\", ", 1);
-    std::fs::write(&setup.paths.settings, &edited).unwrap();
+    let edited = read(&setup.paths().settings).replacen('{', "{\"theme\": \"light\", ", 1);
+    std::fs::write(&setup.paths().settings, &edited).unwrap();
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 0, "{out}");
     let settings = settings_json(&setup);
@@ -1361,10 +1360,10 @@ fn uninstall_exports_every_memory_back_including_ones_added_later_and_keeps_edit
     );
     assert!(global.contains("tabs-not-spaces summary"), "{global}");
     // Claude Code's settings are gone (install created them), the auto-memory with them.
-    assert!(!setup.paths.settings.exists());
+    assert!(!setup.paths().settings.exists());
     // A second export finds everything in place.
     let report = crate::memory::export::write(
-        &setup.agent(),
+        setup.agent(),
         data.path(),
         &InProcess(&memory).memories_all(),
     )
@@ -1393,10 +1392,10 @@ fn importing_an_export_gives_the_same_memories_back() {
     let other = TempDir::new("rtx-home2");
     let elsewhere = setup_in(other.path(), data.path());
     let rows = InProcess(&memory).memories_all();
-    let report = crate::memory::export::write(&elsewhere.agent(), data.path(), &rows).unwrap();
+    let report = crate::memory::export::write(elsewhere.agent(), data.path(), &rows).unwrap();
     assert_eq!(report.memories, 3, "{report:?}");
     let exported_dir =
-        crate::harnesses::agent::Harness::memory_dir(&elsewhere.agent(), &project_dir);
+        crate::harnesses::agent::Harness::memory_dir(elsewhere.agent(), &project_dir);
     let project = Some(project_dir.display().to_string());
     let before = import::read_dir(&original_dir, project.clone());
     let after = import::read_dir(&exported_dir, project);
@@ -1480,7 +1479,7 @@ fn uninstall_asks_before_exporting_and_no_export_skips_it() {
     )
     .unwrap_err();
     assert!(err.contains("nothing was removed"), "{err}");
-    assert!(setup.paths.user_config.exists());
+    assert!(setup.paths().user_config.exists());
     memory.close();
 }
 
@@ -1517,7 +1516,7 @@ fn opencode_install_then_uninstall_leaves_existing_files_byte_identical() {
     existing_opencode_home(home.path());
     let before = snapshot(home.path());
     let setup = opencode_setup(home.path(), data.path());
-    assert!(setup.opencode.config_file.ends_with("opencode.jsonc"));
+    assert!(setup.opencode().config_file.ends_with("opencode.jsonc"));
     let memory = Memory::open(data.path());
     let (code, out) = run_install(&setup, &memory, opencode_only());
     assert_eq!(code, 0, "{out}");
@@ -1529,7 +1528,7 @@ fn opencode_install_then_uninstall_leaves_existing_files_byte_identical() {
         !out.contains("Claude Code"),
         "no Claude Code wording: {out}"
     );
-    let text = read(&setup.opencode.config_file);
+    let text = read(&setup.opencode().config_file);
     assert!(
         text.contains("// my settings") && text.contains("/* keep */"),
         "{text}"
@@ -1546,10 +1545,10 @@ fn opencode_install_then_uninstall_leaves_existing_files_byte_identical() {
     assert_eq!(config["mcp"]["graphersal-memory-develop"]["enabled"], false);
     assert_eq!(
         config["instructions"],
-        json!([setup.opencode.rules_file.display().to_string()])
+        json!([setup.opencode().rules_file.display().to_string()])
     );
     assert_eq!(config["mcp"]["other"]["command"], json!(["x"]));
-    let rules = read(&setup.opencode.rules_file);
+    let rules = read(&setup.opencode().rules_file);
     assert!(rules.starts_with("<!-- graphersal-memory:begin"), "{rules}");
     assert!(rules.contains("graphersal-memory_<function>"), "{rules}");
     assert_eq!(
@@ -1557,14 +1556,14 @@ fn opencode_install_then_uninstall_leaves_existing_files_byte_identical() {
         "# My opencode rules\n",
         "the user's AGENTS.md is never touched"
     );
-    let plugin = read(&setup.opencode.plugin_file);
+    let plugin = read(&setup.opencode().plugin_file);
     assert!(
         crate::harnesses::opencode::is_our_plugin(&plugin),
         "{plugin}"
     );
     assert!(plugin.contains("\"--data-dir\""), "{plugin}");
     // Nothing of Claude Code's.
-    assert!(!setup.paths.user_config.exists() && !setup.paths.config_dir.exists());
+    assert!(!setup.paths().user_config.exists() && !setup.paths().config_dir.exists());
     assert!(data.path().join("install/opencode.json").exists());
     assert!(!data.path().join("install/claude-code.json").exists());
 
@@ -1590,24 +1589,24 @@ fn opencode_install_on_an_empty_home_and_after_an_edit_removes_only_our_parts() 
     let memory = Memory::open(data.path());
     let (code, out) = run_install(&setup, &memory, opencode_only());
     assert_eq!(code, 0, "{out}");
-    let created = read(&setup.opencode.config_file);
+    let created = read(&setup.opencode().config_file);
     assert!(
         created.starts_with("{\n  \"$schema\": \"https://opencode.ai/config.json\""),
         "{created}"
     );
     // The user (or opencode) adds a setting afterwards.
     let edited = created.replacen("{\n", "{\n  \"theme\": \"tokyonight\",\n", 1);
-    std::fs::write(&setup.opencode.config_file, &edited).unwrap();
+    std::fs::write(&setup.opencode().config_file, &edited).unwrap();
     let (code, out) = run_uninstall(&setup, opencode_uninstall());
     assert_eq!(code, 0, "{out}");
-    let left = crate::install::jsonedit::value_of(&read(&setup.opencode.config_file)).unwrap();
+    let left = crate::install::jsonedit::value_of(&read(&setup.opencode().config_file)).unwrap();
     assert_eq!(
         left,
         json!({"theme": "tokyonight", "$schema": "https://opencode.ai/config.json"})
     );
-    assert!(!setup.opencode.rules_file.exists() && !setup.opencode.plugin_file.exists());
+    assert!(!setup.opencode().rules_file.exists() && !setup.opencode().plugin_file.exists());
     assert!(
-        !setup.opencode.config_dir.join("plugins").exists(),
+        !setup.opencode().config_dir.join("plugins").exists(),
         "the directory install made goes"
     );
     memory.close();
@@ -1676,7 +1675,7 @@ fn opencode_conflicts_are_kept_and_the_develop_server_switches() {
     };
     assert_eq!(run_install(&setup, &memory, options).0, 0);
     let develop = |setup: &Setup| {
-        crate::install::jsonedit::value_of(&read(&setup.opencode.config_file)).unwrap()["mcp"]
+        crate::install::jsonedit::value_of(&read(&setup.opencode().config_file)).unwrap()["mcp"]
             ["graphersal-memory-develop"]["enabled"]
             .clone()
     };
@@ -1695,7 +1694,10 @@ fn opencode_conflicts_are_kept_and_the_develop_server_switches() {
     );
     assert_eq!(code, 0, "{out}");
     assert_eq!(develop(&setup), false);
-    assert!(setup.opencode.plugin_file.exists(), "everything else stays");
+    assert!(
+        setup.opencode().plugin_file.exists(),
+        "everything else stays"
+    );
     let (code, out) = run_uninstall(&setup, opencode_uninstall());
     assert_eq!(code, 0, "{out}");
     assert!(
@@ -1713,7 +1715,9 @@ fn opencode_conflicts_are_kept_and_the_develop_server_switches() {
 /// The setup of `home` with opencode of `major` installed.
 fn opencode_setup_for(home: &Path, data: &Path, major: crate::harnesses::opencode::Major) -> Setup {
     let mut setup = setup_in(home, data);
-    setup.opencode = crate::harnesses::opencode::OpenCodePaths::of_home_for(home, major);
+    setup.set_opencode(crate::harnesses::opencode::OpenCodePaths::of_home_for(
+        home, major,
+    ));
     setup
 }
 
@@ -1733,12 +1737,12 @@ fn opencode_2x_install_then_uninstall_leaves_existing_files_byte_identical() {
     existing_opencode_home(home.path());
     let before = snapshot(home.path());
     let setup = opencode_setup_for(home.path(), data.path(), Major::V2);
-    assert!(setup.opencode.config_file.ends_with("opencode.jsonc"));
+    assert!(setup.opencode().config_file.ends_with("opencode.jsonc"));
     let memory = Memory::open(data.path());
     let (code, out) = run_install(&setup, &memory, opencode_only());
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("(opencode 2.x)"), "{out}");
-    let text = read(&setup.opencode.config_file);
+    let text = read(&setup.opencode().config_file);
     assert!(
         text.contains("// my settings") && text.contains("/* keep */"),
         "{text}"
@@ -1760,10 +1764,10 @@ fn opencode_2x_install_then_uninstall_leaves_existing_files_byte_identical() {
     );
     assert_eq!(
         config["instructions"],
-        json!([setup.opencode.rules_file.display().to_string()])
+        json!([setup.opencode().rules_file.display().to_string()])
     );
     assert!(crate::harnesses::opencode::is_our_plugin(&read(
-        &setup.opencode.plugin_file
+        &setup.opencode().plugin_file
     )));
     assert_eq!(doctor_problems(&setup), Vec::<String>::new());
     let status = crate::harnesses::opencode::install::status_lines(&setup).join("\n");
@@ -1786,7 +1790,7 @@ fn opencode_2x_install_then_uninstall_leaves_existing_files_byte_identical() {
     };
     assert_eq!(run_install(&setup, &memory, options).0, 0);
     let develop = |setup: &Setup| {
-        crate::install::jsonedit::value_of(&read(&setup.opencode.config_file)).unwrap()["mcp"]["servers"]
+        crate::install::jsonedit::value_of(&read(&setup.opencode().config_file)).unwrap()["mcp"]["servers"]
             ["graphersal-memory-develop"]["disabled"]
             .clone()
     };
@@ -1812,7 +1816,7 @@ fn opencode_2x_install_then_uninstall_leaves_existing_files_byte_identical() {
     let setup = opencode_setup_for(home.path(), data.path(), Major::V2);
     let memory = Memory::open(data.path());
     assert_eq!(run_install(&setup, &memory, opencode_only()).0, 0);
-    let created = crate::install::jsonedit::value_of(&read(&setup.opencode.config_file)).unwrap();
+    let created = crate::install::jsonedit::value_of(&read(&setup.opencode().config_file)).unwrap();
     assert!(created["mcp"]["servers"]["graphersal-memory"].is_object());
     let (code, out) = run_uninstall(&setup, opencode_uninstall());
     assert_eq!(code, 0, "{out}");
@@ -1839,14 +1843,14 @@ fn an_upgrade_from_1x_to_2x_moves_our_entries_out_of_config_json() {
     .unwrap();
     let before = snapshot(home.path());
     let v1 = opencode_setup_for(home.path(), data.path(), Major::V1);
-    assert!(v1.opencode.config_file.ends_with("config.json"));
+    assert!(v1.opencode().config_file.ends_with("config.json"));
     let memory = Memory::open(data.path());
     assert_eq!(run_install(&v1, &memory, opencode_only()).0, 0);
     let installed_v1 = read(&dir.join("config.json"));
 
     // opencode is upgraded to 2.x: doctor finds our entries in the wrong place.
     let v2 = opencode_setup_for(home.path(), data.path(), Major::V2);
-    assert!(v2.opencode.config_file.ends_with("opencode.json"));
+    assert!(v2.opencode().config_file.ends_with("opencode.json"));
     let problems = doctor_problems(&v2).join("\n");
     assert!(
         problems.contains("MCP server graphersal-memory: installed, outdated (in ")
@@ -1874,7 +1878,7 @@ fn an_upgrade_from_1x_to_2x_moves_our_entries_out_of_config_json() {
     );
     assert_eq!(
         new["instructions"][0],
-        v2.opencode.rules_file.display().to_string()
+        v2.opencode().rules_file.display().to_string()
     );
     assert_eq!(doctor_problems(&v2), Vec::<String>::new());
     let again = snapshot(home.path());
@@ -1928,7 +1932,7 @@ fn an_upgrade_from_1x_to_2x_moves_entries_of_the_1x_shape() {
         out.contains("move from mcp.graphersal-memory (the opencode 1.x shape) to mcp.servers"),
         "{out}"
     );
-    let text = read(&v2.opencode.config_file);
+    let text = read(&v2.opencode().config_file);
     assert!(
         text.contains("// my settings") && text.contains("/* keep */"),
         "{text}"
@@ -1973,8 +1977,9 @@ fn both_harnesses_share_one_store_and_the_wizard_asks_which_agents() {
     );
     assert_eq!(setup.installed(), vec![Kind::ClaudeCode, Kind::OpenCode]);
     // One store: both registrations start the same binary with the same data directory.
-    let claude: Value = serde_json::from_str(&read(&setup.paths.user_config)).unwrap();
-    let opencode = crate::install::jsonedit::value_of(&read(&setup.opencode.config_file)).unwrap();
+    let claude: Value = serde_json::from_str(&read(&setup.paths().user_config)).unwrap();
+    let opencode =
+        crate::install::jsonedit::value_of(&read(&setup.opencode().config_file)).unwrap();
     let claude_args = claude["mcpServers"]["graphersal-memory"]["args"].clone();
     let opencode_command = opencode["mcp"]["graphersal-memory"]["command"].clone();
     assert_eq!(
@@ -2007,8 +2012,8 @@ fn both_harnesses_share_one_store_and_the_wizard_asks_which_agents() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("Ready to install"), "{out}");
     assert!(
-        !setup.paths.settings.exists()
-            || read(&setup.paths.settings) == read_before(&before, ".claude/settings.json")
+        !setup.paths().settings.exists()
+            || read(&setup.paths().settings) == read_before(&before, ".claude/settings.json")
     );
     assert_eq!(setup.installed(), vec![Kind::OpenCode]);
     let (code, out) = run_uninstall(&setup, uninstall_yes());
@@ -2072,7 +2077,7 @@ fn opencode_uninstall_exports_every_memory_as_markdown_and_deletes_nothing() {
     assert!(read(&dir.join("MEMORY.md")).contains("(use-pnpm.md)"));
     assert!(read(&export.join("global.md")).contains("tabs-not-spaces summary"));
     // The configuration is gone, the export stays; nothing was deleted from the memory.
-    assert!(!setup.opencode.config_file.exists());
+    assert!(!setup.opencode().config_file.exists());
     let still = InProcess(&memory).memories_all();
     assert_eq!(still.len(), 2);
     memory.close();
@@ -2100,8 +2105,8 @@ fn opencode_status_and_doctor_name_its_parts() {
     let findings = crate::harnesses::opencode::install::doctor(&setup);
     assert!(findings.iter().all(|f| !f.problem), "{findings:?}");
     // A hand edit of the rule block is a problem doctor names.
-    let rules = read(&setup.opencode.rules_file).replace("Save with", "Store with");
-    std::fs::write(&setup.opencode.rules_file, rules).unwrap();
+    let rules = read(&setup.opencode().rules_file).replace("Save with", "Store with");
+    std::fs::write(&setup.opencode().rules_file, rules).unwrap();
     let findings = crate::harnesses::opencode::install::doctor(&setup);
     assert!(
         findings
@@ -2163,7 +2168,7 @@ fn codex_install_then_uninstall_leaves_existing_files_byte_identical() {
             .iter()
             .any(|l| l.contains("ACTION NEEDED")),
     );
-    let text = read(&setup.codex.config_file);
+    let text = read(&setup.codex().config_file);
     assert!(
         text.starts_with("# my Codex settings\nmodel = \"gpt-5.5\""),
         "{text}"
@@ -2193,7 +2198,7 @@ fn codex_install_then_uninstall_leaves_existing_files_byte_identical() {
     assert_eq!(doc["mcp_servers"]["other"]["command"], "npx");
     assert_eq!(doc["model"], "gpt-5.5");
     assert_eq!(doc["projects"]["/w/app"]["trust_level"], "trusted");
-    let hooks = crate::install::jsonedit::value_of(&read(&setup.codex.hooks_file)).unwrap();
+    let hooks = crate::install::jsonedit::value_of(&read(&setup.codex().hooks_file)).unwrap();
     assert_eq!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"], "say done");
     let start = hooks["hooks"]["SessionStart"][0]["hooks"][0].clone();
     assert!(
@@ -2221,8 +2226,8 @@ fn codex_install_then_uninstall_leaves_existing_files_byte_identical() {
         "{agents}"
     );
     // Nothing of the other harnesses.
-    assert!(!setup.paths.user_config.exists() && !setup.paths.config_dir.exists());
-    assert!(!setup.opencode.config_dir.exists());
+    assert!(!setup.paths().user_config.exists() && !setup.paths().config_dir.exists());
+    assert!(!setup.opencode().config_dir.exists());
     assert!(data.path().join("install/codex.json").exists());
     let inspection = crate::harnesses::codex::install::inspect(&setup);
     assert!(!inspection.nothing_installed());
@@ -2260,27 +2265,30 @@ fn codex_writes_into_its_config_and_uninstall_still_removes_only_our_parts() {
     let memory = Memory::open(data.path());
     let (code, out) = run_install(&setup, &memory, codex_only());
     assert_eq!(code, 0, "{out}");
-    assert!(setup.codex.config_file.is_file() && setup.codex.hooks_file.is_file());
+    assert!(setup.codex().config_file.is_file() && setup.codex().hooks_file.is_file());
     // Codex records project trust and the trust of our hooks (as it does after `/hooks`).
-    let hooks = setup.codex.hooks_file.display().to_string();
+    let hooks = setup.codex().hooks_file.display().to_string();
     let added = format!(
         "\n[projects.\"/w/app\"]\ntrust_level = \"trusted\"\n\n[hooks.state.'{hooks}:session_start:0:0']\ntrusted_hash = \"sha256:1\"\n\n[hooks.state.'{hooks}:session_end:0:0']\ntrusted_hash = \"sha256:2\"\n"
     );
-    let mut text = read(&setup.codex.config_file);
+    let mut text = read(&setup.codex().config_file);
     text.push_str(&added);
-    std::fs::write(&setup.codex.config_file, &text).unwrap();
+    std::fs::write(&setup.codex().config_file, &text).unwrap();
     assert!(crate::harnesses::codex::install::inspect(&setup).hooks_trusted);
     let (code, out) = run_uninstall(&setup, codex_uninstall());
     assert_eq!(code, 0, "{out}");
-    let left = read(&setup.codex.config_file);
+    let left = read(&setup.codex().config_file);
     assert_eq!(
         crate::install::tomledit::parse(&left).unwrap(),
         crate::install::tomledit::parse(&added).unwrap(),
         "{left}"
     );
     assert!(!left.contains("graphersal-memory:begin"), "{left}");
-    assert!(!setup.codex.hooks_file.exists(), "install created it");
-    assert!(!setup.codex.instruction_file.exists(), "install created it");
+    assert!(!setup.codex().hooks_file.exists(), "install created it");
+    assert!(
+        !setup.codex().instruction_file.exists(),
+        "install created it"
+    );
     memory.close();
 }
 
@@ -2298,7 +2306,7 @@ fn codex_memories_are_switched_off_on_request_and_back_on_at_uninstall() {
     let (code, out) = run_install(&setup, &memory, codex_only());
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("Nothing is lost"), "{out}");
-    let text = read(&setup.codex.config_file);
+    let text = read(&setup.codex().config_file);
     assert!(text.contains("# mine\nmemories = false\n"), "{text}");
     assert!(
         crate::harnesses::codex::install::status_lines(&setup)
@@ -2308,7 +2316,7 @@ fn codex_memories_are_switched_off_on_request_and_back_on_at_uninstall() {
     let (code, out) = run_uninstall(&setup, codex_uninstall());
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("Codex's memories: switched on again"), "{out}");
-    assert_eq!(read(&setup.codex.config_file), original);
+    assert_eq!(read(&setup.codex().config_file), original);
     // Kept on when asked to.
     let (code, out) = run_install(
         &setup,
@@ -2320,7 +2328,7 @@ fn codex_memories_are_switched_off_on_request_and_back_on_at_uninstall() {
     );
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("[features] memories: on (kept)"), "{out}");
-    assert!(read(&setup.codex.config_file).contains("# mine\nmemories = true\n"));
+    assert!(read(&setup.codex().config_file).contains("# mine\nmemories = true\n"));
     memory.close();
 }
 
@@ -2339,7 +2347,7 @@ fn codex_develop_server_is_switched_by_enabled_and_conflicts_are_kept() {
         },
     );
     assert_eq!(code, 0, "{out}");
-    let doc = crate::install::tomledit::parse(&read(&setup.codex.config_file)).unwrap();
+    let doc = crate::install::tomledit::parse(&read(&setup.codex().config_file)).unwrap();
     assert!(doc["mcp_servers"]["graphersal-memory-develop"]["enabled"].is_null());
     let (code, out) = run_uninstall(
         &setup,
@@ -2349,7 +2357,7 @@ fn codex_develop_server_is_switched_by_enabled_and_conflicts_are_kept() {
         },
     );
     assert_eq!(code, 0, "{out}");
-    let text = read(&setup.codex.config_file);
+    let text = read(&setup.codex().config_file);
     let doc = crate::install::tomledit::parse(&text).unwrap();
     assert_eq!(
         doc["mcp_servers"]["graphersal-memory-develop"]["enabled"],
@@ -2362,7 +2370,7 @@ fn codex_develop_server_is_switched_by_enabled_and_conflicts_are_kept() {
             .intact
     );
     assert!(
-        setup.codex.hooks_file.exists(),
+        setup.codex().hooks_file.exists(),
         "only the develop server changed"
     );
     memory.close();
@@ -2379,7 +2387,7 @@ fn codex_develop_server_is_switched_by_enabled_and_conflicts_are_kept() {
     let (code, out) = run_install(&setup, &memory, codex_only());
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("is not ours"), "{out}");
-    assert_eq!(read(&setup.codex.config_file), theirs);
+    assert_eq!(read(&setup.codex().config_file), theirs);
     memory.close();
 }
 
@@ -2393,7 +2401,10 @@ fn codex_rules_go_into_the_override_file_when_that_is_the_one_codex_loads() {
     std::fs::write(dir.join("AGENTS.override.md"), "# active\n").unwrap();
     let before = snapshot(home.path());
     let setup = setup_in(home.path(), data.path());
-    assert_eq!(setup.codex.instruction_file, dir.join("AGENTS.override.md"));
+    assert_eq!(
+        setup.codex().instruction_file,
+        dir.join("AGENTS.override.md")
+    );
     let memory = Memory::open(data.path());
     let (code, out) = run_install(&setup, &memory, codex_only());
     assert_eq!(code, 0, "{out}");
@@ -2423,14 +2434,12 @@ fn codex_is_detected_by_its_program_leftovers_are_not_offered_and_it_is_exported
     let setup = with_programs(setup, &["codex"]);
     assert!(setup.detected().contains(&Kind::Codex));
     let agent = setup.agent_of(Kind::Codex);
-    assert!(!crate::harnesses::agent::Harness::has_file_memory(
-        agent.as_ref()
-    ));
+    assert!(!crate::harnesses::agent::Harness::has_file_memory(agent));
     assert_eq!(
-        crate::harnesses::agent::Harness::global_memory_file(agent.as_ref()),
+        crate::harnesses::agent::Harness::global_memory_file(agent),
         home.path().join("graphersal-memory-export/codex/global.md")
     );
-    assert!(crate::commands::export_note(agent.as_ref()).contains("AGENTS.md"));
+    assert!(crate::commands::export_note(agent).contains("AGENTS.md"));
 }
 
 #[test]
@@ -2448,7 +2457,7 @@ fn codex_tool_approvals_the_user_gave_are_kept_and_cleaned_up_with_our_servers()
         // "Always allow" in Codex: a tools table of our server, outside or inside the block.
         let approval =
             "\n[mcp_servers.graphersal-memory.tools.remember]\napproval_mode = \"approve\"\n";
-        let text = read(&setup.codex.config_file);
+        let text = read(&setup.codex().config_file);
         let edited = if inside {
             text.replacen(
                 "\n[mcp_servers.graphersal-memory-develop]",
@@ -2459,19 +2468,19 @@ fn codex_tool_approvals_the_user_gave_are_kept_and_cleaned_up_with_our_servers()
             format!("{text}{approval}")
         };
         assert_ne!(edited, text);
-        std::fs::write(&setup.codex.config_file, &edited).unwrap();
+        std::fs::write(&setup.codex().config_file, &edited).unwrap();
         let inspection = crate::harnesses::codex::install::inspect(&setup);
         assert_eq!(inspection.use_server, crate::install::PartState::Installed);
         let (code, out) = run_install(&setup, &memory, codex_only());
         assert_eq!(code, 0, "inside: {inside}: {out}");
         assert_eq!(
-            read(&setup.codex.config_file),
+            read(&setup.codex().config_file),
             edited,
             "the approval is kept"
         );
         let (code, out) = run_uninstall(&setup, codex_uninstall());
         assert_eq!(code, 0, "inside: {inside}: {out}");
-        let left = read(&setup.codex.config_file);
+        let left = read(&setup.codex().config_file);
         assert_eq!(
             crate::install::tomledit::parse(&left).unwrap(),
             json!({"model": "o3"}),
@@ -2526,7 +2535,7 @@ fn cursor_install_then_uninstall_leaves_existing_files_byte_identical() {
     );
     assert!(out.contains("Restart running Cursor sessions"), "{out}");
     // mcp.json: our server beside theirs, the comment kept, no develop server.
-    let text = read(&setup.cursor.mcp_file);
+    let text = read(&setup.cursor().mcp_file);
     assert!(text.starts_with("{\n  // my servers\n"), "{text}");
     let mcp = crate::install::jsonedit::value_of(&text).unwrap();
     assert_eq!(mcp["mcpServers"]["other"]["command"], "npx");
@@ -2537,7 +2546,7 @@ fn cursor_install_then_uninstall_leaves_existing_files_byte_identical() {
     );
     assert!(mcp["mcpServers"]["graphersal-memory-develop"].is_null());
     // hooks.json: theirs kept, ours flat entries with a timeout.
-    let hooks = crate::install::jsonedit::value_of(&read(&setup.cursor.hooks_file)).unwrap();
+    let hooks = crate::install::jsonedit::value_of(&read(&setup.cursor().hooks_file)).unwrap();
     assert_eq!(hooks["version"], 1);
     assert_eq!(
         hooks["hooks"]["afterFileEdit"][0]["command"],
@@ -2555,7 +2564,7 @@ fn cursor_install_then_uninstall_leaves_existing_files_byte_identical() {
             .contains(" hook session-end ")
     );
     // Our own rule file; theirs untouched.
-    let rules = read(&setup.cursor.rules_file);
+    let rules = read(&setup.cursor().rules_file);
     assert!(rules.starts_with("---\ndescription: "), "{rules}");
     assert!(rules.contains("alwaysApply: true"), "{rules}");
     assert!(
@@ -2567,8 +2576,8 @@ fn cursor_install_then_uninstall_leaves_existing_files_byte_identical() {
         CURSOR_RULE
     );
     // Nothing of the other harnesses.
-    assert!(!setup.paths.user_config.exists() && !setup.paths.config_dir.exists());
-    assert!(!setup.codex.codex_home.exists() && !setup.opencode.config_dir.exists());
+    assert!(!setup.paths().user_config.exists() && !setup.paths().config_dir.exists());
+    assert!(!setup.codex().codex_home.exists() && !setup.opencode().config_dir.exists());
     assert!(data.path().join("install/cursor.json").exists());
     let inspection = crate::harnesses::cursor::install::inspect(&setup);
     assert_eq!(inspection.use_server, crate::install::PartState::Installed);
@@ -2603,7 +2612,7 @@ fn cursor_files_install_created_go_and_the_users_later_additions_stay() {
     let memory = Memory::open(data.path());
     let (code, out) = run_install(&setup, &memory, cursor_only());
     assert_eq!(code, 0, "{out}");
-    assert!(read(&setup.cursor.hooks_file).starts_with("{\n  \"version\": 1,"));
+    assert!(read(&setup.cursor().hooks_file).starts_with("{\n  \"version\": 1,"));
     // Created files only: uninstall leaves no trace (directories included).
     let (code, out) = run_uninstall(&setup, cursor_uninstall());
     assert_eq!(code, 0, "{out}");
@@ -2612,7 +2621,7 @@ fn cursor_files_install_created_go_and_the_users_later_additions_stay() {
     // The user adds a server and a hook of theirs after install: those stay.
     let (code, out) = run_install(&setup, &memory, cursor_only());
     assert_eq!(code, 0, "{out}");
-    let mcp = read(&setup.cursor.mcp_file);
+    let mcp = read(&setup.cursor().mcp_file);
     let (mcp, _) = crate::install::jsonedit::set_member(
         &mcp,
         &["mcpServers"],
@@ -2621,26 +2630,26 @@ fn cursor_files_install_created_go_and_the_users_later_additions_stay() {
     )
     .unwrap()
     .unwrap();
-    std::fs::write(&setup.cursor.mcp_file, &mcp).unwrap();
-    let hooks = read(&setup.cursor.hooks_file);
+    std::fs::write(&setup.cursor().mcp_file, &mcp).unwrap();
+    let hooks = read(&setup.cursor().hooks_file);
     let (hooks, _) = crate::install::jsonedit::append_element(
         &hooks,
         &["hooks", "stop"],
         &json!({"command": "./hooks/done.sh"}),
     )
     .unwrap();
-    std::fs::write(&setup.cursor.hooks_file, &hooks).unwrap();
+    std::fs::write(&setup.cursor().hooks_file, &hooks).unwrap();
     let (code, out) = run_uninstall(&setup, cursor_uninstall());
     assert_eq!(code, 0, "{out}");
     assert_eq!(
-        crate::install::jsonedit::value_of(&read(&setup.cursor.mcp_file)).unwrap(),
+        crate::install::jsonedit::value_of(&read(&setup.cursor().mcp_file)).unwrap(),
         json!({"mcpServers": {"theirs": {"command": "/bin/theirs"}}})
     );
     assert_eq!(
-        crate::install::jsonedit::value_of(&read(&setup.cursor.hooks_file)).unwrap(),
+        crate::install::jsonedit::value_of(&read(&setup.cursor().hooks_file)).unwrap(),
         json!({"version": 1, "hooks": {"stop": [{"command": "./hooks/done.sh"}]}})
     );
-    assert!(!setup.cursor.rules_file.exists(), "install created it");
+    assert!(!setup.cursor().rules_file.exists(), "install created it");
     memory.close();
 }
 
@@ -2659,7 +2668,7 @@ fn cursor_develop_server_is_registered_only_on_request_and_conflicts_are_kept() 
         },
     );
     assert_eq!(code, 0, "{out}");
-    let mcp = crate::install::jsonedit::value_of(&read(&setup.cursor.mcp_file)).unwrap();
+    let mcp = crate::install::jsonedit::value_of(&read(&setup.cursor().mcp_file)).unwrap();
     assert_eq!(
         mcp["mcpServers"]["graphersal-memory-develop"],
         crate::harnesses::cursor::install::mcp_entry(&setup, "develop")
@@ -2672,11 +2681,11 @@ fn cursor_develop_server_is_registered_only_on_request_and_conflicts_are_kept() 
         },
     );
     assert_eq!(code, 0, "{out}");
-    let mcp = crate::install::jsonedit::value_of(&read(&setup.cursor.mcp_file)).unwrap();
+    let mcp = crate::install::jsonedit::value_of(&read(&setup.cursor().mcp_file)).unwrap();
     assert!(mcp["mcpServers"]["graphersal-memory-develop"].is_null());
     assert!(!mcp["mcpServers"]["graphersal-memory"].is_null());
     assert!(
-        setup.cursor.hooks_file.exists(),
+        setup.cursor().hooks_file.exists(),
         "only the develop server changed"
     );
     // A full uninstall afterwards still leaves nothing.
@@ -2699,8 +2708,8 @@ fn cursor_develop_server_is_registered_only_on_request_and_conflicts_are_kept() 
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("is not ours"), "{out}");
     assert!(out.contains("is not graphersal-memory's"), "{out}");
-    assert_eq!(read(&setup.cursor.mcp_file), theirs);
-    assert_eq!(read(&setup.cursor.rules_file), CURSOR_RULE);
+    assert_eq!(read(&setup.cursor().mcp_file), theirs);
+    assert_eq!(read(&setup.cursor().rules_file), CURSOR_RULE);
     let inspection = crate::harnesses::cursor::install::inspect(&setup);
     assert!(matches!(
         inspection.use_server,
@@ -2729,7 +2738,7 @@ fn cursor_rule_file_follows_the_language_and_a_hand_edit_is_kept() {
         },
     );
     assert_eq!(code, 0, "{out}");
-    let rules = read(&setup.cursor.rules_file);
+    let rules = read(&setup.cursor().rules_file);
     assert!(
         rules.contains(crate::harnesses::cursor::install::RULE_BLOCK_ANY),
         "{rules}"
@@ -2740,11 +2749,11 @@ fn cursor_rule_file_follows_the_language_and_a_hand_edit_is_kept() {
     );
     // The user writes below the block: uninstall takes only the block out.
     let mine = format!("{rules}\nAlso: answer briefly.\n");
-    std::fs::write(&setup.cursor.rules_file, &mine).unwrap();
+    std::fs::write(&setup.cursor().rules_file, &mine).unwrap();
     let (code, out) = run_uninstall(&setup, cursor_uninstall());
     assert_eq!(code, 0, "{out}");
     assert_eq!(
-        read(&setup.cursor.rules_file),
+        read(&setup.cursor().rules_file),
         format!(
             "{}\nAlso: answer briefly.\n",
             crate::harnesses::cursor::install::KEPT_FRONT_MATTER
@@ -2755,12 +2764,12 @@ fn cursor_rule_file_follows_the_language_and_a_hand_edit_is_kept() {
     let data2 = TempDir::new("cu-rule2-data");
     let setup = setup_in(home.path(), data2.path());
     assert_eq!(run_install(&setup, &memory, cursor_only()).0, 0);
-    let edited = read(&setup.cursor.rules_file).replace("Store and search", "Keep");
-    std::fs::write(&setup.cursor.rules_file, &edited).unwrap();
+    let edited = read(&setup.cursor().rules_file).replace("Store and search", "Keep");
+    std::fs::write(&setup.cursor().rules_file, &edited).unwrap();
     let (code, out) = run_uninstall(&setup, cursor_uninstall());
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("edited by hand"), "{out}");
-    assert_eq!(read(&setup.cursor.rules_file), edited);
+    assert_eq!(read(&setup.cursor().rules_file), edited);
     memory.close();
 }
 
@@ -2810,7 +2819,7 @@ fn cursor_is_detected_by_its_program_leftovers_are_not_offered_and_status_and_do
         &home.path().join(".cursor/projects/w"),
         "c1",
     );
-    crate::harnesses::cursor::sessions::record(&setup.cursor.registry, &transcript, "/w", "c1")
+    crate::harnesses::cursor::sessions::record(&setup.cursor().registry, &transcript, "/w", "c1")
         .unwrap();
     assert!(
         crate::harnesses::cursor::install::status_lines(&setup)
@@ -2818,7 +2827,7 @@ fn cursor_is_detected_by_its_program_leftovers_are_not_offered_and_status_and_do
             .contains("1 transcript(s) reported by the hooks (1 on disk)")
     );
     // A broken file is a problem doctor names.
-    std::fs::write(&setup.cursor.hooks_file, "{ broken").unwrap();
+    std::fs::write(&setup.cursor().hooks_file, "{ broken").unwrap();
     let findings = crate::harnesses::cursor::install::doctor(&setup);
     assert!(
         findings
@@ -2906,7 +2915,7 @@ fn the_wizard_lists_cursor_among_the_detected_agents() {
         "{out}"
     );
     assert_eq!(setup.installed(), vec![Kind::Cursor]);
-    assert!(!setup.paths.user_config.exists(), "Claude Code untouched");
+    assert!(!setup.paths().user_config.exists(), "Claude Code untouched");
     memory.close();
 }
 
@@ -2963,12 +2972,12 @@ fn on_windows_claude_code_gets_the_exec_form_and_the_others_the_plain_words() {
         "echo mine"
     );
     let words = format!("--data-dir {}", data.path().display());
-    let codex = crate::install::jsonedit::value_of(&read(&setup.codex.hooks_file)).unwrap();
+    let codex = crate::install::jsonedit::value_of(&read(&setup.codex().hooks_file)).unwrap();
     assert_eq!(
         codex["hooks"]["SessionEnd"][0]["hooks"][0]["command"],
         format!("graphersal-memory hook session-end {words} --harness codex")
     );
-    let cursor = crate::install::jsonedit::value_of(&read(&setup.cursor.hooks_file)).unwrap();
+    let cursor = crate::install::jsonedit::value_of(&read(&setup.cursor().hooks_file)).unwrap();
     assert_eq!(
         cursor["hooks"]["sessionStart"][0]["command"],
         format!("graphersal-memory hook session-start {words} --harness cursor")
@@ -3067,7 +3076,7 @@ fn uninstall_removes_every_form_of_our_hooks() {
     assert_eq!(run_install(&setup, &memory, yes()).0, 0);
     // Leftovers of other forms beside the exec form install wrote, and a user's change (so
     // uninstall removes our parts from the current text instead of restoring the backup).
-    let settings = read(&setup.paths.settings);
+    let settings = read(&setup.paths().settings);
     let mut value: Value = serde_json::from_str(&settings).unwrap();
     let start = value["hooks"]["SessionStart"].as_array_mut().unwrap();
     start.push(json!({"hooks": [{"type": "command",
@@ -3078,7 +3087,7 @@ fn uninstall_removes_every_form_of_our_hooks() {
         "command": "C:/PROGRA~1/GRAPHE~1/graphersal-memory.exe hook session-start"}]}));
     value["theme"] = json!("light");
     std::fs::write(
-        &setup.paths.settings,
+        &setup.paths().settings,
         serde_json::to_string_pretty(&value).unwrap(),
     )
     .unwrap();
@@ -3227,7 +3236,7 @@ fn the_shim_and_the_hook_import_the_same_files_once() {
     let mut stdout = Vec::new();
     let code = crate::harnesses::claude_code::hook::run(
         hook::HookEvent::SessionStart,
-        Ok(setup.paths.clone()),
+        Ok(setup.paths().clone()),
         data.path().to_path_buf(),
         Box::new(memory.connector()),
         std::io::Cursor::new(json!({"cwd": project}).to_string().into_bytes()),
@@ -3258,7 +3267,7 @@ fn the_shim_and_the_hook_import_the_same_files_once() {
     let mut stdout = Vec::new();
     crate::harnesses::claude_code::hook::run(
         hook::HookEvent::SessionStart,
-        Ok(setup.paths.clone()),
+        Ok(setup.paths().clone()),
         data.path().to_path_buf(),
         Box::new(memory.connector()),
         std::io::Cursor::new(json!({"cwd": project}).to_string().into_bytes()),
@@ -3911,7 +3920,7 @@ fn the_session_start_hook_puts_the_freshly_imported_memories_into_additional_con
     let mut stdout = Vec::new();
     let code = crate::harnesses::claude_code::hook::run_with_context(
         hook::HookEvent::SessionStart,
-        Ok(setup.paths.clone()),
+        Ok(setup.paths().clone()),
         data.path().to_path_buf(),
         Box::new(memory.connector()),
         None,
@@ -3943,11 +3952,11 @@ fn the_start_hook_is_found_in_claude_codes_settings() {
     let home = TempDir::new("sh-home");
     let data = TempDir::new("sh-data");
     let setup = setup_in(home.path(), data.path());
-    assert!(!install::claude_start_hook_installed(&setup.paths));
+    assert!(!install::claude_start_hook_installed(setup.paths()));
     let memory = Memory::open(data.path());
     let (code, out) = run_install(&setup, &memory, yes());
     assert_eq!(code, 0, "{out}");
-    assert!(install::claude_start_hook_installed(&setup.paths));
+    assert!(install::claude_start_hook_installed(setup.paths()));
     memory.close();
 }
 
@@ -4028,9 +4037,9 @@ fn a_pin_survives_the_round_trip_files_graph_files() {
     let other = TempDir::new("prt-home2");
     let elsewhere = setup_in(other.path(), data.path());
     let rows = InProcess(&memory).memories_all();
-    crate::memory::export::write(&elsewhere.agent(), data.path(), &rows).unwrap();
+    crate::memory::export::write(elsewhere.agent(), data.path(), &rows).unwrap();
     let exported_dir =
-        crate::harnesses::agent::Harness::memory_dir(&elsewhere.agent(), &project_dir);
+        crate::harnesses::agent::Harness::memory_dir(elsewhere.agent(), &project_dir);
     let index = std::fs::read_to_string(exported_dir.join("MEMORY.md")).unwrap();
     assert!(
         index.contains("- [Graph first](graph-first.md) — study the graph first\n\n## Pinned\n"),
@@ -4082,7 +4091,7 @@ fn a_pin_survives_the_round_trip_files_graph_files() {
         "# Mine\n## Pinned\n- [Graph first](graph-first.md) — x\n",
     )
     .unwrap();
-    crate::memory::export::write(&elsewhere.agent(), data.path(), &rows).unwrap();
+    crate::memory::export::write(elsewhere.agent(), data.path(), &rows).unwrap();
     let kept = std::fs::read_to_string(exported_dir.join("MEMORY.md")).unwrap();
     assert!(
         kept.starts_with("# Mine\n## Pinned\n- [Graph first](graph-first.md) — x\n"),
@@ -4580,11 +4589,11 @@ fn h4_a_reinstall_keeps_the_auto_memory_the_user_switched_back_on() {
     let memory = Memory::open(data.path());
     assert_eq!(run_install(&setup, &memory, yes()).0, 0);
     assert_eq!(settings_json(&setup)["autoMemoryEnabled"], false);
-    let on = read(&setup.paths.settings).replace(
+    let on = read(&setup.paths().settings).replace(
         "\"autoMemoryEnabled\": false",
         "\"autoMemoryEnabled\": true",
     );
-    std::fs::write(&setup.paths.settings, on).unwrap();
+    std::fs::write(&setup.paths().settings, on).unwrap();
     let (code, out) = run_install(&setup, &memory, yes());
     assert_eq!(code, 0, "{out}");
     assert_eq!(settings_json(&setup)["autoMemoryEnabled"], true, "{out}");
@@ -4631,7 +4640,7 @@ fn b4_our_hook_moved_into_a_group_of_the_user_is_removed_alone() {
     let ours = settings["hooks"]["SessionStart"][1]["hooks"][0].clone();
     settings["hooks"]["SessionStart"] = json!([{"hooks": [
         {"type": "command", "command": "echo mine"}, ours]}]);
-    std::fs::write(&setup.paths.settings, settings.to_string()).unwrap();
+    std::fs::write(&setup.paths().settings, settings.to_string()).unwrap();
     // A re-install sees it installed (no second copy).
     let (code, out) = run_install(&setup, &memory, yes());
     assert_eq!(code, 0, "{out}");
@@ -4680,8 +4689,8 @@ fn b5_a_renamed_binary_recognises_its_own_entries() {
     // The binary is renamed again: the recorded one is still ours.
     setup.exe = PathBuf::from("/opt/gm/bin/gm-0.3");
     std::fs::write(
-        &setup.paths.user_config,
-        read(&setup.paths.user_config).replacen('{', "{\"tipsShown\": 1, ", 1),
+        &setup.paths().user_config,
+        read(&setup.paths().user_config).replacen('{', "{\"tipsShown\": 1, ", 1),
     )
     .unwrap();
     let (code, out) = run_uninstall(&setup, all_four_uninstall());
@@ -4695,7 +4704,7 @@ fn b5_a_renamed_binary_recognises_its_own_entries() {
         .filter(|(p, _)| !p.starts_with(".claude.json"))
         .collect();
     assert_eq!(after, before);
-    assert!(!read(&setup.paths.user_config).contains("gm-0.2"));
+    assert!(!read(&setup.paths().user_config).contains("gm-0.2"));
     memory.close();
 }
 
@@ -4814,7 +4823,7 @@ fn d5_a_file_rewritten_while_install_waits_is_merged_again_never_overwritten() {
     let memory = Memory::open(data.path());
     let mut connect = memory.connector();
     let mut input = BufReader::new(RacingInput {
-        path: setup.paths.user_config.clone(),
+        path: setup.paths().user_config.clone(),
         answered: false,
     });
     let options = InstallOptions {
@@ -4824,7 +4833,7 @@ fn d5_a_file_rewritten_while_install_waits_is_merged_again_never_overwritten() {
     let mut out = Vec::new();
     let code = install::install(&setup, &options, &mut connect, &mut input, &mut out).unwrap();
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&out));
-    let config: Value = serde_json::from_str(&read(&setup.paths.user_config)).unwrap();
+    let config: Value = serde_json::from_str(&read(&setup.paths().user_config)).unwrap();
     assert_eq!(
         config["lastSessionId"], "abc",
         "the agent's write is kept: {config}"
@@ -4839,11 +4848,11 @@ fn d5_a_file_rewritten_while_install_waits_is_merged_again_never_overwritten() {
     let mut state = install::State::default();
     let mut bases = std::collections::BTreeMap::new();
     bases.insert(
-        setup.paths.user_config.clone(),
+        setup.paths().user_config.clone(),
         Some("0000000000000000".to_string()),
     );
     let change = install::Change {
-        path: setup.paths.user_config.clone(),
+        path: setup.paths().user_config.clone(),
         after: Some("{}".into()),
         created: Vec::new(),
         separator: None,
@@ -4862,7 +4871,7 @@ fn d5_a_file_rewritten_while_install_waits_is_merged_again_never_overwritten() {
     assert!(err.starts_with(crate::fsutil::CHANGED_MEANWHILE), "{err}");
     assert_eq!(
         config,
-        serde_json::from_str::<Value>(&read(&setup.paths.user_config)).unwrap()
+        serde_json::from_str::<Value>(&read(&setup.paths().user_config)).unwrap()
     );
     memory.close();
 }
@@ -4932,7 +4941,7 @@ fn b1_b2_the_export_round_trip_makes_no_siblings_and_refreshes_files_unchanged_s
     );
     // Nothing changed in the graph: the export leaves every file as it is, writes no sibling.
     let rows = InProcess(&memory).memories_all();
-    let report = crate::memory::export::write(&setup.agent(), data.path(), &rows).unwrap();
+    let report = crate::memory::export::write(setup.agent(), data.path(), &rows).unwrap();
     assert_eq!(snapshot(&dir), before, "{report:?}");
     assert!(report.conflicts.is_empty(), "{report:?}");
     // A memory changed in the graph after install reaches its file (unchanged since import),
@@ -4944,7 +4953,7 @@ fn b1_b2_the_export_round_trip_makes_no_siblings_and_refreshes_files_unchanged_s
                "body": "The user is a tester and a writer."}),
     );
     let rows = InProcess(&memory).memories_all();
-    let report = crate::memory::export::write(&setup.agent(), data.path(), &rows).unwrap();
+    let report = crate::memory::export::write(setup.agent(), data.path(), &rows).unwrap();
     assert_eq!(
         report.refreshed,
         vec![dir.join("meta-rule.md")],
@@ -4968,7 +4977,7 @@ fn b1_b2_the_export_round_trip_makes_no_siblings_and_refreshes_files_unchanged_s
                "body": "Keep CRLF, always."}),
     );
     let rows = InProcess(&memory).memories_all();
-    let report = crate::memory::export::write(&setup.agent(), data.path(), &rows).unwrap();
+    let report = crate::memory::export::write(setup.agent(), data.path(), &rows).unwrap();
     assert_eq!(report.conflicts.len(), 1, "{report:?}");
     assert!(dir.join("crlf-rule.graphersal.md").exists());
     let scanned = import::read_dir(&dir, Some(project.clone()));
@@ -5014,8 +5023,8 @@ fn a_superseded_memory_is_written_but_left_out_of_the_index_and_a_conflict_is_na
     );
     let rows = InProcess(&memory).memories_all();
     crate::memory::projects::resolve(data.path(), &project).unwrap();
-    crate::memory::export::write(&setup.agent(), data.path(), &rows).unwrap();
-    let dir = crate::harnesses::agent::Harness::memory_dir(&setup.agent(), &project_dir);
+    crate::memory::export::write(setup.agent(), data.path(), &rows).unwrap();
+    let dir = crate::harnesses::agent::Harness::memory_dir(setup.agent(), &project_dir);
     let index = read(&dir.join("MEMORY.md"));
     assert!(!index.contains("(use-npm.md)"), "{index}");
     assert!(index.contains("(use-pnpm.md)"), "{index}");
@@ -5143,7 +5152,7 @@ fn n2_a_crlf_instruction_file_gets_a_crlf_block_and_gets_it_back_out_cleanly() {
     let setup = setup_in(home.path(), data.path());
     let memory = Memory::open(data.path());
     assert_eq!(run_install(&setup, &memory, yes()).0, 0);
-    let text = read(&setup.paths.instructions);
+    let text = read(&setup.paths().instructions);
     assert!(
         !text.replace("\r\n", "").contains('\n'),
         "every line end is CRLF"
@@ -5152,11 +5161,11 @@ fn n2_a_crlf_instruction_file_gets_a_crlf_block_and_gets_it_back_out_cleanly() {
     assert_eq!(code, 0, "{out}");
     assert!(!out.contains("conflict"), "{out}");
     // The user adds a line: the structural removal leaves no stray line end.
-    std::fs::write(&setup.paths.instructions, format!("{text}Mine.\r\n")).unwrap();
+    std::fs::write(&setup.paths().instructions, format!("{text}Mine.\r\n")).unwrap();
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 0, "{out}");
     assert_eq!(
-        read(&setup.paths.instructions),
+        read(&setup.paths().instructions),
         format!("{original}\r\nMine.\r\n")
     );
     memory.close();
@@ -5175,7 +5184,7 @@ fn n3_an_empty_settings_file_is_an_empty_configuration() {
     assert!(settings_json(&setup)["hooks"]["SessionStart"].is_array());
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 0, "{out}");
-    assert_eq!(read(&setup.paths.settings), "");
+    assert_eq!(read(&setup.paths().settings), "");
     memory.close();
 }
 
@@ -5188,11 +5197,11 @@ fn n4_uninstall_says_when_it_kept_the_users_newer_auto_memory_value() {
     let setup = setup_in(home.path(), data.path());
     let memory = Memory::open(data.path());
     assert_eq!(run_install(&setup, &memory, yes()).0, 0);
-    let on = read(&setup.paths.settings).replace(
+    let on = read(&setup.paths().settings).replace(
         "\"autoMemoryEnabled\": false",
         "\"autoMemoryEnabled\": true",
     );
-    std::fs::write(&setup.paths.settings, on).unwrap();
+    std::fs::write(&setup.paths().settings, on).unwrap();
     let (code, out) = run_uninstall(&setup, uninstall_yes());
     assert_eq!(code, 0, "{out}");
     assert!(
@@ -5291,11 +5300,11 @@ fn n5_text_the_user_added_to_the_cursor_rule_file_loses_our_front_matter() {
     let setup = setup_in(home.path(), data.path());
     let memory = Memory::open(data.path());
     assert_eq!(run_install(&setup, &memory, cursor_only()).0, 0);
-    let rules = read(&setup.cursor.rules_file);
-    std::fs::write(&setup.cursor.rules_file, format!("{rules}\nMine.\n")).unwrap();
+    let rules = read(&setup.cursor().rules_file);
+    std::fs::write(&setup.cursor().rules_file, format!("{rules}\nMine.\n")).unwrap();
     let (code, out) = run_uninstall(&setup, cursor_uninstall());
     assert_eq!(code, 0, "{out}");
-    let left = read(&setup.cursor.rules_file);
+    let left = read(&setup.cursor().rules_file);
     assert!(!left.contains("graphersal-memory"), "{left}");
     assert!(
         left.starts_with("---\nalwaysApply: true\n---\n") && left.ends_with("Mine.\n"),
@@ -5406,7 +5415,7 @@ fn codewhale_install_then_uninstall_leaves_existing_files_byte_identical() {
         !out.contains("Claude Code"),
         "no Claude Code wording: {out}"
     );
-    let mcp = crate::install::jsonedit::value_of(&read(&setup.codewhale.mcp_file)).unwrap();
+    let mcp = crate::install::jsonedit::value_of(&read(&setup.codewhale().mcp_file)).unwrap();
     assert_eq!(mcp["servers"]["git"]["command"], "mcp-git");
     assert_eq!(mcp["timeouts"]["connect_timeout"], 30);
     assert_eq!(
@@ -5423,7 +5432,7 @@ fn codewhale_install_then_uninstall_leaves_existing_files_byte_identical() {
         true
     );
     assert!(mcp.get("mcpServers").is_none(), "one servers key only");
-    let config = read(&setup.codewhale.config_file);
+    let config = read(&setup.codewhale().config_file);
     assert!(
         config.starts_with("# my CodeWhale settings\nprovider = \"deepseek\""),
         "{config}"
@@ -5447,8 +5456,8 @@ fn codewhale_install_then_uninstall_leaves_existing_files_byte_identical() {
         "{agents}"
     );
     // Nothing of the other harnesses, no hooks.
-    assert!(!setup.paths.user_config.exists() && !setup.paths.config_dir.exists());
-    assert!(!setup.codex.codex_home.exists() && !setup.cursor.cursor_dir.exists());
+    assert!(!setup.paths().user_config.exists() && !setup.paths().config_dir.exists());
+    assert!(!setup.codex().codex_home.exists() && !setup.cursor().cursor_dir.exists());
     assert!(!config.contains("[hooks"), "{config}");
     assert!(data.path().join("install").join("codewhale.json").exists());
     let inspection = crate::harnesses::codewhale::install::inspect(&setup);
@@ -5483,7 +5492,7 @@ fn codewhale_files_install_created_go_and_codewhales_own_edits_stay() {
     let memory = Memory::open(data.path());
     let (code, out) = run_install(&setup, &memory, codewhale_only());
     assert_eq!(code, 0, "{out}");
-    let config = read(&setup.codewhale.config_file);
+    let config = read(&setup.codewhale().config_file);
     assert!(config.contains(crate::install::tomledit::BEGIN), "{config}");
     assert_eq!(
         crate::install::tomledit::parse(&config).unwrap()["tools"]["always_load"],
@@ -5493,8 +5502,8 @@ fn codewhale_files_install_created_go_and_codewhales_own_edits_stay() {
     // MCP server.
     let mut text = config.clone();
     text.push_str("\ndefault_text_model = \"gpt-oss-20b\"\n");
-    std::fs::write(&setup.codewhale.config_file, &text).unwrap();
-    let mcp = read(&setup.codewhale.mcp_file);
+    std::fs::write(&setup.codewhale().config_file, &text).unwrap();
+    let mcp = read(&setup.codewhale().mcp_file);
     let (with_git, _) = crate::install::jsonedit::set_member(
         &mcp,
         &["servers"],
@@ -5503,19 +5512,19 @@ fn codewhale_files_install_created_go_and_codewhales_own_edits_stay() {
     )
     .unwrap()
     .unwrap();
-    std::fs::write(&setup.codewhale.mcp_file, with_git).unwrap();
+    std::fs::write(&setup.codewhale().mcp_file, with_git).unwrap();
     let (code, out) = run_uninstall(&setup, codewhale_uninstall());
     assert_eq!(code, 0, "{out}");
-    let left = read(&setup.codewhale.config_file);
+    let left = read(&setup.codewhale().config_file);
     assert_eq!(
         crate::install::tomledit::parse(&left).unwrap(),
         json!({"default_text_model": "gpt-oss-20b"}),
         "{left}"
     );
-    let mcp = crate::install::jsonedit::value_of(&read(&setup.codewhale.mcp_file)).unwrap();
+    let mcp = crate::install::jsonedit::value_of(&read(&setup.codewhale().mcp_file)).unwrap();
     assert_eq!(mcp, json!({"servers": {"git": {"command": "mcp-git"}}}));
     assert!(
-        !setup.codewhale.instruction_file.exists(),
+        !setup.codewhale().instruction_file.exists(),
         "install created it"
     );
     memory.close();
@@ -5534,7 +5543,7 @@ fn codewhale_memory_is_switched_off_on_request_and_back_on_at_uninstall() {
     let (code, out) = run_install(&setup, &memory, codewhale_only());
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("Nothing is lost"), "{out}");
-    let text = read(&setup.codewhale.config_file);
+    let text = read(&setup.codewhale().config_file);
     assert!(text.contains("# mine\nenabled = false\n"), "{text}");
     assert!(
         crate::harnesses::codewhale::install::status_lines(&setup)
@@ -5547,7 +5556,7 @@ fn codewhale_memory_is_switched_off_on_request_and_back_on_at_uninstall() {
         out.contains("CodeWhale's memory: switched on again"),
         "{out}"
     );
-    assert_eq!(read(&setup.codewhale.config_file), original);
+    assert_eq!(read(&setup.codewhale().config_file), original);
     // Kept on when asked to.
     let (code, out) = run_install(
         &setup,
@@ -5559,7 +5568,7 @@ fn codewhale_memory_is_switched_off_on_request_and_back_on_at_uninstall() {
     );
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("CodeWhale's memory: on (kept)"), "{out}");
-    assert!(read(&setup.codewhale.config_file).contains("# mine\nenabled = true\n"));
+    assert!(read(&setup.codewhale().config_file).contains("# mine\nenabled = true\n"));
     memory.close();
 }
 
@@ -5576,7 +5585,7 @@ fn codewhale_legacy_files_are_written_where_codewhale_reads_them() {
     .unwrap();
     let before = snapshot(home.path());
     let setup = setup_in(home.path(), data.path());
-    assert_eq!(setup.codewhale.mcp_file, legacy.join("mcp.json"));
+    assert_eq!(setup.codewhale().mcp_file, legacy.join("mcp.json"));
     let memory = Memory::open(data.path());
     let (code, out) = run_install(&setup, &memory, codewhale_only());
     assert_eq!(code, 0, "{out}");
@@ -5637,7 +5646,7 @@ fn codewhale_develop_server_is_switched_by_disabled() {
         },
     );
     assert_eq!(code, 0, "{out}");
-    let mcp = crate::install::jsonedit::value_of(&read(&setup.codewhale.mcp_file)).unwrap();
+    let mcp = crate::install::jsonedit::value_of(&read(&setup.codewhale().mcp_file)).unwrap();
     assert!(mcp["servers"]["graphersal-memory-develop"]["disabled"].is_null());
     assert_eq!(
         crate::harnesses::codewhale::install::inspect(&setup).develop_server,
@@ -5651,7 +5660,7 @@ fn codewhale_develop_server_is_switched_by_disabled() {
         },
     );
     assert_eq!(code, 0, "{out}");
-    let mcp = crate::install::jsonedit::value_of(&read(&setup.codewhale.mcp_file)).unwrap();
+    let mcp = crate::install::jsonedit::value_of(&read(&setup.codewhale().mcp_file)).unwrap();
     assert_eq!(
         mcp["servers"]["graphersal-memory-develop"]["disabled"],
         true
@@ -5673,7 +5682,7 @@ fn codewhale_entries_switched_on_by_mcp_enable_are_kept_by_install_and_refresh()
     let (code, out) = run_install(&setup, &memory, develop.clone());
     assert_eq!(code, 0, "{out}");
     // CodeWhale's `/mcp enable` writes `"disabled": false` into the entry it switches on.
-    let text = read(&setup.codewhale.mcp_file);
+    let text = read(&setup.codewhale().mcp_file);
     let (enabled, _) = crate::install::jsonedit::set_member(
         &text,
         &["servers", "graphersal-memory-develop"],
@@ -5682,7 +5691,7 @@ fn codewhale_entries_switched_on_by_mcp_enable_are_kept_by_install_and_refresh()
     )
     .unwrap()
     .unwrap();
-    std::fs::write(&setup.codewhale.mcp_file, &enabled).unwrap();
+    std::fs::write(&setup.codewhale().mcp_file, &enabled).unwrap();
     for options in [develop, refresh()] {
         let (code, out) = run_install(&setup, &memory, options);
         assert_eq!(code, 0, "{out}");
@@ -5690,7 +5699,7 @@ fn codewhale_entries_switched_on_by_mcp_enable_are_kept_by_install_and_refresh()
             !out.contains("graphersal-memory-develop (develop profile): update"),
             "{out}"
         );
-        assert_eq!(read(&setup.codewhale.mcp_file), enabled, "{out}");
+        assert_eq!(read(&setup.codewhale().mcp_file), enabled, "{out}");
     }
     memory.close();
 }
@@ -5712,17 +5721,15 @@ fn codewhale_is_detected_by_its_program_and_exported_as_markdown() {
     let setup = with_programs(setup, &["codewhale"]);
     assert!(setup.detected().contains(&Kind::CodeWhale));
     let agent = setup.agent_of(Kind::CodeWhale);
-    assert!(!crate::harnesses::agent::Harness::has_file_memory(
-        agent.as_ref()
-    ));
+    assert!(!crate::harnesses::agent::Harness::has_file_memory(agent));
     assert_eq!(
-        crate::harnesses::agent::Harness::global_memory_file(agent.as_ref()),
+        crate::harnesses::agent::Harness::global_memory_file(agent),
         home.path()
             .join("graphersal-memory-export")
             .join("codewhale")
             .join("global.md")
     );
-    assert!(crate::commands::export_note(agent.as_ref()).contains("AGENTS.md"));
+    assert!(crate::commands::export_note(agent).contains("AGENTS.md"));
 }
 
 #[test]
@@ -5731,7 +5738,7 @@ fn codewhale_native_memory_is_imported_once_and_read_only() {
     let data = TempDir::new("cw-imp-data");
     let setup = with_programs(setup_in(home.path(), data.path()), &["codewhale"]);
     crate::harnesses::codewhale::memory::tests::write_store(
-        &setup.codewhale.memory_store,
+        &setup.codewhale().memory_store,
         &[
             (
                 "m-1",
@@ -5752,7 +5759,7 @@ fn codewhale_native_memory_is_imported_once_and_read_only() {
             ),
         ],
     );
-    let store_before = std::fs::read(&setup.codewhale.memory_store).unwrap();
+    let store_before = std::fs::read(&setup.codewhale().memory_store).unwrap();
     let memory = Memory::open(data.path());
     let (code, out) = run_install(&setup, &memory, codewhale_only());
     assert_eq!(code, 0, "{out}");
@@ -5767,7 +5774,7 @@ fn codewhale_native_memory_is_imported_once_and_read_only() {
         "{all:?}"
     );
     assert_eq!(
-        std::fs::read(&setup.codewhale.memory_store).unwrap(),
+        std::fs::read(&setup.codewhale().memory_store).unwrap(),
         store_before,
         "the store is only read"
     );

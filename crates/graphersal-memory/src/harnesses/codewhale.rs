@@ -434,14 +434,17 @@ pub fn memory_on(doc: &Value, env_on: bool) -> bool {
 #[derive(Debug, Clone)]
 pub struct CodeWhale {
     paths: CodeWhalePaths,
-    servers_key: &'static str,
 }
 
 impl CodeWhale {
     /// CodeWhale with its files at `paths` (the servers key from its `mcp.json`).
     pub fn new(paths: CodeWhalePaths) -> Self {
-        let servers_key = servers_key_of(&paths.mcp_file);
-        Self { paths, servers_key }
+        Self { paths }
+    }
+
+    /// Its files.
+    pub fn paths(&self) -> &CodeWhalePaths {
+        &self.paths
     }
 }
 
@@ -658,7 +661,7 @@ impl Harness for CodeWhale {
     }
 
     fn mcp_servers_key(&self) -> &'static str {
-        self.servers_key
+        servers_key_of(&self.paths.mcp_file)
     }
 
     /// `{"command", "args", "env", "connect_timeout"}` (`docs/MCP.md`, "Server Fields"); `env`
@@ -673,7 +676,7 @@ impl Harness for CodeWhale {
     fn remove_server_hint(&self, name: &str) -> String {
         format!(
             "`codewhale mcp remove {name}` (or the member {}.{name} of {})",
-            self.servers_key,
+            servers_key_of(&self.paths.mcp_file),
             self.paths.mcp_file.display()
         )
     }

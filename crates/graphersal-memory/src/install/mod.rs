@@ -50,7 +50,6 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::harnesses::agent::{Harness, Kind};
-use crate::harnesses::claude_code::ClaudeCode;
 // Claude Code's install parts, under their old paths (`install::RULE_BLOCK`, `install::inspect`, ...).
 use crate::config::Config;
 pub use crate::harnesses::claude_code::install::*;
@@ -89,16 +88,10 @@ const FORMAT: u64 = 1;
 /// Everything install needs to know about this machine.
 #[derive(Debug, Clone)]
 pub struct Setup {
-    /// Claude Code's files.
-    pub paths: ClaudePaths,
-    /// opencode's files.
-    pub opencode: crate::harnesses::opencode::OpenCodePaths,
-    /// Codex's files.
-    pub codex: crate::harnesses::codex::CodexPaths,
-    /// Cursor's files (and the registry of its transcripts in the data directory).
-    pub cursor: crate::harnesses::cursor::CursorPaths,
-    /// CodeWhale's files.
-    pub codewhale: crate::harnesses::codewhale::CodeWhalePaths,
+    /// The user's home directory.
+    pub home: PathBuf,
+    /// Every harness with its files on this machine (`crate::harnesses`).
+    pub harnesses: crate::harnesses::Harnesses,
     /// The program search path the harness detection looks in (`None`: this process's `PATH`;
     /// tests pass an empty one).
     pub search_path: Option<std::ffi::OsString>,
@@ -119,39 +112,14 @@ pub struct Setup {
 }
 
 impl Setup {
-    /// Claude Code with this setup's paths.
-    pub fn agent(&self) -> ClaudeCode {
-        ClaudeCode::new(self.paths.clone())
-    }
-
-    /// opencode with this setup's paths.
-    pub fn opencode_agent(&self) -> crate::harnesses::opencode::OpenCode {
-        crate::harnesses::opencode::OpenCode::new(self.opencode.clone())
-    }
-
-    /// Codex with this setup's paths.
-    pub fn codex_agent(&self) -> crate::harnesses::codex::Codex {
-        crate::harnesses::codex::Codex::new(self.codex.clone())
-    }
-
-    /// Cursor with this setup's paths.
-    pub fn cursor_agent(&self) -> crate::harnesses::cursor::Cursor {
-        crate::harnesses::cursor::Cursor::new(self.cursor.clone())
-    }
-
-    /// CodeWhale with this setup's paths.
-    pub fn codewhale_agent(&self) -> crate::harnesses::codewhale::CodeWhale {
-        crate::harnesses::codewhale::CodeWhale::new(self.codewhale.clone())
-    }
-
     /// `text` as output shows it: the home directory as `~` ([`tilde`]).
     pub fn show(&self, text: &str) -> String {
-        tilde(text, &self.opencode.home)
+        tilde(text, &self.home)
     }
 
     /// The harness of `kind` (`crate::harnesses`).
-    pub fn agent_of(&self, kind: Kind) -> Box<dyn Harness> {
-        crate::harnesses::of(self, kind)
+    pub fn agent_of(&self, kind: Kind) -> &dyn Harness {
+        self.harnesses.get(kind)
     }
 
     /// The program of a harness on this machine: on the search path, or in a known install
@@ -160,7 +128,7 @@ impl Setup {
     /// are looked at only for this process's own `PATH` (tests pass their search path).
     pub fn program(&self, kind: Kind) -> Option<PathBuf> {
         self.agent_of(kind)
-            .find_program(&self.opencode.home, self.search_path.as_deref())
+            .find_program(&self.home, self.search_path.as_deref())
     }
 
     /// Whether a harness's configuration is on this machine (its configuration directory or
@@ -2369,7 +2337,7 @@ fn plan_other_memory(
 /// The import step of Claude Code's file memory.
 fn plan_import(setup: &Setup, answers: &Answers) -> Result<(Step, Vec<DirPlan>), String> {
     let import_state = ImportState::load(&setup.data_dir)?;
-    let imports = import::plan(import::scan(&setup.paths.projects)?, &import_state);
+    let imports = import::plan(import::scan(&setup.paths().projects)?, &import_state);
     let (with_project, skipped, new, changed, unchanged) = import::totals(&imports);
     let mut lines = vec![format!(
         "{} memory director{} under {}: {new} new and {changed} changed memory files to import, \
@@ -2380,7 +2348,7 @@ fn plan_import(setup: &Setup, answers: &Answers) -> Result<(Step, Vec<DirPlan>),
         } else {
             "ies"
         },
-        setup.paths.projects.display()
+        setup.paths().projects.display()
     )];
     if skipped > 0 {
         lines.push(format!(
@@ -4248,7 +4216,7 @@ pub fn uninstall_with(
         let _ = writeln!(out, "\nFirst, the memories:");
         for kind in &export_to {
             let agent = setup.agent_of(*kind);
-            let line = setup.show(&export_line(agent.as_ref(), rows.as_ref()));
+            let line = setup.show(&export_line(agent, rows.as_ref()));
             let _ = writeln!(out, "  - {line}");
         }
     }
@@ -4313,7 +4281,7 @@ pub fn uninstall_with(
             .iter()
             .map(|k| {
                 let agent = setup.agent_of(*k);
-                let target = crate::commands::export_target(agent.as_ref());
+                let target = crate::commands::export_target(agent);
                 if agent.has_file_memory() {
                     format!("back to {target}")
                 } else {
@@ -4375,9 +4343,9 @@ pub fn uninstall_with(
         } else {
             for kind in &export_to {
                 let agent = setup.agent_of(*kind);
-                report.extend(export::write(agent.as_ref(), &setup.data_dir, rows)?.lines());
+                report.extend(export::write(agent, &setup.data_dir, rows)?.lines());
                 if !agent.has_file_memory() {
-                    report.push(crate::commands::export_note(agent.as_ref()));
+                    report.push(crate::commands::export_note(agent));
                 }
             }
         }

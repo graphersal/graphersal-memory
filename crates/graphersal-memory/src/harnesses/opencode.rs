@@ -401,6 +401,11 @@ impl OpenCode {
     pub fn new(paths: OpenCodePaths) -> Self {
         Self { paths }
     }
+
+    /// Its files.
+    pub fn paths(&self) -> &OpenCodePaths {
+        &self.paths
+    }
 }
 
 impl crate::harnesses::agent::HookHandler for OpenCode {

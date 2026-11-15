@@ -19,7 +19,7 @@ impl OtherMemory for ClaudeCode {
     /// User scope, the local scopes of `~/.claude.json`, and the project's `.mcp.json`.
     fn server_sources(&self, setup: &Setup, project: Option<&Path>) -> Vec<ServerSource> {
         let permission_tools = claude_permission_tools(setup);
-        let file = setup.paths.user_config.clone();
+        let file = setup.paths().user_config.clone();
         let config = crate::install::read_json(&file, &mut Vec::new());
         let mut out = vec![ServerSource::of(&file, &["mcpServers"], &config, None)];
         if let Some(projects) = config["projects"].as_object() {
@@ -49,9 +49,9 @@ impl OtherMemory for ClaudeCode {
     }
 
     fn built_in(&self, setup: &Setup) -> Option<BuiltIn> {
-        let settings = crate::install::read_json(&setup.paths.settings, &mut Vec::new());
+        let settings = crate::install::read_json(&setup.paths().settings, &mut Vec::new());
         let off = settings["autoMemoryEnabled"] == Value::Bool(false);
-        let dirs = crate::memory::import::scan(&setup.paths.projects).unwrap_or_default();
+        let dirs = crate::memory::import::scan(&setup.paths().projects).unwrap_or_default();
         let files: usize = dirs.iter().map(|d| d.files.len()).sum();
         Some(BuiltIn {
             harness: Kind::ClaudeCode,
@@ -61,7 +61,7 @@ impl OtherMemory for ClaudeCode {
                 if files == 1 { "" } else { "s" },
                 dirs.len(),
                 if dirs.len() == 1 { "" } else { "s" },
-                setup.show(&setup.paths.projects.display().to_string())
+                setup.show(&setup.paths().projects.display().to_string())
             ),
             entries: files,
             notable: false,
@@ -71,20 +71,20 @@ impl OtherMemory for ClaudeCode {
     /// Enabled and installed plugins, and hooks other than ours, that name a memory tool.
     fn plugins(&self, setup: &Setup) -> Vec<Plugin> {
         let mut out = Vec::new();
-        let settings = crate::install::read_json(&setup.paths.settings, &mut Vec::new());
+        let settings = crate::install::read_json(&setup.paths().settings, &mut Vec::new());
         if let Some(enabled) = settings["enabledPlugins"].as_object() {
             for (name, on) in enabled {
                 if *on != Value::Bool(false) && names_memory_tool(name) {
                     out.push(Plugin {
                         harness: Kind::ClaudeCode,
                         name: name.clone(),
-                        file: setup.paths.settings.clone(),
+                        file: setup.paths().settings.clone(),
                     });
                 }
             }
         }
         let installed_file = setup
-            .paths
+            .paths()
             .config_dir
             .join("plugins")
             .join("installed_plugins.json");
@@ -113,7 +113,7 @@ impl OtherMemory for ClaudeCode {
                             out.push(Plugin {
                                 harness: Kind::ClaudeCode,
                                 name: command.to_string(),
-                                file: setup.paths.settings.clone(),
+                                file: setup.paths().settings.clone(),
                             });
                         }
                     }
@@ -126,8 +126,8 @@ impl OtherMemory for ClaudeCode {
     /// `~/.claude/CLAUDE.md`, the user rules (not our exported global memories); a project's
     /// `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md` and `.claude/rules/`.
     fn instruction_files(&self, setup: &Setup, project: Option<&Path>) -> Vec<PathBuf> {
-        let mut out = vec![setup.paths.instructions.clone()];
-        for file in files_with_extension(&setup.paths.config_dir.join("rules"), "md") {
+        let mut out = vec![setup.paths().instructions.clone()];
+        for file in files_with_extension(&setup.paths().config_dir.join("rules"), "md") {
             if file
                 .file_name()
                 .is_some_and(|n| n != super::GLOBAL_RULES_FILE)

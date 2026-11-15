@@ -34,6 +34,11 @@ impl ClaudeCode {
     pub fn new(paths: ClaudePaths) -> Self {
         Self { paths }
     }
+
+    /// Its files.
+    pub fn paths(&self) -> &ClaudePaths {
+        &self.paths
+    }
 }
 
 /// The file name of the exported global memories in Claude Code's user rules directory.

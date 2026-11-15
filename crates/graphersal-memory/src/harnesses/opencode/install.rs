@@ -146,7 +146,7 @@ fn new_config() -> String {
 /// The MCP entry of a profile for the installed line: 1.x `"enabled": <enabled>`, 2.x
 /// `"disabled": <not enabled>` (and `"codemode": false`).
 pub fn mcp_entry(setup: &Setup, profile: &str, enabled: bool) -> Value {
-    entry_for(setup, profile, enabled, setup.opencode.major())
+    entry_for(setup, profile, enabled, setup.opencode().major())
 }
 
 /// The MCP entry of a profile in the shape of `major`.
@@ -157,7 +157,7 @@ fn entry_for(setup: &Setup, profile: &str, enabled: bool, major: Major) -> Value
         profile.to_string(),
     ];
     args.extend(setup.dir_args.iter().cloned());
-    let mut paths = setup.opencode.clone();
+    let mut paths = setup.opencode().clone();
     paths.detected.major = major;
     let mut entry = crate::harnesses::opencode::OpenCode::new(paths).mcp_entry(&setup.exe, &args);
     match major {
@@ -180,7 +180,7 @@ fn at<'a>(value: &'a Value, path: &[&str]) -> &'a Value {
 /// Our entry `name` in the 1.x shape (`mcp.<name>`) where 2.x is installed: to be moved.
 fn legacy_ours<'a>(setup: &Setup, config: &'a Value, name: &str) -> Option<&'a Value> {
     let entry = &config["mcp"][name];
-    (setup.opencode.major() == Major::V2 && setup.ours().entry(entry)).then_some(entry)
+    (setup.opencode().major() == Major::V2 && setup.ours().entry(entry)).then_some(entry)
 }
 
 /// Whether a configuration holds any part of ours (either shape, or our `instructions`).
@@ -197,7 +197,7 @@ fn has_our_parts(setup: &Setup, config: &Value) -> bool {
 /// parts of ours (2.x: a `config.json` install wrote under 1.x), with their text.
 fn stale_with_ours(setup: &Setup) -> Vec<(std::path::PathBuf, String)> {
     setup
-        .opencode
+        .opencode()
         .stale_config_files
         .iter()
         .filter_map(|path| {
@@ -211,7 +211,7 @@ fn stale_with_ours(setup: &Setup) -> Vec<(std::path::PathBuf, String)> {
 /// Whether an element of `instructions` is our rules file.
 fn is_our_instruction(setup: &Setup, value: &Value) -> bool {
     value.as_str().is_some_and(|path| {
-        Path::new(path) == setup.opencode.rules_file
+        Path::new(path) == setup.opencode().rules_file
             || path.ends_with(&format!("/{}", crate::harnesses::opencode::RULES_FILE))
     })
 }
@@ -237,7 +237,7 @@ pub fn plan(
     let mut conflicts = Vec::new();
     let mut steps = Vec::new();
     let mut changes = Vec::new();
-    let paths = &setup.opencode;
+    let paths = &setup.opencode();
 
     // Parts an install under 1.x left in a file 2.x does not read: removed there (and written
     // into the file 2.x reads below).
@@ -499,7 +499,7 @@ pub fn removal(
     develop_only: bool,
     conflicts: &mut Vec<String>,
 ) -> Result<Vec<(Change, &'static str)>, String> {
-    let paths = &setup.opencode;
+    let paths = &setup.opencode();
     let mut out = Vec::new();
     let mut targets = vec![paths.config_file.clone()];
     if !develop_only {
@@ -760,7 +760,7 @@ impl Inspection {
 
 /// Inspects opencode's files.
 pub fn inspect(setup: &Setup) -> Inspection {
-    let paths = &setup.opencode;
+    let paths = &setup.opencode();
     let mut errors = Vec::new();
     let config = read_json(&paths.config_file, &mut errors);
     let stale = stale_with_ours(setup);
@@ -890,7 +890,7 @@ pub fn inspect(setup: &Setup) -> Inspection {
 /// The opencode part of `status`.
 pub fn status_lines(setup: &Setup) -> Vec<String> {
     let inspection = inspect(setup);
-    let paths = &setup.opencode;
+    let paths = &setup.opencode();
     let mut lines = vec![
         "opencode:".to_string(),
         format!("  configuration: {}", paths.config_file.display()),
@@ -957,7 +957,7 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
 /// `doctor`'s checks of the opencode installation.
 pub fn doctor(setup: &Setup) -> Vec<Finding> {
     let inspection = inspect(setup);
-    let paths = &setup.opencode;
+    let paths = &setup.opencode();
     let reinstall = "run `graphersal-memory install --harness opencode`";
     let mut findings = vec![ok(format!(
         "opencode: {}; its configuration file is {}",

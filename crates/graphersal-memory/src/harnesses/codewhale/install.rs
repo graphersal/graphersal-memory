@@ -238,7 +238,7 @@ pub fn plan(
     let mut steps = Vec::new();
     let mut changes = Vec::new();
     let mut records = Vec::new();
-    let paths = &setup.codewhale;
+    let paths = &setup.codewhale();
 
     // mcp.json: the servers.
     let path = &paths.mcp_file;
@@ -563,7 +563,7 @@ pub fn removal(
     develop_only: bool,
     conflicts: &mut Vec<String>,
 ) -> Result<Vec<(Change, &'static str)>, String> {
-    let paths = &setup.codewhale;
+    let paths = &setup.codewhale();
     let mut out = Vec::new();
     let mut targets = vec![paths.mcp_file.clone()];
     if !develop_only {
@@ -837,7 +837,7 @@ impl Inspection {
 
 /// Inspects CodeWhale's files.
 pub fn inspect(setup: &Setup) -> Inspection {
-    let paths = &setup.codewhale;
+    let paths = &setup.codewhale();
     let mut errors = Vec::new();
     let mcp = read_json(&paths.mcp_file, &mut errors);
     let key = crate::harnesses::codewhale::servers_key_of(&paths.mcp_file);
@@ -957,7 +957,7 @@ pub fn project_instruction_bytes(root: &Path) -> u64 {
 /// The CodeWhale part of `status`.
 pub fn status_lines(setup: &Setup) -> Vec<String> {
     let inspection = inspect(setup);
-    let paths = &setup.codewhale;
+    let paths = &setup.codewhale();
     let mut lines = vec![
         "CodeWhale:".to_string(),
         format!("  home: {}", paths.codewhale_home.display()),
@@ -1036,7 +1036,7 @@ pub fn status_lines(setup: &Setup) -> Vec<String> {
 /// instruction files are measured against CodeWhale's budget).
 pub fn doctor(setup: &Setup, project: Option<&Path>) -> Vec<Finding> {
     let inspection = inspect(setup);
-    let paths = &setup.codewhale;
+    let paths = &setup.codewhale();
     let reinstall = "run `graphersal-memory install --harness codewhale`";
     let mut findings = vec![ok(format!(
         "CodeWhale: home {}, MCP servers {}",

@@ -393,7 +393,7 @@ pub fn basic_memory_folders(home: &Path) -> Vec<PathBuf> {
 /// The importable data of the other tools found, and one line per tool found whose format is
 /// not importable yet (or whose data was not found).
 pub fn sources(setup: &Setup, findings: &Findings) -> (Vec<Source>, Vec<String>) {
-    let home = &setup.opencode.home;
+    let home = &setup.opencode().home;
     let mut out: Vec<Source> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     for server in &findings.servers {
