@@ -265,16 +265,17 @@ pub enum Refused {
     Failed(String),
 }
 
+/// The user's environment as the summaries' sandboxes read it (`Summarizer::with_user_env`).
+pub type UserEnv = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// The summarizer of one indexing run: exists only when the user enabled summaries.
 pub struct Summarizer {
     settings: crate::config::Summaries,
     data_dir: PathBuf,
-    /// opencode's session database, whose `auth.json` beside it a sandboxed opencode run gets
-    /// a copy of (the daemon sets it; `None`: no login is copied, free models still work).
-    opencode_db: Option<PathBuf>,
-    /// The user's Codex home, whose model settings and login a sandboxed Codex run gets a copy
-    /// of (the daemon sets it; `None`: Codex's defaults, no login).
-    codex_home: Option<PathBuf>,
+    /// The user's environment, from which a sandboxed run finds the settings and logins its
+    /// harness keeps (opencode's `auth.json`, Codex's model settings and login) and gets copies
+    /// (the daemon sets it; `None`: nothing is copied, free and local models still work).
+    user_env: Option<UserEnv>,
     spend: Spend,
     /// The calls this run made.
     pub calls: usize,
@@ -290,8 +291,7 @@ impl Summarizer {
                     Some(Self {
                         settings: config.summaries,
                         data_dir: data_dir.to_path_buf(),
-                        opencode_db: None,
-                        codex_home: None,
+                        user_env: None,
                         spend,
                         calls: 0,
                     }),
@@ -304,15 +304,10 @@ impl Summarizer {
         }
     }
 
-    /// Lets sandboxed opencode runs use the logins kept beside `db` (a copy of `auth.json`).
-    pub fn with_opencode_db(mut self, db: PathBuf) -> Self {
-        self.opencode_db = Some(db);
-        self
-    }
-
-    /// Lets sandboxed Codex runs use the model settings and the login of the Codex home `dir`.
-    pub fn with_codex_home(mut self, dir: PathBuf) -> Self {
-        self.codex_home = Some(dir);
+    /// Lets sandboxed runs use copies of the settings and logins `env` (the user's environment)
+    /// says their harness keeps.
+    pub fn with_user_env(mut self, env: UserEnv) -> Self {
+        self.user_env = Some(env);
         self
     }
 
@@ -346,8 +341,9 @@ impl Summarizer {
             prompt,
             &work,
             HARNESS_TIMEOUT,
-            self.opencode_db.as_deref(),
-            self.codex_home.as_deref(),
+            self.user_env
+                .as_deref()
+                .map(|env| env as &dyn Fn(&str) -> Option<String>),
         );
         // A call that ran costs money even when its answer is unusable.
         let cost = match &result {
@@ -407,8 +403,7 @@ pub fn run_harness_with(
     prompt: &str,
     work_dir: &Path,
     timeout: Duration,
-    opencode_db: Option<&Path>,
-    codex_home: Option<&Path>,
+    user_env: crate::harnesses::headless::UserEnv<'_>,
 ) -> Result<Summary, String> {
     let mut args = harness_args(command);
     if args.is_empty() {
@@ -420,11 +415,7 @@ pub fn run_harness_with(
     }
     let mut env: Vec<(String, String)> = vec![(HOOK_ENV.to_string(), "off".to_string())];
     if let Some(headless) = headless {
-        let homes = crate::harnesses::headless::Homes {
-            opencode_db,
-            codex_home,
-        };
-        let (prepared, sandbox) = headless.summaries_run(args, work_dir, &homes)?;
+        let (prepared, sandbox) = headless.summaries_run(args, work_dir, user_env)?;
         args = prepared;
         if !sandbox.is_empty() {
             env = sandbox;

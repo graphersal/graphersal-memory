@@ -486,7 +486,6 @@ mod tests {
             tmp.path(),
             std::time::Duration::from_secs(1),
             None,
-            None,
         )
         .unwrap_err();
         assert_eq!(err, NO_HEADLESS);

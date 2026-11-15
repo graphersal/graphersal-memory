@@ -748,7 +748,7 @@ impl crate::harnesses::headless::Headless for HeadlessRun {
         &self,
         args: Vec<String>,
         _work_dir: &Path,
-        _homes: &crate::harnesses::headless::Homes<'_>,
+        _user_env: crate::harnesses::headless::UserEnv<'_>,
     ) -> Result<crate::harnesses::headless::Prepared, String> {
         Ok((exec_args(&args), Vec::new()))
     }

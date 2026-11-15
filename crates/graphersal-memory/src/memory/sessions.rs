@@ -2450,7 +2450,16 @@ mod tests {
         .unwrap();
         let (summarizer, err) = Summarizer::new(data.path());
         assert_eq!(err, None);
-        let mut summarizer = summarizer.map(|s| s.with_codex_home(user_home.clone()));
+        // The user's Codex home, as the daemon's environment would name it.
+        let home = tmp.path().display().to_string();
+        let codex_home = user_home.display().to_string();
+        let mut summarizer = summarizer.map(|s| {
+            s.with_user_env(std::sync::Arc::new(move |name: &str| match name {
+                "HOME" => Some(home.clone()),
+                "CODEX_HOME" => Some(codex_home.clone()),
+                _ => None,
+            }))
+        });
         let mut store = Direct::new();
         let report = run(
             &codex_request(&sessions),

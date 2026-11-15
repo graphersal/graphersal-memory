@@ -927,8 +927,12 @@ impl crate::harnesses::headless::Headless for HeadlessRun {
         &self,
         args: Vec<String>,
         work_dir: &Path,
-        homes: &crate::harnesses::headless::Homes<'_>,
+        user_env: crate::harnesses::headless::UserEnv<'_>,
     ) -> Result<crate::harnesses::headless::Prepared, String> {
+        // Only the database is needed (its `auth.json` beside it): no `opencode --version`.
+        let db = user_env
+            .and_then(|env| OpenCodePaths::resolve_for(env, Detected::given(Major::V2)).ok())
+            .map(|paths| paths.db);
         let mut args = headless_args(&args);
         args.extend(["--format".to_string(), "json".to_string()]);
         let sandbox = work_dir.join("opencode");
@@ -936,7 +940,7 @@ impl crate::harnesses::headless::Headless for HeadlessRun {
         let env = build_sandbox(
             &sandbox,
             &json!({"permission": permissions(&[]), "mcp": {}}),
-            homes.opencode_db,
+            db.as_deref(),
         )?;
         Ok((args, env))
     }
