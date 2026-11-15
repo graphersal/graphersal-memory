@@ -588,6 +588,7 @@ fn the_instructions_carry_the_memory_language_of_the_settings() {
         "{english}"
     );
     assert!(!english.contains(crate::language::PLACEHOLDER));
+    assert!(english.len() < 2000, "keep the use instructions short");
     std::fs::write(
         data.path().join("config.json"),
         "{\"version\": 1, \"memory\": {\"language\": \"any\"}}\n",
