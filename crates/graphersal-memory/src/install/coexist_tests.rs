@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::harnesses::agent::{Harness, Kind};
+use crate::harnesses::claude_code::import::ImportState;
 use crate::install::coexist::{self, ServerState};
 use crate::install::install_tests::{
     Memory, bare_setup_in, existing_home, memory_fixture, native, read, run_install, run_uninstall,
     run_wizard, setup_in, snapshot, uninstall_yes, with_programs, yes,
 };
 use crate::install::{self, InstallOptions, Setup};
-use crate::memory::import::{self, ImportState};
 use crate::runtime::mcp;
 use crate::runtime::mcp_tests::TempDir;
 
@@ -244,7 +244,7 @@ fn a_default_install_names_the_reference_server_read_only_and_leaves_its_entry()
     );
     // The block is ours and current: doctor and status see it installed.
     assert_eq!(
-        install::inspect(&setup).block,
+        crate::harnesses::claude_code::install::inspect(&setup).block,
         install::PartState::Installed
     );
     let choices = coexist::Choices::load(&setup).unwrap();
@@ -921,7 +921,10 @@ fn a_file_that_brings_back_a_forgotten_memory_is_reported_and_can_be_ignored() {
     )
     .unwrap();
     let state = ImportState::load(data.path()).unwrap();
-    let plans = import::plan(import::scan(&setup.paths().projects).unwrap(), &state);
+    let plans = crate::harnesses::claude_code::import::plan(
+        crate::harnesses::claude_code::import::scan(&setup.paths().projects).unwrap(),
+        &state,
+    );
     assert_eq!(plans[0].ignored, 1);
     assert!(plans[0].changed.iter().all(|f| f.path != file));
     let status = crate::commands::status_text(data.path(), &setup.run_dir, Ok(&setup)).unwrap();
@@ -1049,7 +1052,7 @@ fn a_default_install_keeps_every_rule_the_user_had_in_context() {
     let project = project_dir.display().to_string();
     // A realistic MEMORY.md: rules (feedback), facts about the user, pinned project facts and
     // other project facts; and CLAUDE.md rules of the user's own.
-    let name = import::claude_slug(&project);
+    let name = crate::harnesses::claude_code::import::claude_slug(&project);
     let dir = home.path().join(".claude/projects").join(&name);
     let memory_dir = dir.join("memory");
     std::fs::create_dir_all(&memory_dir).unwrap();
@@ -1136,13 +1139,16 @@ fn a_default_install_keeps_every_rule_the_user_had_in_context() {
 #[test]
 fn a_rule_block_naming_other_tools_is_ours_for_update_and_removal() {
     let english = crate::install::language::Language::English;
-    let block = install::block_text_with(english, &["mem0".into()]);
+    let block = crate::harnesses::claude_code::install::block_text_with(english, &["mem0".into()]);
     let text = format!("# Mine\n\n{block}");
-    let found = install::find_block(&text).unwrap().unwrap();
-    assert!(found.intact && found.known && !found.current, "{found:?}");
-    let current = install::find_block_with(&text, english, &["mem0".into()])
+    let found = crate::harnesses::claude_code::install::find_block(&text)
         .unwrap()
         .unwrap();
+    assert!(found.intact && found.known && !found.current, "{found:?}");
+    let current =
+        crate::harnesses::claude_code::install::find_block_with(&text, english, &["mem0".into()])
+            .unwrap()
+            .unwrap();
     assert!(current.current);
     // The opencode, Codex and Cursor blocks too.
     let any = coexist::rule_with(
@@ -1165,7 +1171,12 @@ fn a_rule_block_naming_other_tools_is_ours_for_update_and_removal() {
     );
     // A hand edit inside is still a conflict.
     let edited = text.replace("never write there", "write there");
-    assert!(!install::find_block(&edited).unwrap().unwrap().known);
+    assert!(
+        !crate::harnesses::claude_code::install::find_block(&edited)
+            .unwrap()
+            .unwrap()
+            .known
+    );
 }
 
 #[test]

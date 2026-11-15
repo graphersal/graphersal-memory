@@ -11,8 +11,10 @@ use crate::cli::{
     QuestionsEdit, SummariesAction,
 };
 use crate::config::{self, Config};
-use crate::install::{self, ClaudePaths, InstallOptions, Setup, UninstallOptions};
-use crate::memory::import::{self, Caller, ImportState};
+use crate::harnesses::claude_code::import::ImportState;
+use crate::harnesses::claude_code::install::ClaudePaths;
+use crate::install::{self, InstallOptions, Setup, UninstallOptions};
+use crate::memory::import::{self, Caller};
 use crate::runtime::daemon::{self, DaemonOptions};
 use crate::runtime::shim::{self, DaemonLocation, ShimOptions};
 use crate::{
@@ -329,9 +331,7 @@ pub fn run_cli(
         } => serve_options(cli, *profile, project.as_deref())
             .and_then(|options| {
                 let harness = shim::harness_name(&|name| std::env::var(name).ok());
-                let hook = harness == "claude-code"
-                    && setup_with(cli, false)
-                        .is_ok_and(|setup| install::claude_start_hook_installed(setup.paths()));
+                let hook = start_hook_installed(cli, harness);
                 mcp::serve_in_mode(
                     &options,
                     start_context_mode(harness, hook),
@@ -793,8 +793,12 @@ pub fn run_import(
     out: &mut dyn Write,
 ) -> Result<u8, String> {
     let state = ImportState::load(&setup.data_dir)?;
-    let plans = import::plan(import::scan(&setup.paths().projects)?, &state);
-    let (with_project, skipped, new, changed, unchanged) = import::totals(&plans);
+    let plans = crate::harnesses::claude_code::import::plan(
+        crate::harnesses::claude_code::import::scan(&setup.paths().projects)?,
+        &state,
+    );
+    let (with_project, skipped, new, changed, unchanged) =
+        crate::harnesses::claude_code::import::totals(&plans);
     let _ = writeln!(
         out,
         "{} memory director{} under {}: {new} new, {changed} changed, {unchanged} unchanged \
@@ -835,16 +839,20 @@ pub fn run_import(
         let _ = writeln!(out, "Nothing to import.");
         return Ok(0);
     }
-    let report = import::with_lock(&setup.data_dir, Duration::from_secs(60), || {
-        let mut state = ImportState::load(&setup.data_dir)?;
-        Ok::<_, String>(import::apply(
-            &plans,
-            connect,
-            &mut state,
-            &setup.data_dir,
-            None,
-        ))
-    })?
+    let report = crate::harnesses::claude_code::import::with_lock(
+        &setup.data_dir,
+        Duration::from_secs(60),
+        || {
+            let mut state = ImportState::load(&setup.data_dir)?;
+            Ok::<_, String>(crate::harnesses::claude_code::import::apply(
+                &plans,
+                connect,
+                &mut state,
+                &setup.data_dir,
+                None,
+            ))
+        },
+    )?
     .ok_or("another import is running; try again later")??;
     let _ = writeln!(out, "{}", install::import_summary(&report));
     for line in install::import_conflict_lines(&report) {
@@ -880,31 +888,37 @@ pub fn ignore_import(
     out: &mut dyn Write,
 ) -> Result<u8, String> {
     let path = absolute(path);
-    let _ = import::with_lock(&setup.data_dir, Duration::from_secs(60), || {
-        let mut state = ImportState::load(&setup.data_dir)?;
-        let changed = if ignore {
-            state.ignore(&path)
-        } else {
-            state.unignore(&path)
-        };
-        if changed {
-            state.save(&setup.data_dir)?;
-        }
-        let shown = setup.show(&path.display().to_string());
-        let line = match (ignore, changed) {
-            (true, true) => format!(
-                "{shown}: not imported any more (the memories already imported from it stay; \
-                 `graphersal-memory import --unignore {shown}` imports it again)"
-            ),
-            (true, false) => format!("{shown}: ignored already"),
-            (false, true) => {
-                format!("{shown}: imported again from the next import (`graphersal-memory import`)")
+    let _ = crate::harnesses::claude_code::import::with_lock(
+        &setup.data_dir,
+        Duration::from_secs(60),
+        || {
+            let mut state = ImportState::load(&setup.data_dir)?;
+            let changed = if ignore {
+                state.ignore(&path)
+            } else {
+                state.unignore(&path)
+            };
+            if changed {
+                state.save(&setup.data_dir)?;
             }
-            (false, false) => format!("{shown}: was not ignored"),
-        };
-        let _ = writeln!(out, "{line}");
-        Ok::<_, String>(())
-    })?
+            let shown = setup.show(&path.display().to_string());
+            let line = match (ignore, changed) {
+                (true, true) => format!(
+                    "{shown}: not imported any more (the memories already imported from it stay; \
+                 `graphersal-memory import --unignore {shown}` imports it again)"
+                ),
+                (true, false) => format!("{shown}: ignored already"),
+                (false, true) => {
+                    format!(
+                        "{shown}: imported again from the next import (`graphersal-memory import`)"
+                    )
+                }
+                (false, false) => format!("{shown}: was not ignored"),
+            };
+            let _ = writeln!(out, "{line}");
+            Ok::<_, String>(())
+        },
+    )?
     .ok_or("another import is running; try again later")?;
     Ok(0)
 }
@@ -1572,9 +1586,7 @@ fn shim_options(
     project_flag: Option<&Path>,
 ) -> Result<ShimOptions, String> {
     let harness = shim::harness_name(&|name| std::env::var(name).ok()).to_string();
-    let hook_installed = harness == "claude-code"
-        && setup_with(cli, false)
-            .is_ok_and(|setup| install::claude_start_hook_installed(setup.paths()));
+    let hook_installed = start_hook_installed(cli, &harness);
     Ok(ShimOptions {
         location: location(cli)?,
         profile,
@@ -1590,18 +1602,18 @@ fn shim_options(
 /// CodeWhale (whose limit is the same number of bytes: text beyond ASCII may still be cut by
 /// CodeWhale), whole for every other harness (opencode, Codex, Cursor, Claude Desktop: their
 /// hooks print only the short start line, or there is none).
-pub fn start_context_mode(
-    harness: &str,
-    claude_hook_installed: bool,
-) -> protocol::StartContextMode {
-    match (harness, claude_hook_installed) {
-        ("claude-code", true) => protocol::StartContextMode::None,
-        ("claude-code", false) => protocol::StartContextMode::Short,
-        // CodeWhale cuts a server's instructions after 4,096 bytes (`crates/mcp/src/lib.rs`,
-        // `MAX_SERVER_INSTRUCTIONS_BYTES`).
-        ("codewhale", _) => protocol::StartContextMode::Short,
-        _ => protocol::StartContextMode::Full,
+pub fn start_context_mode(harness: &str, hook_installed: bool) -> protocol::StartContextMode {
+    match crate::harnesses::agent::Kind::from_id(harness) {
+        Some(kind) => (crate::harnesses::driver(kind).start_context)(hook_installed),
+        None => protocol::StartContextMode::Full,
     }
+}
+
+/// Whether the start hook of the harness `harness` (an id) delivers the start context now.
+fn start_hook_installed(cli: &Cli, harness: &str) -> bool {
+    crate::harnesses::agent::Kind::from_id(harness).is_some_and(|kind| {
+        setup_with(cli, false).is_ok_and(|setup| setup.agent_of(kind).start_hook_installed(&setup))
+    })
 }
 
 /// What the shim does at the session's start and end (`crate::memory::session_sync`): `None` inside

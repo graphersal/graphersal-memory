@@ -465,7 +465,7 @@ pub fn project_of(transcript: &Transcript, file: &Path) -> Option<String> {
             cwd.clone()
         });
     }
-    let dir = crate::memory::import::resolve_project_dir(file.parent()?)?;
+    let dir = crate::harnesses::claude_code::import::resolve_project_dir(file.parent()?)?;
     Some(crate::runtime::mcp::project_key(None, &dir))
 }
 
@@ -1276,7 +1276,7 @@ mod tests {
         let work = crate::runtime::mcp::canonical(tmp).join("work");
         std::fs::create_dir_all(work.join(".git")).unwrap();
         let projects = tmp.join("projects");
-        let dir = projects.join(crate::memory::import::claude_slug(
+        let dir = projects.join(crate::harnesses::claude_code::import::claude_slug(
             &work.display().to_string(),
         ));
         std::fs::create_dir_all(dir.join("abc").join("subagents")).unwrap();

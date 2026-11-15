@@ -384,14 +384,14 @@ impl QuestionSet {
 pub fn path(data_dir: &Path, project: &str) -> PathBuf {
     data_dir.join("bench").join("questions").join(format!(
         "{}.json",
-        crate::memory::import::claude_slug(project)
+        crate::harnesses::claude_code::import::claude_slug(project)
     ))
 }
 
 /// The finished transcripts of `project` in Claude Code's `projects` directory (its directory
 /// is named after the project's path), newest first.
 pub fn transcripts(projects_dir: &Path, project: &str, now: SystemTime) -> Vec<PathBuf> {
-    let dir = projects_dir.join(crate::memory::import::claude_slug(project));
+    let dir = projects_dir.join(crate::harnesses::claude_code::import::claude_slug(project));
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };

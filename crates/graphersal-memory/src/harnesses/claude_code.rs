@@ -20,7 +20,8 @@ use serde_json::{Value, json};
 use crate::harnesses::agent::{
     Harness, HookHandler, Kind, OwnMemory, OwnMemoryNow, OwnMemoryQuestion,
 };
-use crate::install::{Change, ClaudePaths, Finding, HarnessPlan, PlanInput, Setup, State};
+use crate::harnesses::claude_code::install::ClaudePaths;
+use crate::install::{Change, Finding, HarnessPlan, PlanInput, Setup, State};
 
 /// Claude Code (2.1.x): `~/.claude.json`, `~/.claude/settings.json`, `~/.claude/CLAUDE.md`,
 /// `~/.claude/projects/<encoded root>/memory/`, `~/.claude/rules/` (or `$CLAUDE_CONFIG_DIR`).
@@ -38,6 +39,13 @@ impl ClaudeCode {
     /// Its files.
     pub fn paths(&self) -> &ClaudePaths {
         &self.paths
+    }
+
+    /// `autoMemoryEnabled` in the user settings (Claude Code docs, "How Claude remembers your
+    /// project", section "Enable or disable auto memory": the `/memory` toggle saves
+    /// `autoMemoryEnabled` to `~/.claude/settings.json`).
+    pub fn auto_memory_key(&self) -> Option<&'static str> {
+        Some("autoMemoryEnabled")
     }
 }
 
@@ -74,11 +82,11 @@ impl Harness for ClaudeCode {
     }
 
     fn has_our_parts(&self, setup: &Setup) -> bool {
-        !crate::install::inspect(setup).nothing_installed()
+        !crate::harnesses::claude_code::install::inspect(setup).nothing_installed()
     }
 
     fn plan(&self, setup: &Setup, input: &PlanInput<'_>) -> Result<HarnessPlan, String> {
-        crate::install::claude_plan(setup, input)
+        crate::harnesses::claude_code::install::claude_plan(setup, input)
     }
 
     fn removal(
@@ -88,15 +96,20 @@ impl Harness for ClaudeCode {
         develop_only: bool,
         conflicts: &mut Vec<String>,
     ) -> Result<Vec<(Change, &'static str)>, String> {
-        crate::install::claude_removal(setup, develop_only, state, conflicts)
+        crate::harnesses::claude_code::install::claude_removal(
+            setup,
+            develop_only,
+            state,
+            conflicts,
+        )
     }
 
     fn own_memory_restored(&self, setup: &Setup, state: &State) -> Option<(PathBuf, String)> {
-        crate::install::claude_own_memory_restored(setup, state)
+        crate::harnesses::claude_code::install::claude_own_memory_restored(setup, state)
     }
 
     fn develop_on(&self, setup: &Setup) -> bool {
-        crate::install::claude_develop_on(setup)
+        crate::harnesses::claude_code::install::claude_develop_on(setup)
     }
 
     fn has_sessions(&self) -> bool {
@@ -112,6 +125,10 @@ impl Harness for ClaudeCode {
         Some(self)
     }
 
+    fn start_hook_installed(&self, _setup: &Setup) -> bool {
+        install::claude_start_hook_installed(&self.paths)
+    }
+
     fn own_memory(&self) -> Option<&dyn OwnMemory> {
         Some(self)
     }
@@ -121,11 +138,11 @@ impl Harness for ClaudeCode {
     }
 
     fn status_lines(&self, setup: &Setup) -> Vec<String> {
-        crate::install::status_lines(setup)
+        crate::harnesses::claude_code::install::status_lines(setup)
     }
 
     fn doctor(&self, setup: &Setup, _project: Option<&Path>) -> Vec<Finding> {
-        crate::install::claude_doctor(setup)
+        crate::harnesses::claude_code::install::claude_doctor(setup)
     }
 
     fn mcp_config_file(&self) -> &Path {
@@ -165,7 +182,7 @@ impl Harness for ClaudeCode {
     fn memory_dir(&self, root: &Path) -> PathBuf {
         self.paths
             .projects
-            .join(crate::memory::import::claude_slug(
+            .join(crate::harnesses::claude_code::import::claude_slug(
                 &root.display().to_string(),
             ))
             .join("memory")
@@ -177,16 +194,15 @@ impl Harness for ClaudeCode {
     fn global_memory_file(&self) -> PathBuf {
         self.paths.config_dir.join("rules").join(GLOBAL_RULES_FILE)
     }
+}
 
-    /// `autoMemoryEnabled` in the user settings (Claude Code docs, "How Claude remembers your
-    /// project", section "Enable or disable auto memory": the `/memory` toggle saves
-    /// `autoMemoryEnabled` to `~/.claude/settings.json`).
-    fn auto_memory_key(&self) -> Option<&'static str> {
-        Some("autoMemoryEnabled")
-    }
-
-    fn headless_command(&self) -> Option<&'static str> {
-        Some(crate::config::DEFAULT_HARNESS_COMMAND)
+/// Claude Code's start context: none in the MCP instructions when our SessionStart hook
+/// delivers it, else the short one (Claude Code cuts a server's instructions).
+pub fn start_context(hook: bool) -> crate::runtime::protocol::StartContextMode {
+    if hook {
+        crate::runtime::protocol::StartContextMode::None
+    } else {
+        crate::runtime::protocol::StartContextMode::Short
     }
 }
 
@@ -229,7 +245,7 @@ impl OwnMemory for ClaudeCode {
     /// The auto-memory: off when `autoMemoryEnabled` is false; asked about unless the user
     /// switched it off themselves.
     fn now(&self, setup: &Setup) -> Result<OwnMemoryNow, String> {
-        crate::install::claude_own_memory_now(setup)
+        crate::harnesses::claude_code::install::claude_own_memory_now(setup)
     }
 
     fn question(&self, setup: &Setup, start_sentence: &str) -> OwnMemoryQuestion {
@@ -242,7 +258,7 @@ impl OwnMemory for ClaudeCode {
                 ),
                 "with graphersal-memory both would keep the same facts twice.".to_string(),
                 start_sentence.to_string(),
-                crate::install::NOTHING_IS_LOST.to_string(),
+                crate::harnesses::claude_code::install::NOTHING_IS_LOST.to_string(),
             ],
             yes: format!(
                 "switch it off ({} false in {})",

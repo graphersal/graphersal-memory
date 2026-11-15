@@ -240,6 +240,11 @@ pub trait Harness {
     fn hook(&self) -> Option<&dyn HookHandler> {
         None
     }
+    /// Whether its own start hook delivers the start context now (then the MCP instructions
+    /// leave it out: Claude Code's SessionStart hook).
+    fn start_hook_installed(&self, _setup: &Setup) -> bool {
+        false
+    }
     /// For a harness without file memory: how to give the agent an exported file.
     fn export_hint(&self) -> &'static str {
         "to give the agent a file, add its path to `instructions` in the agent's configuration"
@@ -299,12 +304,6 @@ pub trait Harness {
     /// Whether the harness has a file memory of its own (one the import reads and the export
     /// writes back into).
     fn has_file_memory(&self) -> bool;
-    /// The settings key that switches the harness's own memory off (`false` = off), when it
-    /// has one.
-    fn auto_memory_key(&self) -> Option<&'static str>;
-    /// The headless command line the summaries and the A/B run (a prompt on stdin); `None`
-    /// when the harness has none graphersal-memory can use (Cursor).
-    fn headless_command(&self) -> Option<&'static str>;
 }
 
 /// Whether an MCP entry is one of ours: it starts a `graphersal-memory` binary with `mcp`

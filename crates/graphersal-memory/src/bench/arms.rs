@@ -154,7 +154,7 @@ impl Sources {
 
 /// `text` without graphersal-memory's managed rule block (a broken block stays).
 pub fn without_block(text: &str) -> String {
-    match crate::install::find_block(text) {
+    match crate::harnesses::claude_code::install::find_block(text) {
         Ok(Some(block)) => format!("{}{}", &text[..block.start], &text[block.end..]),
         _ => text.to_string(),
     }

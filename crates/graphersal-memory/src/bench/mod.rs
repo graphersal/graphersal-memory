@@ -79,7 +79,7 @@ pub struct Options {
     /// The project key.
     pub project: String,
     /// Where the memory files, instruction files and transcripts are read from.
-    pub claude: crate::install::ClaudePaths,
+    pub claude: crate::harnesses::claude_code::install::ClaudePaths,
     /// Where opencode's instruction files and sessions are read from (when the harness command
     /// is opencode's).
     pub opencode: crate::harnesses::opencode::OpenCodePaths,
@@ -1186,7 +1186,9 @@ fn no_transcripts(options: &Options, command: &str) -> String {
             options
                 .claude
                 .projects
-                .join(crate::memory::import::claude_slug(&options.project)),
+                .join(crate::harnesses::claude_code::import::claude_slug(
+                    &options.project,
+                )),
         )
     };
     let home = crate::runtime::store::home_dir(&|name| std::env::var(name).ok()).ok();
@@ -1303,7 +1305,7 @@ fn claude_projects_with_sessions(options: &Options, now: SystemTime) -> Vec<Path
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|dir| dir.is_dir())
-        .filter_map(|dir| crate::memory::import::resolve_project_dir(&dir))
+        .filter_map(|dir| crate::harnesses::claude_code::import::resolve_project_dir(&dir))
         .filter(|project| project.join(".git").exists())
         .filter_map(|project| {
             let text = project.display().to_string();
@@ -1635,7 +1637,9 @@ pub fn run(
             options
                 .claude
                 .projects
-                .join(crate::memory::import::claude_slug(&options.project))
+                .join(crate::harnesses::claude_code::import::claude_slug(
+                    &options.project,
+                ))
                 .join("memory"),
         )
         .filter(|dir| dir.is_dir() && !opencode(options) && !codex(options)),

@@ -51,7 +51,8 @@ impl OtherMemory for ClaudeCode {
     fn built_in(&self, setup: &Setup) -> Option<BuiltIn> {
         let settings = crate::install::read_json(&setup.paths().settings, &mut Vec::new());
         let off = settings["autoMemoryEnabled"] == Value::Bool(false);
-        let dirs = crate::memory::import::scan(&setup.paths().projects).unwrap_or_default();
+        let dirs = crate::harnesses::claude_code::import::scan(&setup.paths().projects)
+            .unwrap_or_default();
         let files: usize = dirs.iter().map(|d| d.files.len()).sum();
         Some(BuiltIn {
             harness: Kind::ClaudeCode,

@@ -549,12 +549,12 @@ pub fn apply(sources: &[Source], connect: &mut Connect<'_>, data_dir: &Path) -> 
                 // Edited in graphersal-memory since its import: the edit stays; the item's new
                 // fingerprint is recorded below so it is not sent again.
                 Ok(answer) if answer["kept"] == "edited" => {
-                    report
-                        .kept_edited
-                        .push(crate::memory::import::kept_edited_line(
+                    report.kept_edited.push(
+                        crate::harnesses::claude_code::import::kept_edited_line(
                             &file.display().to_string(),
                             &item.slug,
-                        ));
+                        ),
+                    );
                     state.items.insert(
                         State::key(source, item),
                         json!({"fingerprint": item.fingerprint, "slug": item.slug,

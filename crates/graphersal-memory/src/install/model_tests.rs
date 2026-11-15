@@ -269,7 +269,7 @@ fn install_downloads_the_model_and_a_failed_download_keeps_the_builtin_embedder(
         Some("acme/tiny")
     );
     let status = [
-        install::status_lines(&setup),
+        crate::harnesses::claude_code::install::status_lines(&setup),
         install::shared_status_lines(&setup),
     ]
     .concat()
