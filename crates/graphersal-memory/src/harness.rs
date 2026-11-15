@@ -84,23 +84,6 @@ pub trait Headless: Sync {
     }
 }
 
-/// Claude Code's `claude -p` (its flags added by `crate::summaries::harness_args`).
-pub struct ClaudeHeadless;
-
-impl Headless for ClaudeHeadless {
-    fn matches(&self, command: &[String]) -> bool {
-        command.first().is_some_and(|program| {
-            Path::new(program)
-                .file_stem()
-                .is_some_and(|stem| stem == "claude")
-        })
-    }
-
-    fn default_command(&self) -> Option<&'static str> {
-        Some(crate::config::DEFAULT_HARNESS_COMMAND)
-    }
-}
-
 /// The harness whose headless command `command` is, with its `Headless`.
 pub fn headless_of(command: &[String]) -> Option<(crate::agents::Kind, &'static dyn Headless)> {
     crate::agents::Kind::ALL.into_iter().find_map(|kind| {

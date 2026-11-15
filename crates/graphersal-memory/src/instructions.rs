@@ -1065,7 +1065,7 @@ Use `web_time::Instant`, never `std::time::Instant` (it panics on wasm32-unknown
                 .paths
                 .config_dir
                 .join("rules")
-                .join(crate::agents::GLOBAL_RULES_FILE),
+                .join(crate::claude_code::GLOBAL_RULES_FILE),
         );
         write(&setup.codex.codex_home.join("AGENTS.md"));
         write(&project.join("CLAUDE.md"));

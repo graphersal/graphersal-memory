@@ -12,6 +12,7 @@ mod bench;
 #[cfg(test)]
 mod bench_tests;
 mod catalog;
+mod claude_code;
 mod cli;
 mod client;
 mod codewhale;

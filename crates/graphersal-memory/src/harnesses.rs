@@ -30,8 +30,8 @@ pub struct Driver {
 pub fn driver(kind: Kind) -> &'static Driver {
     match kind {
         Kind::ClaudeCode => &Driver {
-            sessions: &crate::sessions::ClaudeSessions,
-            headless: Some(&crate::harness::ClaudeHeadless),
+            sessions: &crate::claude_code::sessions::ClaudeSessions,
+            headless: Some(&crate::claude_code::ClaudeHeadless),
         },
         Kind::OpenCode => &Driver {
             sessions: &crate::opencode::sessions::Sessions,

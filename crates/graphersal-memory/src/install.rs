@@ -34,7 +34,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::agents::{ClaudeCode, Harness, Kind};
+use crate::agents::{Harness, Kind};
+use crate::claude_code::ClaudeCode;
 use crate::config::Config;
 use crate::import::{self, Connect, DirPlan, ImportState};
 use crate::language::Language;
