@@ -29,6 +29,7 @@ ureq = { workspace = true }
 ring = { workspace = true }
 rusqlite = { workspace = true }
 toml = { workspace = true }
+saphyr-parser = { workspace = true }
 tiny_http = { workspace = true }
 ruzstd = { workspace = true }
 
