@@ -14,9 +14,9 @@ in `README.md` and `docs/`, and what is done and planned is in `docs/roadmap.md`
 
 - `harnesses/`: the `Harness` trait and its capabilities (`agent.rs`), the registry (`mod.rs`),
   headless runs (`headless.rs`), one module per harness (`claude_code`, `codex`, `codewhale`,
-  `cursor`, `opencode`) and the conformance suite;
+  `cursor`, `dsh`, `opencode`) and the conformance suite;
 - `install/`: install, uninstall, status and doctor (`mod.rs`, the shared wizard and loops),
-  the wizard's console, the memory language, Windows shells, the JSON and TOML editors, other
+  the wizard's console, the memory language, Windows shells, the JSON, TOML and YAML editors, other
   memory (`coexist`), the embedding models and their download, `upgrade`;
 - `runtime/`: the daemon, the shim, their transport and protocol, the MCP client, the stores,
   their registry and maintenance, the engine pin, the MCP profiles and the product catalog;
@@ -39,13 +39,13 @@ Unit tests that need more than one module's helpers sit beside their module as
     the `stop` control request, marker left; `daemon restart`: the `restart` control request, no
     marker, then a new daemon; both wait until the old process is gone, `daemon_action`), `install`,
     `uninstall`, `status`, `doctor`, `import`, `summaries`, `bench`, `export --to-files`, `projects`, `start-context` and the
-    hidden `hook` work on Claude Code, opencode, Codex, Cursor and CodeWhale (no hooks: `hook --harness codewhale` does nothing) (`Setup` from the environment, with the model download
+    hidden `hook` work on Claude Code, opencode, Codex, Cursor, CodeWhale and DeepSeek Harness (no hooks: `hook --harness codewhale|dsh` does nothing; summaries and bench refuse `dsh`) (`Setup` from the environment, with the model download
     `Source`; `bench_options` for `bench`; `DaemonSource` reads the memories for the export);
     `ui` runs the browser UI (`crate::ui`); `upgrade` runs `crate::install::update::run`; `export` without `--to-files` says it is planned and exits with code 2
     (`--harness codex` and `--harness cursor` work wherever `claude-code` and `opencode` do;
     a Claude Code hook whose input is Cursor's, `cursor_version`, does nothing); the
     wizard is interactive when stdin and stdout are terminals;
-  - `src/harnesses/agent.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex | cursor | codewhale, with
+  - `src/harnesses/agent.rs`: the harness abstraction (`Kind` = claude-code | opencode | codex | cursor | codewhale | dsh, with
     its id, display and program names, `dir_names` and `cli_help` (its hand-written line of
     `--harness`'s possible values; `cli::Harness` = `One(Kind) | All`, its values from
     `Kind::ALL`); the `Harness` trait: its program
@@ -145,11 +145,52 @@ Unit tests that need more than one module's helpers sit beside their module as
     read-only import of the native memory's reviewed entries (`active`, not suppressed; a
     workspace = SHA-256 of its origin URL, mapped to known projects; state
     `<data dir>/import/codewhale-memory.json`);
+  - `src/harnesses/dsh.rs` + `src/harnesses/dsh/`: DeepSeek Harness (`dsh`, deepseek-ai/deepseek-harness;
+    NOT CodeWhale: never its `.deepseek` or `DEEPSEEK_*`) (preview; verified against the source of
+    tag `dsh-v0.2.2-rc.3` = 38a6a5c, the module docs cite the files; no live run yet,
+    `docs/dsh-live-check.md` is the checklist): `DshPaths` (`$DSH_HOME` (blank = unset, `~`
+    expanded, a relative one ignored) else `~/.dsh`, `explicit_home`; the home layer
+    `cordis.patch.yml` (every profile reads it, dsh never writes it), `AGENTS.md`, `agents_home`
+    (`$DSH_AGENTS_HOME` else `~/.agents`, read only), `sessions/`, `profiles/` (read by
+    status/doctor/other memory), the export directory; `row_env`: `GRAPHERSAL_MEMORY_HARNESS=dsh`
+    plus the absolute `DSH_HOME` when it was set, since dsh scrubs `DSH_*` from MCP children),
+    `Dsh` (the `Agent`; no hooks, start context `Short`: far below dsh's 32768-byte
+    `maxInstructionBytes` reject, a test proves it), `find_program` (`PATH`, `%APPDATA%\npm`,
+    Desktop's `/usr/local/bin/dsh`; `is_deepseek_program`: only a real path or script text naming
+    `@deepseek-ai/dsh`/`deepseek-harness`, never run, so Debian's `dsh` is not taken;
+    `foreign_program` for doctor), `HeadlessRun` recognised only to refuse (`NO_HEADLESS`: no way
+    to run without tools, no cost, every run saved); `dsh/install.rs` the
+    plan/removal/inspect/status/doctor (one `yamledit` managed block in the home layer holding one
+    `- insert:` item with both `@deepseek-ai/dsh-mcp-client` rows `{id, name, disabled?, config:
+    {serverName, transport: stdio, command, args, env, startupTimeoutMs: 60000}}`, develop
+    `disabled: true`; a missing file created and deleted again, dsh's `[]` template replaced and
+    put back; a hand edit inside or a foreign row named like ours is a conflict; the rule block in
+    `$DSH_HOME/AGENTS.md`; notes: `session-log-deepseek` on in every layer (privacy),
+    `mcp-manager` servers named like ours, the `sdk-minimal` profile without instruction files);
+    `dsh/sessions.rs` the reader of `<root>/<project key>/<session>/session.v4.jsonl[.zstd]`
+    (`ruzstd` frame by frame, a torn last frame ends the read; project = the header's `cwd`;
+    human `user/message` turns grouped by `turn/start`, injected ones left out; sub-agent and
+    `_no-cwd` sessions without turns; another version skipped as empty, not failed; unit id
+    `dsh-<uuid>`; `written_since` + `ended_by_connection` for the daemon's end of a connection);
+    `dsh/other.rs` its `OtherMemory` (inserted rows by `serverName` and `mcp-manager` servers in
+    the home and every profile layer, off by their own or an override's `disabled: true`;
+    `disable_edit` is always `None`: reported with `off_by_hand` steps, never switched off);
+    known limit: the MCP child runs in dsh's launch directory and serves every session of that
+    process, so in web/desktop/acp the project is the launch directory's;
   - `src/install/tomledit.rs`: minimal-change TOML edits (parse with the `toml` crate, write as text: a
     fingerprinted managed block inserted before the first table, `remove_table` for our tables
     whose markers were lost, `set_bool` in place, `set_table_bool`/`remove_table_key` for another
     tool's `[mcp_servers.<name>] enabled`, `set_string_array`/`remove_array_key` for CodeWhale's
     `[tools] always_load`; every edit re-parsed and checked);
+  - `src/install/yamledit.rs`: minimal-change YAML edits of dsh's patch files (read with
+    `saphyr-parser`'s event parser as dsh's js-yaml 4 reads them: JSON-schema scalars, `!!js` as
+    `{"__jsExpr"}`, duplicate keys, unknown tags and a second document are errors; never
+    re-serialized): `find`, `put_block` (a fingerprinted managed block of whole top-level items
+    appended to a block sequence, in place of an empty flow `[]`, or into a text without content;
+    a missing line break before it recorded on the begin line), `remove_block` (the original
+    bytes back, `[]` written when nothing else remains, since an empty or comments-only patch file
+    stops every dsh start); `top_level` refuses a mapping, a scalar, a non-empty flow sequence
+    or a parse error; every edit re-parsed and its items checked;
   - `src/install/prompt.rs`: the wizard's console (`Console`: "Step N of M", numbered choices, the
     default on Enter, re-ask, `confirm_install` with `d` for every change; colour only on a
     terminal without `NO_COLOR`), `paint`, `action_needed` and the `SEPARATOR` the other
@@ -274,7 +315,7 @@ Unit tests that need more than one module's helpers sit beside their module as
     in `<harness>/other.rs`, Claude Code's at the end of `coexist.rs` until its module), the
     shared `remove_entry`/`flag_entry`, `disable_edit`/`restore_edit` (Claude Code and Cursor:
     entry removed and kept in the record `OFF_RECORD`; opencode `enabled`/`disabled`; Codex
-    `enabled = false`; CodeWhale `"disabled": true`),
+    `enabled = false`; CodeWhale `"disabled": true`; dsh none, by hand only),
     `status_lines`/`doctor_findings` (notes, never problems or ACTION NEEDED);
     `other_import`: the reference memory server's JSONL and Basic Memory's notes as global
     memories `kg-*`/`basic-*` through a connection without a project, item fingerprints in
@@ -315,7 +356,8 @@ Unit tests that need more than one module's helpers sit beside their module as
     bad lines and a partial last line skipped; fingerprint of the complete lines);
   - `src/memory/sessions.rs`: the session indexing per harness (`Request.harness`; the daemon keeps one
     pending request per harness): `units` (Claude Code: `scan`, top-level `*.jsonl` only;
-    opencode: its database; Codex: its rollouts; Cursor: the transcripts in its registry),
+    opencode: its database; Codex: its rollouts; Cursor: the transcripts in its registry;
+    CodeWhale and dsh: their session files),
     finished = unchanged for `IDLE` (30 min) or `ended`, state
     `<data dir>/sessions/<harness>.json`,
     `Writer` (the daemon: the project's store; tests: `tests::Direct`), `run` (index in batches of
@@ -387,7 +429,10 @@ Unit tests that need more than one module's helpers sit beside their module as
     `daemon.pid`, `daemon.start.lock`, `daemon.log`, `daemon.stopped` (`STOPPED_FILE`: written by a `stop`
     control request (never by `restart`), removed by the next daemon's start; `stopped_on_purpose`); a default whose socket path is too long
     becomes `short_run_dir`, `/tmp/graphersal-memory-<fingerprint of the data dir>`), the socket types per platform (std on
-    Unix, `uds_windows` on Windows), `LockFile` (`fd-lock`);
+    Unix, `uds_windows` on Windows), `LockFile` (`fd-lock`), `Patient` (the daemon reads every
+    connection through it: a 1 s read timeout, `READ_TICK`, and a timed-out read reads again, with
+    the handshake's limit kept per read; macOS 27 sometimes never wakes a `recv` blocked when the
+    peer shuts its writing side down);
   - `src/ui/mod.rs`: `graphersal-memory ui` (stage UI): the loopback HTTP server (`tiny_http`, port 0 or
     `--port`), the per-run token (256 bits, `ring`, header only, constant-time compare), the
     Host/Origin check (`graphersal_serve::HostCheck`, loopback, this port), the launch file
@@ -425,7 +470,10 @@ Unit tests that need more than one module's helpers sit beside their module as
   - `src/runtime/protocol.rs`: the shim <-> daemon handshake and control lines, refusal codes, version
     order, `StartContextMode` (the handshake's optional `start_context`: `full` | `short` (Claude
     Code without our hook: within `CLAUDE_CODE_INSTRUCTIONS_CHARS`) | `none` (Claude Code with
-    our SessionStart hook, `commands::start_context_mode`; the product's own connections)); an
+    our SessionStart hook, `commands::start_context_mode`; the product's own connections)); the
+    optional `harness.sessions` (the sessions directory the shim resolved for a harness whose
+    sessions end with the connection, such as dsh's moved `DSH_HOME`; the daemon prefers it over
+    its own environment; older daemons ignore it, no `PROTOCOL` bump); an
     empty `project.root` is no project (global memories only; the import from another memory
     tool) (the protocol is internal; bump `PROTOCOL` on an incompatible change);
   - `src/runtime/shim.rs`: `connect_or_start` (start lock, stale socket only after a failed connect AND a
@@ -585,7 +633,7 @@ Unit tests that need more than one module's helpers sit beside their module as
   store gets the new catalog at its next start. Test a body change with the round trips in
   `src/runtime/mcp_tests.rs`; descriptions stay short (they are paid on every agent turn).
 - `docs/`: the user-facing documentation (why, how it works, A/B method, privacy, harnesses,
-  install, roadmap, the Cursor live check) and `docs/adding-a-harness.md` (the checklist for a
+  install, roadmap, the Cursor, CodeWhale and DeepSeek Harness live checks) and `docs/adding-a-harness.md` (the checklist for a
   new harness); `docs/images/`: the README's screenshots (a demo
   project with invented memories, light and dark).
 
