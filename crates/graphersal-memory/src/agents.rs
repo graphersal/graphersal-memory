@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::install::{Change, ClaudePaths, HarnessPlan, PlanInput, Setup, State};
+use crate::install::{Change, ClaudePaths, Finding, HarnessPlan, PlanInput, Setup, State};
 
 /// The harnesses graphersal-memory supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -103,6 +103,11 @@ pub trait Harness {
         develop_only: bool,
         conflicts: &mut Vec<String>,
     ) -> Result<Vec<(Change, &'static str)>, String>;
+    /// Its lines of `status`: each part of ours and its state.
+    fn status_lines(&self, setup: &Setup) -> Vec<String>;
+    /// Its findings of `doctor` (`project`: the current directory's, for checks of a project's
+    /// own files).
+    fn doctor(&self, setup: &Setup, project: Option<&Path>) -> Vec<Finding>;
     /// When install switched the harness's own memory off (its state records it): the file
     /// uninstall switches it back on in, and the report line.
     fn own_memory_restored(&self, _setup: &Setup, _state: &State) -> Option<(PathBuf, String)> {
@@ -246,6 +251,14 @@ impl Harness for ClaudeCode {
 
     fn own_memory_restored(&self, setup: &Setup, state: &State) -> Option<(PathBuf, String)> {
         crate::install::claude_own_memory_restored(setup, state)
+    }
+
+    fn status_lines(&self, setup: &Setup) -> Vec<String> {
+        crate::install::status_lines(setup)
+    }
+
+    fn doctor(&self, setup: &Setup, _project: Option<&Path>) -> Vec<Finding> {
+        crate::install::claude_doctor(setup)
     }
 
     fn mcp_config_file(&self) -> &Path {

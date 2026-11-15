@@ -475,6 +475,18 @@ impl Harness for CodeWhale {
         !install::inspect(setup).nothing_installed()
     }
 
+    fn status_lines(&self, setup: &crate::install::Setup) -> Vec<String> {
+        install::status_lines(setup)
+    }
+
+    fn doctor(
+        &self,
+        setup: &crate::install::Setup,
+        project: Option<&Path>,
+    ) -> Vec<crate::install::Finding> {
+        install::doctor(setup, project)
+    }
+
     fn removal(
         &self,
         setup: &crate::install::Setup,
