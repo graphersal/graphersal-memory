@@ -10,9 +10,6 @@ pub mod codex;
 #[cfg(test)]
 pub(crate) mod conformance_tests;
 pub mod cursor;
-// DeepSeek Harness: only its session reader so far, used by its tests until the registry
-// names it (its `Kind`, paths and `Harness` come with the next step).
-#[cfg(test)]
 pub mod dsh;
 pub mod headless;
 pub mod opencode;
@@ -23,6 +20,7 @@ use crate::harnesses::claude_code::ClaudeCode;
 use crate::harnesses::codewhale::CodeWhale;
 use crate::harnesses::codex::Codex;
 use crate::harnesses::cursor::Cursor;
+use crate::harnesses::dsh::Dsh;
 use crate::harnesses::opencode::OpenCode;
 use crate::install::Setup;
 use crate::memory::sessions::SessionSource;
@@ -37,6 +35,7 @@ pub struct Harnesses {
     codex: Codex,
     cursor: Cursor,
     codewhale: CodeWhale,
+    dsh: Dsh,
 }
 
 impl Harnesses {
@@ -57,6 +56,7 @@ impl Harnesses {
             codex: Codex::new(codex::CodexPaths::resolve(env)?),
             cursor: Cursor::new(cursor::CursorPaths::resolve(env, data_dir)?),
             codewhale: CodeWhale::new(codewhale::CodeWhalePaths::resolve(env)?),
+            dsh: Dsh::new(dsh::DshPaths::resolve(env)?),
         })
     }
 
@@ -74,6 +74,7 @@ impl Harnesses {
             codex: Codex::new(codex::CodexPaths::of_home(home)),
             cursor: Cursor::new(cursor::CursorPaths::of_home(home, data_dir)),
             codewhale: CodeWhale::new(codewhale::CodeWhalePaths::of_home(home)),
+            dsh: Dsh::new(dsh::DshPaths::of_home(home)),
         }
     }
 
@@ -110,6 +111,7 @@ impl Harnesses {
             Kind::Codex => &self.codex,
             Kind::Cursor => &self.cursor,
             Kind::CodeWhale => &self.codewhale,
+            Kind::Dsh => &self.dsh,
         }
     }
 }
@@ -160,6 +162,22 @@ impl Setup {
     /// CodeWhale's files.
     pub fn codewhale(&self) -> &codewhale::CodeWhalePaths {
         self.harnesses.codewhale.paths()
+    }
+
+    /// DeepSeek Harness.
+    pub fn dsh_agent(&self) -> &Dsh {
+        &self.harnesses.dsh
+    }
+
+    /// DeepSeek Harness's files.
+    pub fn dsh(&self) -> &dsh::DshPaths {
+        self.harnesses.dsh.paths()
+    }
+
+    /// Replaces DeepSeek Harness's files (tests of another home).
+    #[cfg(test)]
+    pub fn set_dsh(&mut self, paths: dsh::DshPaths) {
+        self.harnesses.dsh = Dsh::new(paths);
     }
 
     /// Replaces opencode's files (tests of another line).
@@ -221,6 +239,12 @@ pub fn driver(kind: Kind) -> &'static Driver {
             headless: Some(&crate::harnesses::codewhale::HeadlessRun),
             native_slugs: Some(crate::harnesses::codewhale::memory::imported_slugs),
             start_context: crate::harnesses::codewhale::start_context,
+        },
+        Kind::Dsh => &Driver {
+            sessions: &crate::harnesses::dsh::sessions::Sessions,
+            headless: Some(&crate::harnesses::dsh::HeadlessRun),
+            native_slugs: None,
+            start_context: crate::harnesses::dsh::start_context,
         },
     }
 }

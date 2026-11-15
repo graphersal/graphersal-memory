@@ -1608,7 +1608,8 @@ fn shim_options(
 /// with our SessionStart hook (the hook delivers it as `additionalContext`, so it is not sent
 /// twice), cut to Claude Code's instruction limit for Claude Code without the hook and for
 /// CodeWhale (whose limit is the same number of bytes: text beyond ASCII may still be cut by
-/// CodeWhale), whole for every other harness (opencode, Codex, Cursor, Claude Desktop: their
+/// CodeWhale) and DeepSeek Harness (which rejects instructions over 32768 bytes), whole for
+/// every other harness (opencode, Codex, Cursor, Claude Desktop: their
 /// hooks print only the short start line, or there is none).
 pub fn start_context_mode(harness: &str, hook_installed: bool) -> protocol::StartContextMode {
     match crate::harnesses::agent::Kind::from_id(harness) {

@@ -1038,6 +1038,41 @@ fn the_instructions_of_a_connection_carry_its_start_context_once() {
 }
 
 #[test]
+fn dshs_instructions_stay_within_its_byte_limit_with_non_ascii_memories_filling_the_budget() {
+    use crate::harnesses::dsh::{MAX_INSTRUCTION_BYTES, attribution};
+    let data = TempDir::new("instr-dsh");
+    // Always-loaded memories of four-byte characters, far more than the budget holds.
+    let mut a = Client::start(data.path(), ProfileKind::Use, "/work/a");
+    let wide = "𝔐𝔢𝔪𝔬𝔯𝔶 ".repeat(40);
+    for n in 0..30 {
+        remember_kind(
+            &mut a,
+            &format!("rule-{n}"),
+            "feedback",
+            "project",
+            json!({"summary": format!("{n} {wide}"), "body": wide.clone(), "pinned": n < 5}),
+        );
+    }
+    a.close();
+    let mode = crate::commands::start_context_mode("dsh", false);
+    let instructions = instructions_in_mode(data.path(), mode);
+    assert!(instructions.contains("(memory: rule-0)"), "{instructions}");
+    assert!(
+        instructions.chars().count() <= crate::runtime::protocol::CLAUDE_CODE_INSTRUCTIONS_CHARS
+    );
+    // What dsh counts: its attribution plus the instructions, trimmed at the end, in UTF-8.
+    let counted = attribution(crate::install::USE_SERVER).len() + instructions.trim_end().len();
+    assert!(counted < MAX_INSTRUCTION_BYTES, "{counted}");
+    // The budget was filled, with wide characters (the bound is not met by a short text).
+    let wide_chars = instructions.chars().filter(|c| c.len_utf8() == 4).count();
+    let chars = instructions.chars().count();
+    assert!(
+        wide_chars > 1000 && chars + 500 > crate::runtime::protocol::CLAUDE_CODE_INSTRUCTIONS_CHARS,
+        "{counted} bytes, {chars} characters, {wide_chars} wide"
+    );
+}
+
+#[test]
 fn the_start_context_mode_of_a_harness_avoids_double_delivery() {
     use crate::runtime::protocol::StartContextMode;
     assert_eq!(

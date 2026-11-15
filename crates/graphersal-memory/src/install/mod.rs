@@ -44,8 +44,6 @@ pub mod prompt;
 pub mod tomledit;
 pub mod update;
 pub mod winshell;
-// Not called yet: the DeepSeek Harness (dsh) install uses it once that harness lands.
-#[allow(dead_code)]
 pub mod yamledit;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};

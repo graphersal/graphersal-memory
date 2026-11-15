@@ -59,6 +59,7 @@ pub enum Top {
 /// The document of a YAML text, as JSON: `Null` for a text without a document (empty,
 /// whitespace, comments only). `Err` names the problem (a syntax error with its line, a
 /// duplicate key, an unknown tag, more than one document).
+#[cfg(test)]
 pub fn parse(text: &str) -> Result<Value, String> {
     Ok(scan(text)?.root.unwrap_or(Value::Null))
 }
@@ -102,6 +103,7 @@ pub fn string(text: &str) -> String {
 
 /// The managed block for `body` (whole top-level sequence items in block style at column 0,
 /// e.g. `- insert:\n    - id: ...\n`), marker lines included, ending with a newline.
+#[cfg(test)]
 pub fn wrap(body: &str) -> String {
     render(body, "\n", false)
 }

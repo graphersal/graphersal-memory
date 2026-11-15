@@ -1,7 +1,8 @@
 //! The harness abstraction: what `install`, `uninstall`, `import` and `export` need to know
 //! about one AI agent harness, behind one interface. Claude Code (`crate::harnesses::claude_code::ClaudeCode`), opencode
 //! (`crate::harnesses::opencode::OpenCode`), Codex (`crate::harnesses::codex::Codex`), Cursor
-//! (`crate::harnesses::cursor::Cursor`) and CodeWhale (`crate::harnesses::codewhale::CodeWhale`) implement it;
+//! (`crate::harnesses::cursor::Cursor`), CodeWhale (`crate::harnesses::codewhale::CodeWhale`) and
+//! DeepSeek Harness (`crate::harnesses::dsh::Dsh`) implement it;
 //! `crate::harnesses` is the one place that names them all. Shared code asks the [`Harness`]
 //! for its program, the files it edits, the JSON keys of its MCP registrations and the names
 //! the wizard shows, and never matches on its [`Kind`].
@@ -27,6 +28,8 @@ pub enum Kind {
     Cursor,
     /// CodeWhale.
     CodeWhale,
+    /// DeepSeek Harness (`dsh`).
+    Dsh,
 }
 
 impl Kind {
@@ -34,12 +37,13 @@ impl Kind {
     pub const DEFAULT: Kind = Kind::ClaudeCode;
 
     /// Every supported harness, in the order the wizard lists them.
-    pub const ALL: [Kind; 5] = [
+    pub const ALL: [Kind; 6] = [
         Kind::ClaudeCode,
         Kind::OpenCode,
         Kind::Codex,
         Kind::Cursor,
         Kind::CodeWhale,
+        Kind::Dsh,
     ];
 
     /// The id of the command line and the state files (`claude-code`, `opencode`).
@@ -50,6 +54,7 @@ impl Kind {
             Kind::Codex => "codex",
             Kind::Cursor => "cursor",
             Kind::CodeWhale => "codewhale",
+            Kind::Dsh => "dsh",
         }
     }
 
@@ -61,6 +66,7 @@ impl Kind {
             Kind::Codex => "codex",
             Kind::Cursor => "cursor",
             Kind::CodeWhale => "codewhale",
+            Kind::Dsh => "dsh",
         }
     }
 
@@ -72,6 +78,7 @@ impl Kind {
             Kind::Codex => &[".codex", "codex"],
             Kind::Cursor => &[".cursor"],
             Kind::CodeWhale => &[".codewhale", ".deepseek", ".agents"],
+            Kind::Dsh => &[".dsh"],
         }
     }
 
@@ -83,6 +90,7 @@ impl Kind {
             Kind::Codex => "OpenAI Codex CLI",
             Kind::Cursor => "Cursor (the editor's agent)",
             Kind::CodeWhale => "CodeWhale (the terminal agent, formerly DeepSeek TUI; preview)",
+            Kind::Dsh => "DeepSeek Harness (`dsh`, the official DeepSeek agent; preview)",
         }
     }
 
@@ -94,6 +102,7 @@ impl Kind {
             Kind::Codex => "Codex",
             Kind::Cursor => "Cursor",
             Kind::CodeWhale => "CodeWhale",
+            Kind::Dsh => "DeepSeek Harness",
         }
     }
 
