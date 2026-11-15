@@ -209,10 +209,19 @@ Unit tests that need more than one module's helpers sit beside their module as
     (`check_cached`, state `<data dir>/update-check.json`; `check_enabled`: `updates.check`,
     `GRAPHERSAL_MEMORY_UPDATE_CHECK`), how the binary was installed (`Method`, `method_of`: the
     installers' directory, cargo's, other), `manual_commands`, `check_json` (the UI's
-    `GET /api/ui/update`) and `upgrade` (`run` with a `Machine`: the release's `install.sh` /
-    `install.ps1` with `--version`/`--dir`, or `cargo install --version`; then `daemon restart`,
-    `install --refresh --yes` and `--version` through the new binary; plan first, `--check`,
-    `--dry-run`, `--yes`; `manual_commands` end with the same two);
+    `GET /api/ui/update`) and `upgrade` (`run` with a `Machine`, `replace_plan`: the release's
+    `install.sh` / `install.ps1` with `--version`/`--dir`, also into cargo's directory, then
+    cargo's records moved (`cargo_records`); `cargo install --version` only without a release
+    build for the platform (`release_build`, `Build`: the release matrix's platforms and
+    targets), as the fallback when the release's build did not install, or with
+    `--from-source` (cargo installs only); then `daemon restart`, `install --refresh --yes` and
+    `--version` through the new binary; plan first, `--check`, `--dry-run`, `--yes`;
+    `manual_commands` end with the same two); the crate's `[package.metadata.binstall]` names
+    the same archives for `cargo binstall`;
+  - `src/install/cargo_records.rs`: cargo's `.crates.toml` / `.crates2.json` in `$CARGO_HOME`:
+    `update` renames our entry to the new crates.io version (both files parsed first, each
+    locked as cargo locks it and rewritten in place; `version_req` `=<old>` follows, `target`
+    the release build's, `rustc` dropped; `NotRecorded` writes nothing);
   - `src/install/winshell.rs`: Windows shells: `all_shell_words` (the bare name when `PATH` resolves
     it to this binary, else the forward-slash path, else the directory's 8.3 short path, for each
     argument too; lookups injected), `short_path` (`GetShortPathNameW`, the crate's second

@@ -42,6 +42,14 @@ From source, with Rust 1.88 or newer and a C compiler (for the bundled SQLite an
 cargo install --locked graphersal-memory
 ```
 
+With [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), from 0.2.2 on: the
+release's build into cargo's directory, without building (`[package.metadata.binstall]` in the
+crate names the archives; a platform without a release build is built as with `cargo install`):
+
+```sh
+cargo binstall graphersal-memory
+```
+
 ## Upgrade
 
 `graphersal-memory upgrade` asks GitHub for the latest release (the redirect of
@@ -69,7 +77,7 @@ How it upgrades follows where the binary is:
 | Binary in | Upgrade through |
 |---|---|
 | `~/.local/bin` (Windows: `%LOCALAPPDATA%\Programs\graphersal-memory`) | the release's `install.sh` (Windows: `install.ps1` through PowerShell) of that version, into the same directory |
-| `$CARGO_HOME/bin` or `~/.cargo/bin` | `cargo install graphersal-memory --locked --force --version <latest>` (builds from source; on Windows the running `.exe` is moved aside to `graphersal-memory.old.exe` first) |
+| `$CARGO_HOME/bin` or `~/.cargo/bin` | the release's installer with `--dir` set to cargo's directory, then cargo's records (`.crates.toml`, `.crates2.json`) moved to the new version, so `cargo install --list` and `cargo uninstall` stay right. `cargo install graphersal-memory --locked --force --version <latest>` builds it from source only when there is no release build for the platform, when the release's build did not install, or with `--from-source` (on Windows the running `.exe` is moved aside to `graphersal-memory.old.exe` first) |
 | anywhere else | the release's installer with `--dir` set to that directory |
 
 The installers verify the archive against the release's `SHA256SUMS` and replace a running binary
@@ -84,7 +92,8 @@ install is not named in the rule block, and nothing is imported, downloaded or w
 After an upgrade by hand (the installer or `cargo install`), run `graphersal-memory install
 --refresh` yourself; `--dry-run` shows the plan first. `--check` only reports (with the
 commands to run by hand), `--dry-run` stops after the plan, `--yes` does not ask (needed without
-a terminal). `GRAPHERSAL_MEMORY_BASE_URL` points the check and the installer download at a mirror.
+a terminal, also for a command run from an agent's prompt such as Claude Code's `!`),
+`--from-source` builds a cargo install with cargo. `GRAPHERSAL_MEMORY_BASE_URL` points the check and the installer download at a mirror.
 
 The browser UI shows "Version X available" in its top bar when a newer release is out; the
 Overview then shows the command and the manual commands with a Copy button. It asks GitHub at

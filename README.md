@@ -75,6 +75,8 @@ With Rust 1.88 or newer (and a C compiler), on any platform:
 cargo install --locked graphersal-memory
 ```
 
+or, from 0.2.2 on, the release's build without building: `cargo binstall graphersal-memory`.
+
 The installers download the archive for your platform from the latest
 [GitHub Release](https://github.com/graphersal/graphersal-memory/releases), verify it against the
 release's `SHA256SUMS`, and put the binary into `~/.local/bin` (Windows:
@@ -98,9 +100,10 @@ graphersal-memory upgrade
 
 (New in 0.2.1: from 0.2.0, upgrade by hand, below.)
 
-It asks GitHub for the latest release, shows what it will do and asks before doing it. It upgrades
-the way the binary was installed: through the release's own installer into the same directory
-(the archive checked against `SHA256SUMS`), or with `cargo install` when it came from cargo. Then
+It asks GitHub for the latest release, shows what it will do and asks before doing it. It puts
+the release's build where the binary is, through the release's own installer (the archive
+checked against `SHA256SUMS`); a binary installed with cargo gets it too, without building, and
+cargo's records follow (`--from-source` builds it with `cargo install` instead). Then
 it restarts the daemon (open agent sessions reconnect to the new one by themselves) and brings
 what install wrote into your harnesses (the rule block, the MCP entries, the hooks) to the new
 version, keeping every choice you made.

@@ -13,13 +13,17 @@
 //! - **How it was installed** ([`Method`], [`method_of`]): the installers' default directory
 //!   (`~/.local/bin`, `%LOCALAPPDATA%\Programs\graphersal-memory`), cargo's (`$CARGO_HOME/bin`,
 //!   else `~/.cargo/bin`), or another directory.
-//! - **`upgrade`** ([`run`]): delegates the replacement to what installed the binary: the
+//! - **`upgrade`** ([`run`]): replaces the binary with the release's build through the
 //!   release's own `install.sh` / `install.ps1` (they verify the archive against `SHA256SUMS`
-//!   and replace a running binary safely) with `--version` and `--dir`, or `cargo install
-//!   graphersal-memory --locked --force --version <v>`; then, through the new binary, `daemon
-//!   restart`, `install --refresh --yes` (the parts install wrote brought to the new version,
-//!   every choice kept) and `--version`. It shows the plan and asks first (`--yes`), `--check` only
-//!   reports, `--dry-run` stops after the plan.
+//!   and replace a running binary safely) with `--version` and `--dir`, also in cargo's
+//!   directory, where cargo's records are then moved to the new version
+//!   ([`crate::install::cargo_records`]). `cargo install graphersal-memory --locked --force
+//!   --version <v>` builds it from source only as the last resort: a cargo install whose platform
+//!   has no release build ([`release_build`]), `--from-source`, or after the release's build
+//!   failed to install. Then, through the new binary, `daemon restart`, `install --refresh
+//!   --yes` (the parts install wrote brought to the new version, every choice kept) and
+//!   `--version`. It shows the plan and asks first (`--yes`), `--check` only reports,
+//!   `--dry-run` stops after the plan.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -256,6 +260,29 @@ impl Method {
     }
 }
 
+/// A release build: its platform in the archive names and the target it is built for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Build {
+    /// `linux-x86_64`, `macos-arm64`, ... (`graphersal-memory-v<version>-<platform>.tar.gz`).
+    pub platform: &'static str,
+    /// The cargo target of the release's build (Linux: static musl).
+    pub target: &'static str,
+}
+
+/// The release build that runs on `os`/`arch` (`std::env::consts`), as the release workflow
+/// builds them; `None`: no release build, cargo builds it.
+pub fn release_build(os: &str, arch: &str) -> Option<Build> {
+    let (platform, target) = match (os, arch) {
+        ("linux", "x86_64") => ("linux-x86_64", "x86_64-unknown-linux-musl"),
+        ("linux", "aarch64") => ("linux-aarch64", "aarch64-unknown-linux-musl"),
+        ("macos", "aarch64") => ("macos-arm64", "aarch64-apple-darwin"),
+        ("macos", "x86_64") => ("macos-x86_64", "x86_64-apple-darwin"),
+        ("windows", "x86_64") => ("windows-x86_64", "x86_64-pc-windows-msvc"),
+        _ => return None,
+    };
+    Some(Build { platform, target })
+}
+
 fn same_dir(a: &Path, b: &Path) -> bool {
     let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let (a, b) = (canonical(a), canonical(b));
@@ -428,7 +455,7 @@ impl Machine for RealMachine {
     }
 
     fn prepare_replace(&mut self, exe: &Path) -> Result<(), String> {
-        if !cfg!(windows) {
+        if !cfg!(windows) || !exe.exists() {
             return Ok(());
         }
         let old = exe.with_extension("old.exe");
@@ -465,68 +492,165 @@ pub struct Options {
     pub scratch: PathBuf,
     /// Windows (PowerShell and `install.ps1`) or not (`sh` and `install.sh`).
     pub windows: bool,
+    /// `--from-source`: build with `cargo install` (a cargo install only).
+    pub from_source: bool,
+    /// The release build of this machine (`None`: cargo builds it).
+    pub build: Option<Build>,
 }
 
-/// The steps that replace the binary with `version`.
-fn replace_steps(options: &Options, version: &str) -> (Option<(String, PathBuf)>, Step) {
-    let dir = options.method.dir().display().to_string();
-    match &options.method {
-        Method::Cargo(_) => (
-            None,
+/// `cargo install` of `version`, from source.
+fn cargo_step(version: &str) -> Step {
+    Step {
+        program: PathBuf::from("cargo"),
+        args: vec![
+            "install".into(),
+            "graphersal-memory".into(),
+            "--locked".into(),
+            "--force".into(),
+            "--version".into(),
+            version.to_string(),
+        ],
+    }
+}
+
+/// The release's installer of `version` into `dir`: the script to download and its run.
+fn installer_steps(options: &Options, version: &str, dir: &Path) -> ((String, PathBuf), Step) {
+    let dir = dir.display().to_string();
+    if options.windows {
+        let script = options.scratch.join("install.ps1");
+        (
+            (
+                format!("{}/download/v{version}/install.ps1", options.releases),
+                script.clone(),
+            ),
             Step {
-                program: PathBuf::from("cargo"),
+                program: PathBuf::from("powershell"),
                 args: vec![
-                    "install".into(),
-                    "graphersal-memory".into(),
-                    "--locked".into(),
-                    "--force".into(),
-                    "--version".into(),
-                    version.to_string(),
+                    "-NoProfile".into(),
+                    "-ExecutionPolicy".into(),
+                    "Bypass".into(),
+                    "-File".into(),
+                    script.display().to_string(),
+                    "-Version".into(),
+                    format!("v{version}"),
+                    "-Dir".into(),
+                    dir,
                 ],
             },
+        )
+    } else {
+        let script = options.scratch.join("install.sh");
+        (
+            (
+                format!("{}/download/v{version}/install.sh", options.releases),
+                script.clone(),
+            ),
+            Step {
+                program: PathBuf::from("sh"),
+                args: vec![
+                    script.display().to_string(),
+                    "--version".into(),
+                    format!("v{version}"),
+                    "--dir".into(),
+                    dir,
+                ],
+            },
+        )
+    }
+}
+
+/// How the binary is replaced.
+struct Replace {
+    /// What the plan says it goes through.
+    how: String,
+    /// The installer script to download first.
+    download: Option<(String, PathBuf)>,
+    /// The step that replaces the binary.
+    step: Step,
+    /// Whether `step` is a cargo build (Windows: the running `.exe` moved aside first).
+    cargo: bool,
+    /// The cargo build to fall back on when the release's build does not install.
+    fallback: Option<Step>,
+    /// cargo's home and the release build's target: the records to move to the new version.
+    records: Option<(PathBuf, &'static str)>,
+}
+
+/// How `upgrade` replaces the binary with `version`; an error for `--from-source` outside
+/// cargo's directory.
+fn replace_plan(options: &Options, version: &str) -> Result<Replace, String> {
+    let from_source = |how: &str| Replace {
+        how: how.to_string(),
+        download: None,
+        step: cargo_step(version),
+        cargo: true,
+        fallback: None,
+        records: None,
+    };
+    match (&options.method, options.build) {
+        (Method::Cargo(_), _) if options.from_source => {
+            Ok(from_source("cargo install, from source (--from-source)"))
+        }
+        (Method::Cargo(_), None) => Ok(from_source(
+            "cargo install, from source (no release build for this platform)",
+        )),
+        (Method::Cargo(dir), Some(build)) => {
+            let (download, step) = installer_steps(options, version, dir);
+            Ok(Replace {
+                how: format!(
+                    "the release's build ({}) into cargo's directory (it was installed with cargo)",
+                    build.platform
+                ),
+                download: Some(download),
+                step,
+                cargo: false,
+                fallback: Some(cargo_step(version)),
+                records: dir.parent().map(|home| (home.to_path_buf(), build.target)),
+            })
+        }
+        (method, _) if options.from_source => Err(format!(
+            "--from-source builds with cargo into cargo's directory, but this binary is in {} \
+             ({}): upgrade without --from-source, or install from source with `cargo install \
+             graphersal-memory --locked` (a second binary; the first one on PATH runs)",
+            method.dir().display(),
+            match method {
+                Method::Installer(_) => "the installer's directory",
+                _ => "not cargo's directory",
+            }
+        )),
+        (method, _) => {
+            let (download, step) = installer_steps(options, version, method.dir());
+            Ok(Replace {
+                how: match method {
+                    Method::Installer(_) => "the release's installer (it was installed with it)",
+                    _ => "the release's installer, into the same directory",
+                }
+                .to_string(),
+                download: Some(download),
+                step,
+                cargo: false,
+                fallback: None,
+                records: None,
+            })
+        }
+    }
+}
+
+/// cargo's records moved to `version` after the release's build replaced a cargo install: a
+/// line for the report (a failure is reported, the upgrade goes on).
+fn update_records(home: &Path, version: &str, target: &str) -> String {
+    use crate::install::cargo_records::{Outcome, update};
+    match update(home, "graphersal-memory", version, target) {
+        Ok(Outcome::Updated(_)) => {
+            format!("cargo's records: graphersal-memory {version} (`cargo install --list`)")
+        }
+        Ok(Outcome::NotRecorded) => format!(
+            "cargo's records name no graphersal-memory in {}: left as they are",
+            home.display()
         ),
-        _ if options.windows => {
-            let script = options.scratch.join("install.ps1");
-            (
-                Some((
-                    format!("{}/download/v{version}/install.ps1", options.releases),
-                    script.clone(),
-                )),
-                Step {
-                    program: PathBuf::from("powershell"),
-                    args: vec![
-                        "-NoProfile".into(),
-                        "-ExecutionPolicy".into(),
-                        "Bypass".into(),
-                        "-File".into(),
-                        script.display().to_string(),
-                        "-Version".into(),
-                        format!("v{version}"),
-                        "-Dir".into(),
-                        dir,
-                    ],
-                },
-            )
-        }
-        _ => {
-            let script = options.scratch.join("install.sh");
-            (
-                Some((
-                    format!("{}/download/v{version}/install.sh", options.releases),
-                    script.clone(),
-                )),
-                Step {
-                    program: PathBuf::from("sh"),
-                    args: vec![
-                        script.display().to_string(),
-                        "--version".into(),
-                        format!("v{version}"),
-                        "--dir".into(),
-                        dir,
-                    ],
-                },
-            )
-        }
+        Err(err) => format!(
+            "cargo's records were not updated ({err}): `cargo install --list` still names \
+             the old version"
+        ),
     }
 }
 
@@ -562,7 +686,7 @@ pub fn run(
         }
         return Ok(0);
     }
-    let (download, replace) = replace_steps(options, &latest);
+    let plan = replace_plan(options, &latest)?;
     let restart = Step {
         program: options.exe.clone(),
         args: vec!["daemon".into(), "restart".into()],
@@ -577,27 +701,36 @@ pub fn run(
         program: options.exe.clone(),
         args: vec!["--version".into()],
     };
-    let how = match &options.method {
-        Method::Cargo(_) => "cargo install (it was installed with cargo)",
-        Method::Installer(_) => "the release's installer (it was installed with it)",
-        Method::Other(_) => "the release's installer, into the same directory",
-    };
-    let _ = writeln!(out, "\nThe upgrade, through {how}:\n");
-    let mut n = 1;
-    if let Some((url, _)) = &download {
-        let _ = writeln!(out, "  {n}. download {url}");
-        n += 1;
+    let _ = writeln!(out, "\nThe upgrade, through {}:\n", plan.how);
+    let mut lines = Vec::new();
+    if let Some((url, _)) = &plan.download {
+        lines.push(format!("download {url}"));
     }
-    let _ = writeln!(out, "  {n}. {}", replace.shown());
-    let _ = writeln!(out, "  {}. {}", n + 1, restart.shown());
-    let _ = writeln!(
-        out,
-        "  {}. {} (the installed parts to the new version)",
-        n + 2,
+    let mut replace_line = plan.step.shown();
+    if let Some(fallback) = &plan.fallback {
+        replace_line.push_str(&format!(
+            "\n     if it does not install: {} (builds from source)",
+            fallback.shown()
+        ));
+    }
+    lines.push(replace_line);
+    if let Some((home, _)) = &plan.records {
+        lines.push(format!(
+            "cargo's records ({}, {}) to graphersal-memory {latest}",
+            home.join(crate::install::cargo_records::V1_FILE).display(),
+            crate::install::cargo_records::V2_FILE
+        ));
+    }
+    lines.push(restart.shown());
+    lines.push(format!(
+        "{} (the installed parts to the new version)",
         refresh.shown()
-    );
-    let _ = writeln!(out, "  {}. {}", n + 3, version.shown());
-    if matches!(options.method, Method::Cargo(_)) {
+    ));
+    lines.push(version.shown());
+    for (n, line) in lines.iter().enumerate() {
+        let _ = writeln!(out, "  {}. {line}", n + 1);
+    }
+    if plan.cargo {
         let _ = writeln!(out, "\n  cargo builds from source: a few minutes.");
     }
     if options.dry_run {
@@ -617,20 +750,39 @@ pub fn run(
             return Ok(crate::commands::EXIT_FAILED);
         }
     }
-    if let Some((url, dest)) = &download {
-        std::fs::create_dir_all(&options.scratch)
-            .map_err(|err| format!("cannot create {}: {err}", options.scratch.display()))?;
-        machine.download(url, dest)?;
-    }
-    if matches!(options.method, Method::Cargo(_)) {
-        machine.prepare_replace(&options.exe)?;
-    }
-    let replaced = machine.run(&replace);
-    if download.is_some() {
+    let mut release_build = || -> Result<(), String> {
+        if let Some((url, dest)) = &plan.download {
+            std::fs::create_dir_all(&options.scratch)
+                .map_err(|err| format!("cannot create {}: {err}", options.scratch.display()))?;
+            machine.download(url, dest)?;
+        }
+        if plan.cargo {
+            machine.prepare_replace(&options.exe)?;
+        }
+        machine.run(&plan.step)
+    };
+    let replaced = release_build();
+    if plan.download.is_some() {
         let _ = std::fs::remove_dir_all(&options.scratch);
     }
-    replaced
-        .map_err(|err| format!("the upgrade failed: {err}; the installed version is unchanged"))?;
+    let unchanged =
+        |err: String| format!("the upgrade failed: {err}; the installed version is unchanged");
+    let built_from_source = match (replaced, &plan.fallback) {
+        (Ok(()), _) => false,
+        (Err(err), Some(fallback)) => {
+            let _ = writeln!(
+                out,
+                "\nThe release's build did not install ({err}); building from source instead:\n"
+            );
+            machine.prepare_replace(&options.exe).map_err(unchanged)?;
+            machine.run(fallback).map_err(unchanged)?;
+            true
+        }
+        (Err(err), None) => return Err(unchanged(err)),
+    };
+    if let (Some((home, target)), false) = (&plan.records, built_from_source) {
+        let _ = writeln!(out, "\n{}", update_records(home, &latest, target));
+    }
     let _ = writeln!(out);
     machine
         .run(&restart)
@@ -859,8 +1011,15 @@ mod tests {
             data_dir: tmp.join("data"),
             scratch: tmp.join("scratch"),
             windows,
+            from_source: false,
+            build: None,
         }
     }
+
+    const MACOS_ARM64: Build = Build {
+        platform: "macos-arm64",
+        target: "aarch64-apple-darwin",
+    };
 
     fn upgrade(
         options: &Options,
@@ -963,6 +1122,182 @@ mod tests {
                 "99.0.0"
             ]
         );
+    }
+
+    #[test]
+    fn release_builds_exist_for_the_release_workflows_platforms() {
+        assert_eq!(release_build("macos", "aarch64"), Some(MACOS_ARM64));
+        assert_eq!(
+            release_build("linux", "x86_64").map(|b| (b.platform, b.target)),
+            Some(("linux-x86_64", "x86_64-unknown-linux-musl"))
+        );
+        assert_eq!(
+            release_build("windows", "x86_64").map(|b| b.platform),
+            Some("windows-x86_64")
+        );
+        for (os, arch) in [
+            ("freebsd", "x86_64"),
+            ("linux", "arm"),
+            ("windows", "aarch64"),
+        ] {
+            assert_eq!(release_build(os, arch), None, "{os} {arch}");
+        }
+    }
+
+    /// cargo's records of a cargo install of 0.2.1 in `home`.
+    fn cargo_records_in(home: &Path) {
+        use crate::install::cargo_records::{V1_FILE, V2_FILE, key};
+        let old = key("graphersal-memory", "0.2.1");
+        std::fs::write(
+            home.join(V1_FILE),
+            format!("[v1]\n\"{old}\" = [\"graphersal-memory\"]\n"),
+        )
+        .unwrap();
+        let v2 = json!({"installs": {old: {"version_req": "=0.2.1", "bins": ["graphersal-memory"],
+            "features": [], "all_features": false, "no_default_features": false,
+            "profile": "release", "target": "aarch64-apple-darwin", "rustc": "rustc 1.98.1"}}});
+        std::fs::write(home.join(V2_FILE), v2.to_string()).unwrap();
+    }
+
+    fn cargo_records_name(home: &Path, version: &str) -> bool {
+        use crate::install::cargo_records::{V1_FILE, V2_FILE, key};
+        let key = format!("\"{}\"", key("graphersal-memory", version));
+        [V1_FILE, V2_FILE].iter().all(|file| {
+            std::fs::read_to_string(home.join(file))
+                .unwrap()
+                .contains(&key)
+        })
+    }
+
+    #[test]
+    fn a_cargo_install_gets_the_release_build_and_cargos_records_follow() {
+        let tmp = crate::runtime::mcp_tests::TempDir::new("upgrade-cargo-build");
+        let cargo_home = tmp.path().join("cargo");
+        let dir = cargo_home.join("bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        cargo_records_in(&cargo_home);
+        let mut options = options_in(tmp.path(), Method::Cargo(dir.clone()), false);
+        options.build = Some(MACOS_ARM64);
+        // The plan names the release's build, the fallback and the records.
+        options.dry_run = true;
+        let (result, out) = upgrade(&options, "99.0.0", &mut Recorded::default(), "");
+        assert_eq!(result, Ok(0), "{out}");
+        assert!(
+            out.contains("the release's build (macos-arm64) into cargo's directory"),
+            "{out}"
+        );
+        assert!(
+            out.contains("if it does not install: cargo install graphersal-memory --locked --force --version 99.0.0"),
+            "{out}"
+        );
+        assert!(out.contains("cargo's records ("), "{out}");
+        assert!(!out.contains("a few minutes"), "{out}");
+        assert!(
+            cargo_records_name(&cargo_home, "0.2.1"),
+            "a dry run writes nothing"
+        );
+        // The run: the release's installer into cargo's directory, then the records.
+        options.dry_run = false;
+        let mut machine = Recorded::default();
+        let (result, out) = upgrade(&options, "99.0.0", &mut machine, "");
+        assert_eq!(result, Ok(0), "{out}");
+        assert!(
+            machine.downloads[0]
+                .0
+                .ends_with("/download/v99.0.0/install.sh")
+        );
+        assert_eq!(machine.runs[0].program, PathBuf::from("sh"));
+        assert!(machine.runs[0].args.ends_with(&[
+            "--version".into(),
+            "v99.0.0".into(),
+            "--dir".into(),
+            dir.display().to_string()
+        ]));
+        assert_eq!(machine.runs[1].args, ["daemon", "restart"]);
+        assert!(machine.prepared.is_empty());
+        assert!(cargo_records_name(&cargo_home, "99.0.0"));
+        assert!(
+            out.contains("cargo's records: graphersal-memory 99.0.0"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_cargo_install_builds_from_source_as_the_last_resort_or_when_asked() {
+        let tmp = crate::runtime::mcp_tests::TempDir::new("upgrade-cargo-source");
+        let cargo_home = tmp.path().join("cargo");
+        let dir = cargo_home.join("bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        cargo_records_in(&cargo_home);
+        let mut options = options_in(tmp.path(), Method::Cargo(dir.clone()), false);
+        options.build = Some(MACOS_ARM64);
+        // The release's build does not install: cargo builds it; cargo writes its own records.
+        let mut machine = Recorded {
+            fail_run: Some(1),
+            ..Recorded::default()
+        };
+        let (result, out) = upgrade(&options, "99.0.0", &mut machine, "");
+        assert_eq!(result, Ok(0), "{out}");
+        assert!(out.contains("building from source instead"), "{out}");
+        assert_eq!(machine.runs[1].program, PathBuf::from("cargo"));
+        assert_eq!(machine.prepared, std::slice::from_ref(&options.exe));
+        assert_eq!(machine.runs[2].args, ["daemon", "restart"]);
+        assert!(cargo_records_name(&cargo_home, "0.2.1"));
+        // Both fail: unchanged, no restart.
+        let mut both = BothFail(Recorded::default());
+        let mut out = Vec::new();
+        let err = run(
+            &options,
+            &|| Ok("99.0.0".to_string()),
+            &mut both,
+            &mut "".as_bytes(),
+            &mut out,
+        )
+        .unwrap_err();
+        assert!(err.contains("unchanged"), "{err}");
+        assert_eq!(
+            both.0.runs.len(),
+            2,
+            "the release's build, then cargo; no restart"
+        );
+        // --from-source: cargo only, nothing downloaded.
+        options.from_source = true;
+        let mut machine = Recorded::default();
+        let (result, out) = upgrade(&options, "99.0.0", &mut machine, "");
+        assert_eq!(result, Ok(0), "{out}");
+        assert!(out.contains("from source (--from-source)"), "{out}");
+        assert!(machine.downloads.is_empty());
+        assert_eq!(machine.runs[0].program, PathBuf::from("cargo"));
+        // No release build for this platform: cargo, and the plan says why.
+        options.from_source = false;
+        options.build = None;
+        let (result, out) = upgrade(&options, "99.0.0", &mut Recorded::default(), "");
+        assert_eq!(result, Ok(0), "{out}");
+        assert!(out.contains("no release build for this platform"), "{out}");
+        // --from-source outside cargo's directory: refused, nothing run.
+        let mut installer =
+            options_in(tmp.path(), Method::Installer(tmp.path().join("bin")), false);
+        installer.from_source = true;
+        let mut machine = Recorded::default();
+        let (result, _) = upgrade(&installer, "99.0.0", &mut machine, "");
+        assert!(result.unwrap_err().contains("--from-source"));
+        assert!(machine.runs.is_empty() && machine.downloads.is_empty());
+    }
+
+    /// A machine whose every run fails.
+    struct BothFail(Recorded);
+
+    impl Machine for BothFail {
+        fn download(&mut self, url: &str, dest: &Path) -> Result<(), String> {
+            self.0.download(url, dest)
+        }
+        fn run(&mut self, step: &Step) -> Result<(), String> {
+            self.0.runs.push(step.clone());
+            Err("exit status 1".to_string())
+        }
+        fn prepare_replace(&mut self, exe: &Path) -> Result<(), String> {
+            self.0.prepare_replace(exe)
+        }
     }
 
     #[test]

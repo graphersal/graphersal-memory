@@ -34,5 +34,44 @@ tiny_http = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 uds_windows = { workspace = true }
 
+# `cargo binstall graphersal-memory`: the release's archives (named by platform, not by target;
+# Linux builds are static musl, so they serve the gnu targets too). Keep in step with the
+# release workflow's matrix and `install::update::release_build`. Other targets: no release
+# build, binstall falls back to building.
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-linux-x86_64.tar.gz"
+bin-dir = "{ name }-v{ version }-linux-x86_64/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-linux-x86_64.tar.gz"
+bin-dir = "{ name }-v{ version }-linux-x86_64/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-linux-aarch64.tar.gz"
+bin-dir = "{ name }-v{ version }-linux-aarch64/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-linux-aarch64.tar.gz"
+bin-dir = "{ name }-v{ version }-linux-aarch64/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-macos-arm64.tar.gz"
+bin-dir = "{ name }-v{ version }-macos-arm64/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-macos-x86_64.tar.gz"
+bin-dir = "{ name }-v{ version }-macos-x86_64/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-windows-x86_64.zip"
+bin-dir = "{ name }-v{ version }-windows-x86_64/{ bin }{ binary-ext }"
+pkg-fmt = "zip"
+
 [lints]
 workspace = true
