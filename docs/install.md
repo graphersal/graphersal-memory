@@ -18,13 +18,13 @@ checksum does not match, and put the binary into `~/.local/bin` (Windows:
 ```sh
 curl -fsSL https://github.com/graphersal/graphersal-memory/releases/latest/download/install.sh | sh
 # a given version or directory
-curl -fsSL https://github.com/graphersal/graphersal-memory/releases/latest/download/install.sh | sh -s -- --version v0.2.1 --dir /usr/local/bin
+curl -fsSL https://github.com/graphersal/graphersal-memory/releases/latest/download/install.sh | sh -s -- --version v0.3.0 --dir /usr/local/bin
 ```
 
 ```powershell
 irm https://github.com/graphersal/graphersal-memory/releases/latest/download/install.ps1 | iex
 # a given version or directory
-& ([scriptblock]::Create((irm https://github.com/graphersal/graphersal-memory/releases/latest/download/install.ps1))) -Version v0.2.1 -Dir C:\Tools
+& ([scriptblock]::Create((irm https://github.com/graphersal/graphersal-memory/releases/latest/download/install.ps1))) -Version v0.3.0 -Dir C:\Tools
 ```
 
 The same options can be set as environment variables (`GRAPHERSAL_MEMORY_VERSION`,
@@ -42,7 +42,7 @@ From source, with Rust 1.88 or newer and a C compiler (for the bundled SQLite an
 cargo install --locked graphersal-memory
 ```
 
-With [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), from 0.2.2 on: the
+With [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), from 0.3.0 on: the
 release's build into cargo's directory, without building (`[package.metadata.binstall]` in the
 crate names the archives; a platform without a release build is built as with `cargo install`):
 

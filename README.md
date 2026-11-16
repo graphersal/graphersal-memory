@@ -4,7 +4,7 @@
 graph on your machine, searched through MCP instead of loaded on every turn.**
 
 Works with Claude Code, opencode, OpenAI Codex CLI, Cursor, CodeWhale (preview) and DeepSeek
-Harness (`dsh`, preview). One binary, no account, no telemetry. Version 0.2.1 is an early release, and honest about its limits
+Harness (`dsh`, preview). One binary, no account, no telemetry. Version 0.3.0 is an early release, and honest about its limits
 ([status](#status)).
 
 <picture>
@@ -75,7 +75,7 @@ With Rust 1.88 or newer (and a C compiler), on any platform:
 cargo install --locked graphersal-memory
 ```
 
-or, from 0.2.2 on, the release's build without building: `cargo binstall graphersal-memory`.
+or, from 0.3.0 on, the release's build without building: `cargo binstall graphersal-memory`.
 
 The installers download the archive for your platform from the latest
 [GitHub Release](https://github.com/graphersal/graphersal-memory/releases), verify it against the
@@ -277,12 +277,12 @@ another harness? A harness is one module behind one interface:
 
 ## Status
 
-graphersal-memory 0.2.1 is an early release. Prebuilt binaries are published for **Linux**
+graphersal-memory 0.3.0 is an early release. Prebuilt binaries are published for **Linux**
 (x86_64 and arm64, static), **macOS** (arm64 and x86_64) and **Windows** (x86_64). It has been
 used most on macOS. The test suite runs on Linux, macOS and Windows, and the release workflow
 smoke-tests every binary on its platform.
 
-Known limits of 0.2.1:
+Known limits of 0.3.0:
 
 - **Cursor** support is built from Cursor's documentation and tested against fixtures; it has not
   been run with a live Cursor yet. You can help: [docs/cursor-live-check.md](docs/cursor-live-check.md).
@@ -291,7 +291,7 @@ Known limits of 0.2.1:
   memory written through CodeWhale, Linux and Windows are not checked yet, and CodeWhale asks once
   per memory tool per run (it has no permanent approval for MCP tools):
   [docs/codewhale-live-check.md](docs/codewhale-live-check.md).
-- **DeepSeek Harness** (`dsh`) support (new after 0.2.1, a preview) is built from dsh's source (dsh-v0.2.2-rc.3)
+- **DeepSeek Harness** (`dsh`) support (new in 0.3.0, a preview) is built from dsh's source (dsh-v0.2.2-rc.3)
   and tested against fixtures; it has not been run with a live dsh yet. No summaries or `bench`
   through dsh (it cannot run without tools). In the `web`, Desktop and `acp` profiles one dsh
   serves several workspaces through one MCP server started in dsh's launch directory, so
