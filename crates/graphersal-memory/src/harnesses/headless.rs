@@ -13,6 +13,7 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// The extensions Windows tries when `PATHEXT` is not set.
@@ -175,6 +176,59 @@ fn split_windows_path(path: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Set when this process stops (the daemon's shutdown, [`stop_all`]): a running harness run
+/// is ended with its children, a new one refused.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// The harness runs of this process now running.
+static RUNNING: AtomicUsize = AtomicUsize::new(0);
+
+/// Ends this process's harness runs (each with its children) and refuses new ones; waits at
+/// most `wait` for them to be gone. The daemon calls it when it stops, so no harness it
+/// started keeps running (and spending, and on Windows showing its window) after it.
+pub fn stop_all(wait: Duration) {
+    STOPPING.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + wait;
+    while RUNNING.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Whether [`stop_all`] was called: a run's failure is then the stop's, not the harness's.
+pub fn stopping() -> bool {
+    STOPPING.load(Ordering::SeqCst)
+}
+
+/// Counts one running harness run while it lives.
+struct Running;
+
+impl Running {
+    fn new() -> Self {
+        RUNNING.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Makes `command` start without a console window of its own on Windows
+/// (`CREATE_NO_WINDOW`): the daemon has no console (it starts detached), so every console
+/// program it starts (`claude.cmd` through `cmd.exe`, `node`, `git`, `taskkill`) would
+/// otherwise open a new window that takes the focus. Elsewhere nothing changes.
+pub fn without_window(command: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// What one harness run produced.
 #[derive(Debug, Clone)]
 pub struct Output {
@@ -198,9 +252,12 @@ pub fn run(
     let Some((program, rest)) = args.split_first() else {
         return Err("the harness command is empty".to_string());
     };
+    if stopping() {
+        return Err("graphersal-memory is stopping; the harness was not started".to_string());
+    }
     let started = Instant::now();
     let mut command = Command::new(program_path(program));
-    command
+    without_window(&mut command)
         .args(rest)
         .current_dir(cwd)
         .stdin(Stdio::piped())
@@ -212,6 +269,7 @@ pub fn run(
     let mut child = command
         .spawn()
         .map_err(|err| format!("cannot run the harness {program}: {err}"))?;
+    let _running = Running::new();
     let stdin = child.stdin.take();
     let text = input.to_string();
     let writer = std::thread::spawn(move || {
@@ -239,6 +297,12 @@ pub fn run(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
+            Ok(None) if stopping() => {
+                kill_tree(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("graphersal-memory is stopping; the harness was ended".to_string());
+            }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             Ok(None) => {
                 kill_tree(child.id());
@@ -267,7 +331,7 @@ pub fn run(
 /// running (and spending). Elsewhere the harness is the child itself; nothing to do.
 fn kill_tree(pid: u32) {
     if cfg!(windows) {
-        let _ = Command::new("taskkill")
+        let _ = without_window(&mut Command::new("taskkill"))
             .args(["/T", "/F", "/PID", &pid.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

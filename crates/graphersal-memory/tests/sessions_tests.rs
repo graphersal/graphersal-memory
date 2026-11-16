@@ -391,6 +391,60 @@ fn the_hook_queues_indexing_and_summaries_become_searchable_facts() {
 }
 
 #[test]
+fn a_daemon_stop_ends_a_running_summary_and_does_not_pause_the_summaries() {
+    let env = Env::new();
+    let (work, file) = env.project();
+    // A harness that hangs: it records its pid, then becomes `sleep` itself.
+    let bin = env.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let pid_file = env.root.join("harness.pid");
+    let script = bin.join("claude");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 300\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    env.summaries_on(&script);
+    let (hook, _) = env.hook(
+        "session-end",
+        &json!({"session_id": "x", "cwd": work.display().to_string(),
+                "transcript_path": file.display().to_string(), "hook_event_name": "SessionEnd"}),
+    );
+    assert!(hook.status.success(), "{}", text(&hook));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let harness = loop {
+        if let Some(pid) = std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+        {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "the harness never started");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(alive(harness));
+    let stopped = env.run(&["daemon", "stop"]);
+    assert!(stopped.status.success(), "{}", text(&stopped));
+    // The harness ended with the daemon, not 300 s later.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(harness) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!alive(harness), "the harness outlived the daemon");
+    // Ended by the stop, not failed: the summaries are not paused.
+    assert!(
+        !env.data_dir()
+            .join("sessions")
+            .join("summaries-paused.json")
+            .exists()
+    );
+}
+
+#[test]
 fn without_consent_import_sessions_indexes_raw_turns_and_calls_nothing() {
     let env = Env::new();
     let (work, _) = env.project();

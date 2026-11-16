@@ -242,6 +242,107 @@ impl Spend {
     }
 }
 
+/// The pause file of `data_dir`: written when a harness run of the summaries failed.
+fn pause_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("sessions").join("summaries-paused.json")
+}
+
+/// The summaries stopped after a harness run failed: no further run until the user resumes
+/// them (`summaries enable`, or `install` with summaries on), so a harness that fails every
+/// time is not started again for every session (on Windows each start may flash a window).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Paused {
+    /// When the failed run ended (UTC, RFC 3339).
+    pub at: String,
+    /// The command that failed, as configured.
+    pub command: String,
+    /// What failed: the exit code and the harness's own output.
+    pub error: String,
+}
+
+impl Paused {
+    /// The pause of `data_dir`, if any. An unreadable pause file counts as a pause too: the
+    /// summaries stay stopped rather than run on a file they cannot read.
+    pub fn load(data_dir: &Path) -> Option<Self> {
+        let path = pause_path(data_dir);
+        let bytes = match fsutil::read_optional(&path) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return None,
+            Err(err) => {
+                return Some(Self {
+                    at: String::new(),
+                    command: String::new(),
+                    error: err,
+                });
+            }
+        };
+        let value: Value = serde_json::from_slice(&bytes).unwrap_or_else(
+            |err| json!({"error": format!("{} is invalid: {err}", path.display())}),
+        );
+        let text = |key: &str| value[key].as_str().unwrap_or_default().to_string();
+        Some(Self {
+            at: text("at"),
+            command: text("command"),
+            error: text("error"),
+        })
+    }
+
+    /// Records the pause in `data_dir`.
+    fn save(&self, data_dir: &Path) -> Result<(), String> {
+        let path = pause_path(data_dir);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+        }
+        let value = json!({
+            "version": 1, "at": self.at, "command": self.command, "error": self.error,
+        });
+        fsutil::write_atomic(
+            &path,
+            format!(
+                "{}\n",
+                crate::install::jsonedit::render(&value, Some("  "), 0)
+            )
+            .as_bytes(),
+        )
+    }
+
+    /// Ends the pause of `data_dir` (none: nothing to do).
+    pub fn clear(data_dir: &Path) -> Result<(), String> {
+        let path = pause_path(data_dir);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(format!("cannot delete {}: {err}", path.display())),
+        }
+    }
+
+    /// One line on the pause, for `status`, `doctor` and `summaries status`.
+    pub fn headline(&self) -> String {
+        format!(
+            "session summaries are paused{} after a failed run of `{}`: no session is sent \
+             until you resume them",
+            if self.at.is_empty() {
+                String::new()
+            } else {
+                format!(" since {}", self.at)
+            },
+            self.command
+        )
+    }
+
+    /// The error's lines (the exit code, the harness's output), then how to go on.
+    pub fn details(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self.error.lines().map(str::to_string).collect();
+        lines.push(
+            "fix the command (run it by hand to see), then `graphersal-memory summaries \
+             enable` resumes them; `graphersal-memory summaries disable` turns them off"
+                .to_string(),
+        );
+        lines
+    }
+}
+
 /// One summary: the structured output of the harness and the cost it reported.
 #[derive(Debug, Clone)]
 pub struct Summary {
@@ -263,6 +364,9 @@ pub enum Refused {
     },
     /// The harness failed.
     Failed(String),
+    /// The harness failed and the summaries are paused ([`Paused`]): no further call in this
+    /// run or later ones until the user resumes them.
+    Paused(String),
 }
 
 /// The user's environment as the summaries' sandboxes read it (`Summarizer::with_user_env`).
@@ -286,6 +390,14 @@ impl Summarizer {
     /// be read (then nothing is sent either; the error is returned for the log).
     pub fn new(data_dir: &Path) -> (Option<Self>, Option<String>) {
         match Config::load(data_dir) {
+            Ok(config) if config.summaries.enabled && Paused::load(data_dir).is_some() => (
+                None,
+                Some(
+                    "they are paused after a failed run (`graphersal-memory status` shows \
+                     why)"
+                        .to_string(),
+                ),
+            ),
             Ok(config) if config.summaries.enabled => match Spend::load(data_dir) {
                 Ok(spend) => (
                     Some(Self {
@@ -358,7 +470,23 @@ impl Summarizer {
                 cost.is_some(),
             )
             .map_err(Refused::Failed)?;
-        result.map_err(Refused::Failed)
+        result.map_err(|error| {
+            // Ended by the daemon's stop: not the harness's failure.
+            if crate::harnesses::headless::stopping() {
+                return Refused::Failed(error);
+            }
+            // One failure stops the summaries: a harness that fails once (not logged in, a
+            // wrong command, a broken install) would fail again for every session.
+            let paused = Paused {
+                at: crate::runtime::daemon::now_utc(),
+                command: self.settings.harness_command.join(" "),
+                error: error.clone(),
+            };
+            match paused.save(&self.data_dir) {
+                Ok(()) => Refused::Paused(error),
+                Err(err) => Refused::Paused(format!("{error} (and the pause: {err})")),
+            }
+        })
     }
 }
 
@@ -440,13 +568,23 @@ pub fn run_harness_with(
     match parse_answer(&stdout) {
         Ok(summary) => Ok(summary),
         Err(why) => Err(format!(
-            "{why} (exit {}; stdout: {}; stderr: {})",
+            "{why}\nexit code: {}\nstdout: {}\nstderr: {}",
             output
                 .code
-                .map_or_else(|| "signal".to_string(), |c| c.to_string()),
-            clip(output.stdout.trim(), 300),
-            clip(output.stderr.trim(), 300)
+                .map_or_else(|| "none (killed)".to_string(), |c| c.to_string()),
+            shown(&output.stdout),
+            shown(&output.stderr)
         )),
+    }
+}
+
+/// A harness's output in an error: trimmed, cut to 2,000 characters, `(empty)` for nothing.
+fn shown(output: &str) -> String {
+    let output = output.trim();
+    if output.is_empty() {
+        "(empty)".to_string()
+    } else {
+        clip(output, 2000)
     }
 }
 
@@ -455,7 +593,20 @@ pub fn run_harness_with(
 pub fn parse_answer(text: &str) -> Result<Summary, String> {
     let value: Value = json_in(text).ok_or("the harness answered no JSON")?;
     if value["is_error"] == Value::Bool(true) {
-        return Err("the harness reported an error".to_string());
+        // `claude -p --output-format json` puts its error text in `result`, its kind in
+        // `subtype`.
+        let detail = [&value["subtype"], &value["result"]]
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .collect::<Vec<_>>()
+            .join(": ");
+        return Err(if detail.is_empty() {
+            "the harness reported an error".to_string()
+        } else {
+            format!("the harness reported an error: {}", clip(&detail, 1000))
+        });
     }
     let cost_usd = value["total_cost_usd"].as_f64();
     let output = if value["structured_output"].is_object() {

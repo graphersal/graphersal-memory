@@ -172,7 +172,7 @@ pub fn root_commit(root: &Path) -> Option<String> {
     if !root.join(".git").exists() {
         return None;
     }
-    let output = std::process::Command::new("git")
+    let output = crate::harnesses::headless::without_window(&mut std::process::Command::new("git"))
         .arg("-C")
         .arg(root)
         .args(["rev-list", "--max-parents=0", "HEAD"])

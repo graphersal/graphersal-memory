@@ -177,7 +177,7 @@ pub fn sha256_hex(text: &str) -> String {
 
 /// CodeWhale's workspace id of the repository at `root` (`None` without an origin).
 pub fn workspace_id(root: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = crate::harnesses::headless::without_window(&mut std::process::Command::new("git"))
         .arg("-C")
         .arg(root)
         .args(["config", "--get", "remote.origin.url"])

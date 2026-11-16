@@ -98,7 +98,15 @@ open threads. They also cost model usage on your account. So:
   month in UTC): before each call the month's spend plus the call's estimate must stay within it;
   after the call the cost your harness reports is added (`claude -p` reports it; for another
   harness the estimate is counted). Above the cap, only raw turns are indexed, which is local and
-  free, and summaries catch up next month. `summaries status` shows the month's spend.
+  free, and summaries catch up next month. `summaries status` shows the month's spend;
+- a **failed run pauses them**: when your harness command fails once (not logged in, a wrong
+  command, a broken install), no further session is sent, in this run or later ones, until you
+  resume them. `status`, `doctor` and `summaries status` show the failure with your harness's
+  exit code and its own output; fix the command, then `summaries enable` (or `install` with
+  summaries on) resumes them. The pause is `sessions/summaries-paused.json` in the data
+  directory. When the daemon stops (`daemon stop`, `uninstall`) during a summary, it ends the
+  background harness run it started itself for that summary (never your own sessions), without
+  a pause.
 
 Without summaries, raw turns are still indexed locally and searchable.
 

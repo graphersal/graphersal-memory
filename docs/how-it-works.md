@@ -81,7 +81,14 @@ anything changes.
   work goes to whichever daemon runs at the end. Only when no daemon answers within 30 seconds does
   the MCP server end with an error naming the log, as before. `ui` reconnects the same way. A
   daemon stopped on purpose (`uninstall`, `purge`) is not started again by open sessions, so a
-  purge does not see its data recreated.
+  purge does not see its data recreated. `uninstall` stops the daemon when no harness has our
+  parts any more (an uninstall of one harness of several leaves it running). Before it exits,
+  the daemon ends the background `claude -p` (or other harness command) it started itself for a
+  summary, by that child's process id, with the child's own children on Windows. Your own harness
+  sessions are never ended: their calls to our tools fail until you install again.
+- **No windows on Windows.** The daemon runs without a console, so every program it starts (the
+  summaries' harness, `git`, `taskkill`) starts without a window of its own
+  (`CREATE_NO_WINDOW`); up to 0.2.1 each summary run of `claude.cmd` opened a console window.
 - **Upgrades.** When a shim meets an older daemon: with no other session open, the daemon exits
   and the shim starts the new binary; with sessions open, it serves the new shim too and exits
   when its last session closes, so nothing waits on an upgrade.

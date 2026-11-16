@@ -220,7 +220,12 @@ pub fn run_cli(
                     &mut BufReader::new(stdin),
                     &mut stdout,
                 );
-                if !was_running && ipc::daemon_alive(&setup.run_dir).unwrap_or(false) {
+                let removed = matches!(result, Ok(0)) && !options.dry_run;
+                if removed && !options.disable_develop_only && setup.installed().is_empty() {
+                    // Nothing of ours is left in any harness: the daemon stops too (with the
+                    // harness runs it started), and open sessions' MCP servers end with it.
+                    stop_after_uninstall(&setup.run_dir, &mut stdout);
+                } else if !was_running && ipc::daemon_alive(&setup.run_dir).unwrap_or(false) {
                     let _ = shim::control(&setup.run_dir, "stop");
                 }
                 result
@@ -1159,7 +1164,10 @@ fn run_summaries(
                 out,
                 "summaries: {}\nthis month ({month}): ${:.2} spent of ${:.2}, {} summaries\n\
                  sessions: {} indexed, {} with a summary of their current version",
-                if settings.summaries.enabled {
+                if settings.summaries.enabled && summaries::Paused::load(&setup.data_dir).is_some()
+                {
+                    format!("on, through `{command}`, but PAUSED (see below)")
+                } else if settings.summaries.enabled {
                     format!("on, through `{command}`")
                 } else {
                     "off".to_string()
@@ -1170,6 +1178,14 @@ fn run_summaries(
                 indexed,
                 summarized
             );
+            if let Some(paused) =
+                summaries::Paused::load(&setup.data_dir).filter(|_| settings.summaries.enabled)
+            {
+                let _ = writeln!(out, "{}", paused.headline());
+                for line in paused.details() {
+                    let _ = writeln!(out, "  {line}");
+                }
+            }
         }
         SummariesAction::Enable { budget, yes } => {
             let _ = writeln!(out, "{}", line(&estimate()?));
@@ -1207,7 +1223,9 @@ pub fn write_summaries(setup: &Setup, enabled: bool, budget: Option<f64>) -> Res
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     let text = config::with_summaries(current.as_deref(), enabled, budget)?;
     crate::runtime::store::create_private_dir(&setup.data_dir)?;
-    crate::fsutil::write_atomic(&path, text.as_bytes())
+    crate::fsutil::write_atomic(&path, text.as_bytes())?;
+    // Switched on or off by the user: a pause after a failed run ends either way.
+    summaries::Paused::clear(&setup.data_dir)
 }
 
 /// `doctor`: every check with its fix; exit code 1 when a problem was found.
@@ -1845,6 +1863,39 @@ fn daemon_action(cli: &Cli, action: DaemonAction, mut stdout: impl Write) -> Res
     Ok(())
 }
 
+/// `uninstall` without any harness left: stops a running daemon and waits until it is gone
+/// (it ends its harness runs first), then says so.
+fn stop_after_uninstall(run_dir: &Path, out: &mut dyn Write) {
+    let old_pid = shim::control(run_dir, "status")
+        .ok()
+        .flatten()
+        .and_then(|status| status["pid"].as_u64());
+    let Some(pid) = old_pid else {
+        return;
+    };
+    let stopped = shim::control(run_dir, "stop")
+        .ok()
+        .flatten()
+        .is_some_and(|answer| answer["ok"] == serde_json::Value::Bool(true));
+    let line = if !stopped {
+        format!(
+            "daemon: still running (pid {pid}): it did not take the stop request; \
+             `graphersal-memory daemon stop` stops it"
+        )
+    } else {
+        match wait_gone(run_dir, Some(pid)) {
+            Ok(None) => format!("daemon: stopped (pid {pid})"),
+            Ok(Some(status)) => format!(
+                "daemon: stopped (pid {pid}), but another one runs now (pid {}): \
+                 `graphersal-memory daemon stop` stops it",
+                status["pid"]
+            ),
+            Err(err) => format!("daemon: {err}"),
+        }
+    };
+    let _ = writeln!(out, "{line}");
+}
+
 /// Waits until the daemon `old_pid` is gone: no daemon holds the run directory's pid lock any
 /// more (`None`), or another daemon answers already (an open session started it: its status).
 fn wait_gone(run_dir: &Path, old_pid: Option<u64>) -> Result<Option<serde_json::Value>, String> {
@@ -2052,7 +2103,9 @@ pub fn status_text_for(
                 } else {
                     String::new()
                 },
-                if config.summaries.enabled {
+                if config.summaries.enabled && summaries::Paused::load(data_dir).is_some() {
+                    "PAUSED (see below)".to_string()
+                } else if config.summaries.enabled {
                     format!(
                         "on (${spend:.2} of ${:.2} spent this month)",
                         config.summaries.monthly_budget_usd
@@ -2066,6 +2119,9 @@ pub fn status_text_for(
     });
     general.extend(store_lines(data_dir, running.as_ref()));
     let mut sections: Vec<Vec<String>> = Vec::new();
+    if let Some(section) = paused_section(data_dir) {
+        sections.push(section);
+    }
     match setup {
         Ok(setup) => {
             let mut memory = install::shared_status_lines(setup);
@@ -2173,6 +2229,19 @@ pub fn status_text_for(
         }
     }
     Ok(text)
+}
+
+/// `status`' section on paused summaries (on in the settings, paused after a failed run): what
+/// failed, in full, and how to go on.
+fn paused_section(data_dir: &Path) -> Option<Vec<String>> {
+    let enabled = Config::load(data_dir).is_ok_and(|config| config.summaries.enabled);
+    let paused = summaries::Paused::load(data_dir).filter(|_| enabled)?;
+    let mut lines = vec![
+        "Session summaries:".to_string(),
+        format!("  ACTION NEEDED: {}", paused.headline()),
+    ];
+    lines.extend(paused.details().iter().map(|line| format!("    {line}")));
+    Some(lines)
 }
 
 /// The maintenance lines of the stores: each open store's numbers from the running daemon's
