@@ -4,9 +4,11 @@
 #   & ([scriptblock]::Create((irm .../install.ps1))) -Version v0.3.0 -Dir C:\Tools
 #
 # It downloads the Windows archive, checks it against the release's SHA256SUMS, and puts
-# graphersal-memory.exe into %LOCALAPPDATA%\Programs\graphersal-memory (or -Dir). It changes
-# nothing else (not even PATH): run `graphersal-memory install` afterwards to connect it to your
-# agent.
+# graphersal-memory.exe into %LOCALAPPDATA%\Programs\graphersal-memory (or -Dir). That directory
+# is added to your user PATH (the registry's HKCU\Environment, its other entries kept as they
+# are) and to this session's, so `graphersal-memory` runs in this window and every new one;
+# -NoPathUpdate leaves PATH alone. It changes nothing else: run `graphersal-memory install`
+# afterwards to connect it to your agents.
 #
 # Parameters (or environment variables):
 #   -Version vX.Y.Z  the release to install (GRAPHERSAL_MEMORY_VERSION; default: the latest)
@@ -14,16 +16,18 @@
 #   -BaseUrl URL     the releases URL (GRAPHERSAL_MEMORY_BASE_URL; default
 #                    https://github.com/graphersal/graphersal-memory/releases); it holds
 #                    latest/download/<file> and download/<tag>/<file>, as GitHub does
+#   -NoPathUpdate    do not add the directory to PATH (GRAPHERSAL_MEMORY_NO_PATH_UPDATE=1)
 
 param(
     [string]$Version = $env:GRAPHERSAL_MEMORY_VERSION,
     [string]$Dir = $env:GRAPHERSAL_MEMORY_INSTALL_DIR,
-    [string]$BaseUrl = $env:GRAPHERSAL_MEMORY_BASE_URL
+    [string]$BaseUrl = $env:GRAPHERSAL_MEMORY_BASE_URL,
+    [switch]$NoPathUpdate = ($env:GRAPHERSAL_MEMORY_NO_PATH_UPDATE -eq '1')
 )
 
 # `irm | iex` runs this text in the caller's session: everything happens inside a function, so
 # its preferences and variables stay out of that session.
-function Install-GraphersalMemory([string]$Version, [string]$Dir, [string]$BaseUrl) {
+function Install-GraphersalMemory([string]$Version, [string]$Dir, [string]$BaseUrl, [bool]$NoPathUpdate) {
     $ErrorActionPreference = 'Stop'
     Set-StrictMode -Version Latest
 
@@ -129,14 +133,45 @@ function Install-GraphersalMemory([string]$Version, [string]$Dir, [string]$BaseU
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp
     }
 
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $onPath = ($env:Path -split ';') + ($userPath -split ';') |
-        Where-Object { $_ -and ($_.TrimEnd('\') -ieq $Dir.TrimEnd('\')) }
+    # The user PATH as the registry holds it: unexpanded (`%USERPROFILE%\...` stays a reference)
+    # and with its value kind, so writing it back changes nothing but our entry.
+    function Test-InPath([string]$List) {
+        [bool](($List -split ';') | Where-Object {
+            $_ -and ([Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ieq $Dir.TrimEnd('\'))
+        })
+    }
     $program = 'graphersal-memory'
-    if (-not $onPath) {
+    $inUserPath = $false
+    $key = $null
+    try {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', -not $NoPathUpdate)
+        if ($key) {
+            $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $inUserPath = Test-InPath $raw
+            if (-not $inUserPath -and -not $NoPathUpdate) {
+                $kind = if ($key.GetValueNames() -contains 'Path') { $key.GetValueKind('Path') } else { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+                $value = if ($raw.Trim(';')) { $raw.TrimEnd(';') + ';' + $Dir } else { $Dir }
+                $key.SetValue('Path', $value, $kind)
+                $inUserPath = $true
+                Write-Host "Added $Dir to your user PATH"
+                # Tell running programs (Explorer, new terminals) that the environment changed:
+                # setting and removing a variable through .NET broadcasts WM_SETTINGCHANGE.
+                [Environment]::SetEnvironmentVariable('GRAPHERSAL_MEMORY_PATH_REFRESH', '1', 'User')
+                [Environment]::SetEnvironmentVariable('GRAPHERSAL_MEMORY_PATH_REFRESH', $null, 'User')
+            }
+        }
+    } catch {
+        Write-Host "Could not add $Dir to your user PATH: $($_.Exception.Message)" -ForegroundColor Yellow
+    } finally {
+        if ($key) { $key.Close() }
+    }
+    if ($inUserPath -and -not (Test-InPath $env:Path)) {
+        $env:Path = $env:Path.TrimEnd(';') + ';' + $Dir
+    }
+    if (-not (Test-InPath $env:Path)) {
         Write-Host ''
         Write-Host "$Dir is not on your PATH. To add it for your user (new terminals see it):"
-        Write-Host "  [Environment]::SetEnvironmentVariable('Path', `"$Dir;`" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')"
+        Write-Host "  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + `";$Dir`", 'User')"
         $program = "& '$target'"
     }
     Write-Host ''
@@ -146,9 +181,9 @@ function Install-GraphersalMemory([string]$Version, [string]$Dir, [string]$BaseU
         Write-Host "  $program daemon restart"
         Write-Host "  $program install --refresh"
     } else {
-        Write-Host 'Next step: connect it to your agents (Claude Code, opencode, Codex, Cursor, CodeWhale) with'
+        Write-Host 'Next step: connect it to your agents (Claude Code, opencode, Codex, Cursor, CodeWhale, DeepSeek Harness) with'
         Write-Host "  $program install"
     }
 }
 
-Install-GraphersalMemory -Version $Version -Dir $Dir -BaseUrl $BaseUrl
+Install-GraphersalMemory -Version $Version -Dir $Dir -BaseUrl $BaseUrl -NoPathUpdate $NoPathUpdate.IsPresent

@@ -688,7 +688,11 @@ CI (`.github/workflows/ci.yml`) runs the same three checks on Linux, macOS and W
   5.1 and 7): find the archive and its checksum in the release's `SHA256SUMS`, verify, install into
   `~/.local/bin` / `%LOCALAPPDATA%\Programs\graphersal-memory` (`--dir`/`-Dir`), print the next
   step. `--version`/`-Version`, `--base-url`/`-BaseUrl` (tests, mirrors) and the matching
-  `GRAPHERSAL_MEMORY_*` environment variables. They change nothing but the binary.
+  `GRAPHERSAL_MEMORY_*` environment variables. They change nothing but the binary, except that
+  `install.ps1` adds its directory to the user `PATH` (`HKCU\Environment`, read and written
+  unexpanded with its value kind) and the session's; `-NoPathUpdate` /
+  `GRAPHERSAL_MEMORY_NO_PATH_UPDATE=1` skips it (the release workflow's Windows installer tests
+  check both).
 - The crate is published to crates.io (`cargo install --locked graphersal-memory`); `cargo
   install --git` works too. The one-liners download from the latest published (non-draft)
   GitHub Release.

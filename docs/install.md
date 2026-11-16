@@ -13,7 +13,14 @@ archive per platform, `graphersal-memory-v<version>-<platform>.tar.gz` (Windows:
 
 The installers find the archive of your platform in `SHA256SUMS`, download it, refuse it when the
 checksum does not match, and put the binary into `~/.local/bin` (Windows:
-`%LOCALAPPDATA%\Programs\graphersal-memory`). They change nothing else, not even `PATH`.
+`%LOCALAPPDATA%\Programs\graphersal-memory`). `install.ps1` adds that directory to your user
+`PATH` (the registry's `HKCU\Environment`, its other entries kept as they are, unexpanded
+references included) and to the current window's, so `graphersal-memory` runs in that window
+and in every new one; `-NoPathUpdate` (or `GRAPHERSAL_MEMORY_NO_PATH_UPDATE=1`) leaves `PATH`
+alone. `install.sh` does not change your `PATH` and tells you when the directory is missing
+from it. They change nothing else. `uninstall` keeps the binary and its `PATH` entry; to remove
+the binary on Windows, delete the directory and its entry in your user `PATH` (Settings, "Edit
+environment variables for your account").
 
 ```sh
 curl -fsSL https://github.com/graphersal/graphersal-memory/releases/latest/download/install.sh | sh
@@ -28,7 +35,7 @@ irm https://github.com/graphersal/graphersal-memory/releases/latest/download/ins
 ```
 
 The same options can be set as environment variables (`GRAPHERSAL_MEMORY_VERSION`,
-`GRAPHERSAL_MEMORY_INSTALL_DIR`); `--help` lists them. A shell under Rosetta 2 on Apple silicon
+`GRAPHERSAL_MEMORY_INSTALL_DIR`, on Windows also `GRAPHERSAL_MEMORY_NO_PATH_UPDATE`); `--help` lists them. A shell under Rosetta 2 on Apple silicon
 gets the native arm64 build.
 
 Rather check first? Download the archive and `SHA256SUMS` from the release, compare the checksum,

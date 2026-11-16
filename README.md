@@ -80,8 +80,10 @@ or, from 0.3.0 on, the release's build without building: `cargo binstall grapher
 The installers download the archive for your platform from the latest
 [GitHub Release](https://github.com/graphersal/graphersal-memory/releases), verify it against the
 release's `SHA256SUMS`, and put the binary into `~/.local/bin` (Windows:
-`%LOCALAPPDATA%\Programs\graphersal-memory`). They change nothing else, not even your `PATH`; they
-tell you when the directory is missing from it. Installer options, a manual download and the build
+`%LOCALAPPDATA%\Programs\graphersal-memory`). On Windows the installer also adds that directory to
+your user `PATH` and to the current window's (`-NoPathUpdate` leaves it alone); `install.sh`
+does not change your `PATH` and tells you when the directory is missing from it. They change
+nothing else. Installer options, a manual download and the build
 provenance: [docs/install.md](docs/install.md#the-binary).
 
 Then connect it to your agents, once:
