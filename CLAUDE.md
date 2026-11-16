@@ -484,7 +484,8 @@ Unit tests that need more than one module's helpers sit beside their module as
     profile's `version` (the header shows it); `model.js` the pure logic, tested by
     `node --test crates/graphersal-memory/ui/tests/*.test.mjs`; `topbar.js` the profile's
     `header` module (the engine's top-bar slot: the Project select, daemon state, setup-problems
-    warning; `ui/tests/topbar.test.mjs`); `shared.js` the shared selection, a tab's note header,
+    warning and update notice, each opening the Overview scrolled to its section,
+    `shared.js` `openOverviewAt`; `ui/tests/topbar.test.mjs`); `shared.js` the shared selection, a tab's note header,
     calls per selection ("All projects" = once per project + global once), the memory form with
     the "changed meanwhile" check and the nearest check; one module per tab);
   - `src/runtime/protocol.rs`: the shim <-> daemon handshake and control lines, refusal codes, version

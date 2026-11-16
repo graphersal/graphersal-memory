@@ -2,12 +2,14 @@
 // for every tab, in the page's top bar instead of inside each tab. The Project select (All
 // projects, Global, each project) sets the shared selection (shared.js `state.selection`, kept in
 // localStorage), which every tab watches; the daemon's state; the setup problems as a warning
-// that opens the Overview (which lists them). Texts other than the select hide on narrow screens
+// that opens the Overview at its Health section (which lists them); a newer release's notice
+// opens it at the upgrade section (shared.js `openOverviewAt`: scrolled to and highlighted, also
+// when the Overview is the open tab already). Texts other than the select hide on narrow screens
 // (the playground's `hide-narrow`), so the bar never overflows.
 
 import { computed } from 'vue';
 import * as model from './model.js';
-import { state, init, select } from './shared.js';
+import { state, init, select, openOverviewAt } from './shared.js';
 
 export default {
   props: { api: { type: Object, required: true } },
@@ -19,16 +21,16 @@ export default {
       model,
       problems,
       choose: select,
-      openOverview: () => props.api.navigate('overview'),
+      openOverview: (section) => openOverviewAt(props.api, section),
     };
   },
   template: `
   <div class="mem-topbar">
     <span v-if="state.statusError" class="mem-error mem-topbar-error" role="alert" :title="state.statusError">✗<span class="hide-narrow"> {{ state.statusError }}</span></span>
     <button v-if="problems.length" type="button" class="mem-problems mem-topbar-problems" :title="problems.join('\\n') + '\\n\\nClick: the Overview lists them.'"
-            @click="openOverview">⚠ {{ model.problemsText(problems.length) }}</button>
+            @click="openOverview('health')">⚠ {{ model.problemsText(problems.length) }}</button>
     <button v-if="model.updateText(state.update)" type="button" class="mem-topbar-update" :title="'You have ' + state.update.current + '. Click: how to upgrade.'"
-            @click="openOverview">⬆ <span class="hide-narrow">{{ model.updateText(state.update) }}</span><span class="show-narrow">{{ state.update.latest }}</span></button>
+            @click="openOverview('update')">⬆ <span class="hide-narrow">{{ model.updateText(state.update) }}</span><span class="show-narrow">{{ state.update.latest }}</span></button>
     <span class="mem-daemon hide-narrow" :class="{bad: !state.status || !state.status.daemon}">{{ model.daemonText(state.status) }}</span>
     <label class="mem-switch">
       <span class="muted hide-narrow">Project</span>

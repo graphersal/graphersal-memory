@@ -21,7 +21,18 @@ export const state = reactive({
   update: null,
   /** Bumped after every write: tabs reload what they show. */
   version: 0,
+  /** A section of the Overview to scroll to (`model.OVERVIEW_SECTIONS`), set by the top bar's
+   * notices; the Overview takes it when it shows (also when it is the open tab already). */
+  reveal: '',
 });
+
+/** Opens the Overview at `section` (a key of `model.OVERVIEW_SECTIONS`). The section is set
+ * after the navigation, so an Overview that is already open still sees a change. */
+export function openOverviewAt(api, section) {
+  state.reveal = '';
+  api.navigate('overview');
+  setTimeout(() => { state.reveal = section; }, 0);
+}
 
 let loading = null;
 
