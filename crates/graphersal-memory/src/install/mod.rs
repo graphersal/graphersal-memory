@@ -3073,6 +3073,14 @@ pub fn install(
     } else if !answers.summaries {
         crate::commands::write_summaries(setup, false, None)?;
         report.push("summaries: off (raw turns are still indexed)".to_string());
+    } else if let Some(paused) = crate::memory::summaries::Paused::load(&setup.data_dir) {
+        // Kept on: a pause after a failed run ends, so the next session tries once more.
+        crate::memory::summaries::Paused::clear(&setup.data_dir)?;
+        report.push(format!(
+            "summaries: resumed (paused after a failed run of `{}`; if it fails again they \
+             pause again and `graphersal-memory status` shows why)",
+            paused.command
+        ));
     }
 
     // A running daemon follows the new settings now (the embedding model); else at its start.
@@ -4832,8 +4840,20 @@ pub fn shared_doctor(setup: &Setup) -> Vec<Finding> {
             .first()
             .cloned()
             .unwrap_or_default();
+        let paused = crate::memory::summaries::Paused::load(&setup.data_dir);
         if !config.summaries.enabled {
             findings.push(ok("summaries: off (raw turns are indexed)"));
+        } else if let Some(paused) = paused {
+            // The error's lines under the finding, aligned with its fix.
+            let mut text = paused.headline();
+            for line in paused.error.lines() {
+                text.push_str(&format!("\n          {line}"));
+            }
+            findings.push(problem(
+                text,
+                "fix the command (run it by hand to see), then `graphersal-memory summaries \
+                 enable` resumes them; `graphersal-memory summaries disable` turns them off",
+            ));
         } else if program_found(&program) {
             findings.push(ok(format!("summaries: on, through {program}")));
         } else {

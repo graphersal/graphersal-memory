@@ -658,6 +658,8 @@ impl Daemon {
         {
             log(&format!("cannot remove {}: {err}", self.socket.display()));
         }
+        // A summary's harness run ends with the daemon (with its children), not after it.
+        crate::harnesses::headless::stop_all(Duration::from_secs(10));
         let stores: Vec<Arc<StoreRuntime>> = self
             .stores
             .lock()

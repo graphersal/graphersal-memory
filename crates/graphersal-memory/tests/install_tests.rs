@@ -325,18 +325,22 @@ fn install_import_status_doctor_hook_uninstall_and_purge() {
 
     // Undo the test's own edit of a memory file (install never changes them).
     std::fs::write(&release_day, original).unwrap();
+    let pid = env.control("status").unwrap()["pid"].as_u64().unwrap();
     let removed = env.run(&["uninstall", "--yes", "--no-export"]);
     assert!(removed.status.success(), "{}", text(&removed));
     assert_eq!(env.home_snapshot(), before, "{}", text(&removed));
     assert!(env.data_dir().join("stores").exists(), "memories stay");
+    // Nothing of ours is left in any harness: the daemon is stopped and gone.
+    assert!(
+        text(&removed).contains(&format!("daemon: stopped (pid {pid})")),
+        "{}",
+        text(&removed)
+    );
+    assert!(env.control("status").is_none());
+    assert!(!support::alive(pid));
 
     let purged = env.run(&["uninstall", "--purge", "--yes"]);
     assert!(purged.status.success(), "{}", text(&purged));
-    assert!(
-        text(&purged).contains("stopped the daemon"),
-        "{}",
-        text(&purged)
-    );
     assert!(!env.data_dir().exists());
     assert!(env.control("status").is_none());
 }

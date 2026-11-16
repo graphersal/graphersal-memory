@@ -946,6 +946,10 @@ pub fn run(
                     break;
                 }
                 Err(Refused::Failed(err)) => report.problems.push(err),
+                Err(Refused::Paused(err)) => {
+                    report.problems.push(err);
+                    break;
+                }
             }
             if let Err(err) = state.save(data_dir) {
                 report.problems.push(err);
@@ -1108,6 +1112,16 @@ fn summarize_one(
             slot["attempts"] = json!(attempts + 1);
             return Err(Refused::Failed(format!(
                 "{}: the summary failed: {err}",
+                file.display()
+            )));
+        }
+        Err(Refused::Paused(err)) => {
+            let slot = state.entry_mut(file);
+            slot["attempted"] = json!(fingerprint);
+            slot["attempts"] = json!(attempts + 1);
+            return Err(Refused::Paused(format!(
+                "{}: the summary failed, so the summaries are paused until you resume them \
+                 (`graphersal-memory status` shows why): {err}",
                 file.display()
             )));
         }
@@ -1936,6 +1950,88 @@ mod tests {
         let zero = with_summaries(&request(&projects), data.path(), &mut store);
         assert!(zero.budget_reached);
         assert_eq!(calls(&log), 1);
+    }
+
+    /// A fake `claude` that fails as a logged-out one does: an error answer, exit code 1, a
+    /// line on stderr; it records its calls like [`fake_harness`].
+    #[cfg(unix)]
+    fn failing_harness(dir: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = dir.join("calls.log");
+        let answer = json!({"type": "result", "subtype": "success", "is_error": true,
+            "result": "Invalid API key · Please run /login"});
+        let script = bin.join("claude");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'CALL %s\\n' \"$*\" >> '{log}'\ncat > /dev/null\necho 'auth: not logged in' >&2\ncat <<'JSON'\n{answer}\nJSON\nexit 1\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (script, log)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_harness_is_called_once_and_pauses_the_summaries_until_resumed() {
+        let tmp = crate::runtime::mcp_tests::TempDir::new("sum-fail");
+        let data = crate::runtime::mcp_tests::TempDir::new("sum-fail-data");
+        let (projects, _, file) = setup(tmp.path());
+        lengthen(&file);
+        for name in ["def.jsonl", "ghi.jsonl"] {
+            std::fs::copy(&file, file.with_file_name(name)).unwrap();
+        }
+        let (harness, log) = failing_harness(tmp.path());
+        summaries_config(data.path(), true, &harness, 100.0);
+        let mut store = Direct::new();
+        let report = with_summaries(&request(&projects), data.path(), &mut store);
+        assert_eq!(report.indexed, 3, "raw turns are indexed anyway");
+        assert_eq!(report.summarized, 0);
+        assert_eq!(
+            calls(&log),
+            1,
+            "one failure stops the run: {:?}",
+            report.problems
+        );
+        // The pause keeps the harness's own words.
+        let paused = summaries::Paused::load(data.path()).unwrap();
+        assert!(paused.command.contains("claude"), "{paused:?}");
+        for part in [
+            "Invalid API key · Please run /login",
+            "exit code: 1",
+            "auth: not logged in",
+        ] {
+            assert!(paused.error.contains(part), "{part}: {}", paused.error);
+        }
+        assert!(
+            report.problems.iter().any(|p| p.contains("paused")),
+            "{:?}",
+            report.problems
+        );
+        // Later runs (every session start and end asks for one) call nothing.
+        let (none, why) = Summarizer::new(data.path());
+        assert!(none.is_none());
+        assert!(why.unwrap().contains("paused"));
+        run(
+            &request(&projects),
+            data.path(),
+            &mut store,
+            None,
+            &mut |_| {},
+            &|| false,
+        );
+        assert_eq!(calls(&log), 1);
+        // Resumed (what `summaries enable` and `install` do): the next run tries again, once.
+        summaries::Paused::clear(data.path()).unwrap();
+        assert!(summaries::Paused::load(data.path()).is_none());
+        std::fs::remove_file(State::path(data.path())).unwrap();
+        with_summaries(&request(&projects), data.path(), &mut store);
+        assert_eq!(calls(&log), 2);
+        assert!(summaries::Paused::load(data.path()).is_some());
     }
 
     #[cfg(unix)]

@@ -226,7 +226,8 @@ Unit tests that need more than one module's helpers sit beside their module as
     auto-memory switch (`autoMemoryEnabled`, its previous value recorded in the settings file's
     state entry, restored by uninstall), the rule block per language (`RULE_BLOCK`,
     `RULE_BLOCK_ANY`, `PREVIOUS_BLOCK_FINGERPRINTS`), `uninstall_with` (export first, then the
-    removal), Claude Code's paths (`ClaudePaths`: `~/.claude.json`, `~/.claude/` or
+    removal; `commands` then stops the daemon when no harness has our parts any more,
+    `stop_after_uninstall`), Claude Code's paths (`ClaudePaths`: `~/.claude.json`, `~/.claude/` or
     `$CLAUDE_CONFIG_DIR`), the plan and apply of `install` (MCP members, hook groups, the managed
     rule block `RULE_BLOCK` with its fingerprinted begin line), the state and backups in
     `<data dir>/install/`, `uninstall` (restore an untouched file from its backup, else remove our
@@ -382,11 +383,19 @@ Unit tests that need more than one module's helpers sit beside their module as
     --strict-mcp-config --no-session-persistence`), `run_harness_with` (prompt on stdin, timeout; an `opencode` command in its sandbox with
     `--format json`,
     `GRAPHERSAL_MEMORY_HOOK=off`), `parse_answer`, `Spend` (`<data dir>/sessions/spend.json`),
-    `Summarizer` (exists only when enabled; budget check before each call), `facts`, `render`;
+    `Summarizer` (exists only when enabled and not paused; budget check before each call),
+    `Paused` (`<data dir>/sessions/summaries-paused.json`: the first failed harness run pauses
+    the summaries with the command, exit code and the harness's output; the indexer stops its
+    summarize phase, later runs send nothing; `status` (ACTION NEEDED), `doctor` and `summaries
+    status` show it; `write_summaries` (`summaries enable|disable`) and `install` with summaries
+    on clear it; a run ended by the daemon's stop does not pause), `facts`, `render`;
   - `src/harnesses/headless.rs`: running the user's harness: the `Headless` trait (a harness command
     recognised, its default, free note, summaries sandbox `summaries_run` (`UserEnv`: the
     user's environment, from which a harness finds what its sandbox copies; `Prepared`), answer, bench arguments, answer and refusal; `ClaudeHeadless`, the others'
-    `HeadlessRun` in their modules), `headless_of(command)`, `costs_nothing`, `program_path` (Windows: a bare name such as
+    `HeadlessRun` in their modules), `headless_of(command)`, `costs_nothing`, `without_window` (Windows: `CREATE_NO_WINDOW` for every program
+    the windowless daemon starts: the harness, `git`, `taskkill`), `stop_all`/`stopping` (the
+    daemon's shutdown ends its running harness runs with their children, refuses new ones),
+    `program_path` (Windows: a bare name such as
     `claude` resolved through `PATH`/`PATHEXT`, so npm's `claude.cmd` is found; std runs a
     `.cmd` through `cmd.exe` with safe quoting, so keep line breaks out of arguments) and `run`
     (stdin prompt, timeout, output);
