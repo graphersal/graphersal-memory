@@ -1146,8 +1146,16 @@ impl Daemon {
                 return;
             }
         };
-        let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
-        let mut reader = BufReader::new(stream);
+        // Every read through `Patient`: the handshake (and a relayed body) within
+        // `HANDSHAKE_TIMEOUT`, the MCP stream without a limit; on macOS neither waits on the
+        // kernel's wake-up alone (`ipc::Patient`).
+        let mut reader = match ipc::Patient::new(stream, Some(HANDSHAKE_TIMEOUT)) {
+            Ok(patient) => BufReader::new(patient),
+            Err(err) => {
+                log(&format!("cannot use a connection: {err}"));
+                return;
+            }
+        };
         let mut line = Vec::new();
         let limit = u64::try_from(protocol::MAX_HANDSHAKE_BYTES).unwrap_or(u64::MAX) + 1;
         if let Err(err) = (&mut reader).take(limit).read_until(b'\n', &mut line) {
@@ -1286,7 +1294,7 @@ impl Daemon {
             json!({"ok": true, "daemon_version": self.options.version, "store": store.name()})
                 .to_string(),
         );
-        let _ = reader.get_ref().set_read_timeout(None);
+        reader.get_mut().set_limit(None);
         let profile = match handshake.profile {
             crate::cli::Profile::Use => "use",
             crate::cli::Profile::Develop => "develop",
@@ -1333,7 +1341,12 @@ impl Daemon {
         if handshake.profile == crate::cli::Profile::Use
             && let Some(kind) = crate::harnesses::agent::Kind::from_id(&handshake.harness)
         {
-            self.end_sessions_with_connection(kind, &handshake.project, opened);
+            self.end_sessions_with_connection(
+                kind,
+                &handshake.project,
+                opened,
+                handshake.sessions.as_deref(),
+            );
         }
     }
 
@@ -1342,21 +1355,28 @@ impl Daemon {
     /// and kills them when it exits, before our shim can send the session end, seen live with
     /// v0.10.2), opened at `opened` (seconds) for the project at `root`: the daemon queues the
     /// indexing itself, with that project's sessions written since then marked ended. Where
-    /// the sessions are comes from this process's environment.
+    /// the sessions are comes from the handshake (`sessions`: the shim resolved it from the
+    /// environment the harness gave it, such as dsh's `DSH_HOME` in our row's `env`), else from
+    /// this process's environment.
     fn end_sessions_with_connection(
         self: &Arc<Self>,
         kind: crate::harnesses::agent::Kind,
         root: &str,
         opened: u64,
+        sessions: Option<&str>,
     ) {
         if root.is_empty() {
             return;
         }
         let reader = crate::harnesses::sessions(kind);
         let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-        let Some(dir) = reader.ended_by_connection(&env) else {
+        let Some(own) = reader.ended_by_connection(&env) else {
             return;
         };
+        let dir = sessions
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .unwrap_or(own);
         let mut request = sessions::Request::for_harness(kind, &dir);
         request
             .ended
@@ -1378,7 +1398,7 @@ impl Daemon {
     fn relay(
         &self,
         frame: &crate::ui::relay::Frame,
-        reader: &mut BufReader<Stream>,
+        reader: &mut BufReader<ipc::Patient>,
     ) -> Result<RelayAnswer, (Refusal, String)> {
         let body = crate::ui::relay::read_body(reader, frame.body_length)
             .map_err(|err| (Refusal::BadHandshake, err))?;

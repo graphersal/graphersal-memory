@@ -342,8 +342,9 @@ impl Harness for Codex {
         Some(self)
     }
 
-    fn export_hint(&self) -> &'static str {
+    fn export_hint(&self) -> String {
         "to give the agent a file, paste it into ~/.codex/AGENTS.md or a project's AGENTS.md"
+            .to_string()
     }
 
     #[cfg(test)]

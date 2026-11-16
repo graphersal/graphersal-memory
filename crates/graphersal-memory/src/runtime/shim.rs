@@ -411,6 +411,9 @@ pub struct ShimOptions {
     pub harness: String,
     /// Whether the instructions carry the start context.
     pub start_context: protocol::StartContextMode,
+    /// Where the harness keeps the sessions this connection's end ends, from this process's
+    /// environment (`protocol::Handshake::sessions`).
+    pub sessions: Option<String>,
 }
 
 /// Connects (starting the daemon if needed) and hands over: the connection, ready for MCP
@@ -439,6 +442,7 @@ pub fn open_with(options: &ShimOptions, start: bool) -> Result<Opened, String> {
             .display()
             .to_string(),
         options.start_context,
+        options.sessions.as_deref(),
     );
     let mut attempt = 0;
     loop {

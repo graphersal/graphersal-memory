@@ -247,7 +247,7 @@ pub fn of_project(db: &Path, directory: &Path) -> Result<Vec<(String, u64)>, Str
 }
 
 /// Milliseconds since the epoch as an RFC 3339 UTC timestamp (empty for 0).
-fn timestamp(ms: i64) -> String {
+pub(crate) fn timestamp(ms: i64) -> String {
     if ms <= 0 {
         return String::new();
     }

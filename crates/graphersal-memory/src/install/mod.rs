@@ -44,6 +44,7 @@ pub mod prompt;
 pub mod tomledit;
 pub mod update;
 pub mod winshell;
+pub mod yamledit;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -3574,10 +3575,17 @@ fn refuse_without_programs(setup: &Setup, out: &mut dyn Write, color: bool) -> u
             "graphersal-memory install: no agent program found"
         )
     );
+    let programs: Vec<&str> = Kind::ALL.iter().map(|kind| kind.program_name()).collect();
+    let programs = match programs.split_last() {
+        Some((last, [])) => (*last).to_string(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    };
     let _ = writeln!(
         out,
-        "  looked for: claude, opencode, codex and cursor on PATH, and in ~/.local/bin/claude, \
-         ~/.claude/local/claude, ~/.opencode/bin/opencode and Cursor's app"
+        "  looked for: {programs} on PATH, and in the harnesses' own install locations \
+         (~/.local/bin/claude, ~/.claude/local/claude, ~/.opencode/bin/opencode, Cursor's app, \
+         dsh's npm (Windows) and Desktop locations)"
     );
     for (kind, path) in setup.leftovers() {
         let _ = writeln!(

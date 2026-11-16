@@ -198,18 +198,15 @@ impl Harness for Process {
             None => call.args.clone(),
         };
         match crate::harnesses::headless::run(&args, &call.input, &call.cwd, &env, CALL_TIMEOUT) {
-            Ok(output)
-                if let Some(answer) =
-                    headless.and_then(|headless| headless.bench_answer(&output, &call.args)) =>
-            {
-                answer
-            }
-            Ok(output) => json_in(&output.stdout).unwrap_or_else(|| {
-                json!({"is_error": true, "result": format!(
+            Ok(output) => headless
+                .and_then(|headless| headless.bench_answer(&output, &call.args))
+                .or_else(|| json_in(&output.stdout))
+                .unwrap_or_else(|| {
+                    json!({"is_error": true, "result": format!(
                     "the harness answered no JSON (exit {}): {}",
                     output.code.map_or_else(|| "signal".to_string(), |c| c.to_string()),
                     crate::memory::transcript::clip(output.stderr.trim(), 300))})
-            }),
+                }),
             Err(err) => json!({"is_error": true, "result": err}),
         }
     }

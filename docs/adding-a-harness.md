@@ -1,10 +1,10 @@
 # Adding a harness
 
-A harness (Claude Code, opencode, Codex, Cursor, CodeWhale) is compiled in: one module that
-implements the `Harness` trait, one variant of `Kind`, and its lines in the registry. Nothing
-else in the code names a harness; everything shared (install, uninstall, status, doctor, the
-wizard, other memory, sessions, hooks, summaries, the bench refusal, export, the command line)
-asks the trait. This page is the checklist.
+A harness (Claude Code, opencode, Codex, Cursor, CodeWhale, DeepSeek Harness) is compiled in:
+one module that implements the `Harness` trait, one variant of `Kind`, and its lines in the
+registry. Nothing else in the code names a harness; everything shared (install, uninstall,
+status, doctor, the wizard, other memory, sessions, hooks, summaries, the bench refusal, export,
+the command line) asks the trait. This page is the checklist.
 
 ## 1. Verify first
 

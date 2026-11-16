@@ -80,7 +80,12 @@ pub(crate) fn with_programs(mut setup: Setup, names: &[&str]) -> Setup {
     let bin = setup.run_dir.with_extension("bin");
     std::fs::create_dir_all(&bin).unwrap();
     for name in names {
-        std::fs::write(bin.join(name), "").unwrap();
+        // A harness that tells its program from others of the name gets one it accepts.
+        let text = Kind::ALL
+            .into_iter()
+            .find(|kind| kind.program_name() == *name)
+            .map_or("", |kind| setup.agent_of(kind).fake_program());
+        std::fs::write(bin.join(name), text).unwrap();
     }
     setup.search_path = Some(bin.into_os_string());
     setup
@@ -3741,7 +3746,7 @@ fn install_refuses_when_no_agent_program_is_found() {
             "{out}"
         );
         assert!(
-            out.contains("looked for: claude, opencode, codex and cursor on PATH"),
+            out.contains("looked for: claude, opencode, codex, cursor, codewhale and dsh on PATH"),
             "{out}"
         );
         assert!(

@@ -1595,12 +1595,19 @@ fn shim_options(
 ) -> Result<ShimOptions, String> {
     let harness = shim::harness_name(&|name| std::env::var(name).ok()).to_string();
     let hook_installed = start_hook_installed(cli, &harness);
+    // Where the harness's sessions are, from this process's environment, which the harness set
+    // up (the daemon may have been started by another process without it).
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let sessions = crate::harnesses::agent::Kind::from_id(&harness)
+        .and_then(|kind| crate::harnesses::sessions(kind).ended_by_connection(&env))
+        .map(|dir| dir.display().to_string());
     Ok(ShimOptions {
         location: location(cli)?,
         profile,
         project: project(project_flag)?,
         start_context: start_context_mode(&harness, hook_installed),
         harness,
+        sessions,
     })
 }
 
@@ -1608,7 +1615,8 @@ fn shim_options(
 /// with our SessionStart hook (the hook delivers it as `additionalContext`, so it is not sent
 /// twice), cut to Claude Code's instruction limit for Claude Code without the hook and for
 /// CodeWhale (whose limit is the same number of bytes: text beyond ASCII may still be cut by
-/// CodeWhale), whole for every other harness (opencode, Codex, Cursor, Claude Desktop: their
+/// CodeWhale) and DeepSeek Harness (which rejects instructions over 32768 bytes), whole for
+/// every other harness (opencode, Codex, Cursor, Claude Desktop: their
 /// hooks print only the short start line, or there is none).
 pub fn start_context_mode(harness: &str, hook_installed: bool) -> protocol::StartContextMode {
     match crate::harnesses::agent::Kind::from_id(harness) {

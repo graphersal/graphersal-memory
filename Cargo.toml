@@ -51,11 +51,22 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # Reading only: install edits the file as text (our managed tables and one value), so every
 # other byte of the user's file is kept. No `display` (no TOML is written through it).
 toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
+# Reading DeepSeek Harness's `cordis.patch.yml` (a YAML sequence of patch operations): the
+# event parser only (no serializer, no DOM), so `install::yamledit` builds the document itself
+# and does what dsh's js-yaml does: duplicate keys and unknown tags are errors, `!!js` scalars
+# are kept as tagged values. Reading only: install edits the file as text. Pure Rust, YAML 1.2,
+# two small dependencies; the maintained successor of yaml-rust/yaml-rust2.
+saphyr-parser = "0.3"
 # The loopback HTTP server of `graphersal-memory ui` (the browser UI): synchronous, no async
 # runtime, no TLS (127.0.0.1 only); the same crate and version Graphersal's own dev server
 # (graphersal-cli) uses, so the engine's HTTP boundary types are converted the way they are
 # tested there. graphersal-serve itself has no HTTP library on purpose.
 tiny_http = "0.12"
+# Reading DeepSeek Harness's sessions: dsh keeps each session as `session.v4.jsonl.zstd`, a
+# concatenation of zstd frames whose last one can be torn mid-write. A pure-Rust decoder (no C
+# library, no build script), read frame by frame so a torn last frame stops the read cleanly;
+# its encoder builds the tests' fixtures offline. MSRV 1.87, below ours.
+ruzstd = "0.9"
 
 [profile.release]
 # One codegen unit, as the engine's own release builds use.

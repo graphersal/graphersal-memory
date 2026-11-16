@@ -42,6 +42,44 @@ graphersal-memory is designed so that nothing leaves your machine unless you ask
 - **No API keys of ours, and no service of ours.** Summaries never run through an API key that
   graphersal-memory holds, and there is no graphersal-memory cloud.
 
+## DeepSeek Harness (`dsh`)
+
+What a harness does with what our tools return is the harness's business, but one default of
+DeepSeek Harness (a preview harness of graphersal-memory) matters here. As of its source at tag
+dsh-v0.2.2-rc.3 (commit 38a6a5c; not checked live):
+
+- **dsh's session log upload is on by default.** Its `session-log-deepseek` row is part of every
+  shipped profile, with `enabled: true`. With requests to the **official DeepSeek API** it sends
+  the session log since the last accepted point (the session's events, tool results included, up
+  to 8 MiB per request) in a `dsh_session_log` field
+  (`packages/session/session-log-deepseek/src/index.ts`, its README "Request field"). The
+  results of our memory tools are tool results, so **the memories an agent reads or writes
+  through dsh go to DeepSeek this way**. (Like any MCP server's instructions, the start context
+  is model input in every harness anyway.)
+- **graphersal-memory never changes it.** Install does not touch the row; `status` and `doctor`
+  note when the home layer does not switch it off: "on" when no layer does, "off in profile(s)
+  ... only; on in the others" when only profile layers do. Both are notes, never problems.
+- **To switch it off in every profile**, add to the home layer `~/.dsh/cordis.patch.yml` (or
+  `$DSH_HOME/cordis.patch.yml`; `doctor` names the file of your setup), outside
+  graphersal-memory's marked block:
+
+  ```yaml
+  - id: session-log-deepseek
+    config:
+      enabled: false
+  ```
+
+  (`disabled: true` in place of `config` switches the whole row off). Every profile reads the
+  home layer, and it outranks the profile layers. The switch "Upload Session Log when using the
+  official model API" in dsh's web Settings (General) is not enough on its own: it writes only
+  that profile's layer (`~/.dsh/profiles/<name>/cordis.patch.yml`), so the CLI, headless and
+  every other profile keep uploading. Row ids change between dsh versions, so check after an
+  upgrade that `status` still reports it off.
+- **dsh's own telemetry** (OpenTelemetry) runs in the mode `FEEDBACK_ONLY` by default: it sends
+  only after you give feedback explicitly. Any non-empty `DSH_TELEMETRY_DISABLED` switches it
+  off (`packages/bundle/base/cordis.patch.yml`, `packages/boot/app-boot/src/profile-context.ts`).
+  graphersal-memory does not change that either.
+
 ## Summaries: consent, cost estimate, budget cap
 
 Summaries make past sessions much more useful: decisions with their why, corrections, outcomes and

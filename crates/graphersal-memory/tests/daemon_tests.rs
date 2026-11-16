@@ -1049,6 +1049,15 @@ fn signal(pid: u64, name: &str) {
 }
 
 /// The daemon's pid, waiting until one answers that is not `old`.
+/// The new daemon after the daemon `old` died: the open shim saw its connection end and
+/// started one. A request sent before that may still go to the dead connection and get the
+/// documented "restarted, retry" answer (`a_request_in_flight_at_the_restart_gets_an_error_answer`),
+/// so a test that expects the new daemon's answer waits here first.
+fn after_the_kill(env: &Env, old: u64) -> u64 {
+    env.wait_for("the kill", || !alive(old));
+    new_daemon(env, old)
+}
+
 fn new_daemon(env: &Env, old: u64) -> u64 {
     let mut pid = None;
     env.wait_for("a new daemon", || {
@@ -1068,13 +1077,12 @@ fn a_daemon_restart_keeps_the_open_session() {
     shim.remember("before-restart", "Written before the restart", "project");
     let pid = env.status().unwrap()["pid"].as_u64().unwrap();
     kill(pid);
-    env.wait_for("the kill", || !alive(pid));
-    // The next call goes through a new daemon, without a new initialize from the harness
+    let new = after_the_kill(&env, pid);
+    // The next call goes through the new daemon, without a new initialize from the harness
     // (the shim replays the session's own).
     let read = shim.ok("memory", json!({"slug": "before-restart"}));
     assert!(read.contains("Written before the restart"), "{read}");
     shim.remember("after-restart", "Written after the restart", "project");
-    let new = new_daemon(&env, pid);
     assert!(alive(new));
     // The replayed initialize answered nothing to the harness: the next answer is its own.
     let listed = shim.request("tools/list", json!({}));
@@ -1149,10 +1157,9 @@ fn a_restart_does_not_repeat_the_session_start_and_the_end_reaches_the_new_daemo
     });
     let pid = env.status().unwrap()["pid"].as_u64().unwrap();
     kill(pid);
-    env.wait_for("the kill", || !alive(pid));
+    let new = after_the_kill(&env, pid);
     let listed = shim.request("tools/list", json!({}));
     assert!(listed["result"]["tools"].is_array(), "{listed}");
-    let new = new_daemon(&env, pid);
     // A moment for a start that would run again: none comes.
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(
@@ -1203,8 +1210,10 @@ fn a_daemon_of_another_version_after_the_restart_announces_a_new_tool_list() {
     env.wait_for("the newer daemon", || env.status().is_some());
     let mut shim = env.shim("/w/v");
     assert_eq!(env.status().unwrap()["daemon_version"], "99.0.0");
+    let old = newer.id().into();
     newer.kill().unwrap();
     newer.wait().unwrap();
+    after_the_kill(&env, old);
     // The new daemon is this binary's version: the harness hears that the tools may differ.
     let id = shim.send_request("tools/list", json!({}));
     let deadline = Instant::now() + PATIENCE;

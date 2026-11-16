@@ -1491,3 +1491,210 @@ fn claude_md_is_also_loaded_by_opencode_and_by_a_codex_fallback() {
         .unwrap();
     assert!(mention.loaded_by.contains(&Kind::Codex));
 }
+
+/// A dsh home (`~/.dsh`) with other memory servers in its layers: a row without an `id` in the
+/// home layer, which also switches a profile's row off by an override; in the web profile (as
+/// Settings write it) a memory server of the MCP manager, a memory row with an id and a git
+/// row; in the acp profile a Basic Memory row the home layer switched off.
+fn dsh_machine(home: &Path) -> PathBuf {
+    let dsh = home.join(".dsh");
+    let web = dsh.join("profiles").join("web");
+    let acp = dsh.join("profiles").join("acp");
+    std::fs::create_dir_all(&web).unwrap();
+    std::fs::create_dir_all(&acp).unwrap();
+    std::fs::write(
+        dsh.join("cordis.patch.yml"),
+        "# my home layer\n- insert:\n    - name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        \
+         serverName: kb-memory\n        transport: stdio\n        command: node\n        args: [kb.js]\n\
+         - id: notes-row\n  disabled: true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        web.join("cordis.patch.yml"),
+        "- id: agent-default-model\n  config:\n    provider: deepseek-official\n    model: \
+         deepseek-flash\n- id: mcp-manager\n  config:\n    servers:\n      mem0:\n        \
+         transport: stdio\n        command: uvx\n        args: [mem0-mcp]\n      github:\n        \
+         transport: stdio\n        command: npx\n        args: [-y, github-mcp]\n- insert:\n    \
+         - id: graph-memory\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        \
+         serverName: memory\n        transport: stdio\n        command: npx\n        args: [-y, \
+         '@modelcontextprotocol/server-memory']\n    - id: git-mcp\n      name: \
+         '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: git\n        \
+         transport: stdio\n        command: mcp-git\n",
+    )
+    .unwrap();
+    std::fs::write(
+        acp.join("cordis.patch.yml"),
+        "- insert:\n    - id: notes-row\n      name: '@deepseek-ai/dsh-mcp-client'\n      \
+         config:\n        serverName: notes\n        transport: stdio\n        command: uvx\n        \
+         args: [basic-memory, mcp]\n",
+    )
+    .unwrap();
+    dsh
+}
+
+#[test]
+fn dsh_memory_servers_in_every_layer_are_reported_and_switched_off_only_by_hand() {
+    let home = TempDir::new("co-dsh-home");
+    let data = TempDir::new("co-dsh-data");
+    let dsh = dsh_machine(home.path());
+    let web = dsh.join("profiles").join("web").join("cordis.patch.yml");
+    let before = snapshot(home.path());
+    let web_before = read(&web);
+    let setup = with_programs(bare_setup_in(home.path(), data.path()), &["dsh"]);
+    let found = coexist::detect(&setup, None);
+    let servers: Vec<(&str, &Path, &[String], &ServerState)> = found
+        .servers
+        .iter()
+        .filter(|s| s.harness == Kind::Dsh)
+        .map(|s| (s.name.as_str(), s.file.as_path(), &s.path[..], &s.state))
+        .collect();
+    let rows = ["insert".to_string()];
+    let manager = ["mcp-manager".to_string(), "servers".to_string()];
+    assert_eq!(
+        servers,
+        vec![
+            (
+                "kb-memory",
+                dsh.join("cordis.patch.yml").as_path(),
+                &rows[..],
+                &ServerState::On
+            ),
+            (
+                "notes",
+                dsh.join("profiles")
+                    .join("acp")
+                    .join("cordis.patch.yml")
+                    .as_path(),
+                &rows[..],
+                &ServerState::Off
+            ),
+            ("memory", web.as_path(), &rows[..], &ServerState::On),
+            ("mem0", web.as_path(), &manager[..], &ServerState::On),
+        ],
+        "{:?}",
+        found.servers
+    );
+    // Known tools by their packages; the rest by their names. No built-in memory.
+    let tool = |name: &str| {
+        found
+            .servers
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.tool)
+            .map(|t| t.id)
+    };
+    assert_eq!(tool("memory"), Some("server-memory"));
+    assert_eq!(tool("mem0"), Some("mem0"));
+    assert_eq!(tool("notes"), Some("basic-memory"));
+    assert_eq!(tool("kb-memory"), None);
+    assert!(found.built_in.iter().all(|b| b.harness != Kind::Dsh));
+    // How to switch each off by hand: an override for a row with an id, the row itself
+    // without one, Settings for the manager's.
+    let doctor = doctor_texts(&setup).join("\n");
+    assert!(
+        doctor.contains("add `- id: graph-memory` with `disabled: true` to"),
+        "{doctor}"
+    );
+    assert!(
+        doctor.contains("set `disabled: true` on the row of `serverName: kb-memory`"),
+        "{doctor}"
+    );
+    assert!(
+        doctor.contains("remove the server `mem0` (or switch it off) in dsh's Settings"),
+        "{doctor}"
+    );
+    // Install cannot switch them off in place, so doctor never suggests it.
+    assert!(!doctor.contains("--disable-other"), "{doctor}");
+    assert!(doctor.contains("--other-read-only memory"), "{doctor}");
+    assert!(
+        coexist::doctor_findings(&setup, &found)
+            .iter()
+            .all(|f| !f.problem),
+        "notes, never problems"
+    );
+
+    // Asked to switch them off: none is changed in place, each says how.
+    let memory = Memory::open(data.path());
+    let options = InstallOptions {
+        harnesses: Some(vec![Kind::Dsh]),
+        disable_other: vec!["memory".into(), "mem0".into(), "kb-memory".into()],
+        ..yes()
+    };
+    let (code, out) = run_install(&setup, &memory, options);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("memory (DeepSeek Harness, ")
+            && out.contains("cannot be switched off in place"),
+        "{out}"
+    );
+    assert_eq!(read(&web), web_before);
+    // Our own rows, now in the home layer, are never reported.
+    let after = coexist::detect(&setup, None);
+    assert!(
+        after
+            .servers
+            .iter()
+            .all(|s| !s.name.starts_with("graphersal-memory")),
+        "{:?}",
+        after.servers
+    );
+    assert_eq!(
+        after
+            .servers
+            .iter()
+            .filter(|s| s.harness == Kind::Dsh)
+            .count(),
+        4
+    );
+    let (code, out) = run_uninstall(
+        &setup,
+        install::UninstallOptions {
+            harnesses: Some(vec![Kind::Dsh]),
+            ..uninstall_yes()
+        },
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(snapshot(home.path()), before, "{out}");
+    memory.close();
+}
+
+#[test]
+fn dsh_loads_its_homes_and_the_projects_instruction_files() {
+    let home = TempDir::new("co-dsh-ins-home");
+    let data = TempDir::new("co-dsh-ins-data");
+    let work = TempDir::new("co-dsh-ins-work");
+    let dsh = dsh_machine(home.path());
+    std::fs::write(dsh.join("AGENTS.md"), "Keep memory in MEMORY.md.\n").unwrap();
+    std::fs::create_dir_all(home.path().join(".agents")).unwrap();
+    std::fs::write(home.path().join(".agents").join("AGENTS.md"), "Be brief.\n").unwrap();
+    for name in ["AGENTS.local.md", "CLAUDE.md"] {
+        std::fs::write(work.path().join(name), "Store memories in mem0.\n").unwrap();
+    }
+    let setup = with_programs(bare_setup_in(home.path(), data.path()), &["dsh"]);
+    let files: Vec<(PathBuf, bool)> = coexist::instruction_files(&setup, Some(work.path()))
+        .into_iter()
+        .map(|(file, kinds)| (file, kinds.contains(&Kind::Dsh)))
+        .collect();
+    for file in [
+        dsh.join("AGENTS.md"),
+        home.path().join(".agents").join("AGENTS.md"),
+        work.path().join("CLAUDE.md"),
+        work.path().join("AGENTS.local.md"),
+    ] {
+        assert!(files.contains(&(file.clone(), true)), "{file:?}: {files:?}");
+    }
+    // The user's files first, then the project's.
+    let at = |file: &Path| files.iter().position(|(f, _)| f == file).unwrap();
+    assert!(
+        at(&home.path().join(".agents").join("AGENTS.md")) < at(&work.path().join("CLAUDE.md"))
+    );
+    let found = coexist::detect(&setup, Some(work.path()));
+    assert!(
+        found
+            .mentions
+            .iter()
+            .any(|m| m.file == dsh.join("AGENTS.md") && m.loaded_by.contains(&Kind::Dsh)),
+        "{:?}",
+        found.mentions
+    );
+}

@@ -258,9 +258,10 @@ impl Harness for Cursor {
         Some(self)
     }
 
-    fn export_hint(&self) -> &'static str {
+    fn export_hint(&self) -> String {
         "to give the agent a file, paste it into a project's AGENTS.md or into a rule file \
          under ~/.cursor/rules (a .mdc file with `alwaysApply: true`)"
+            .to_string()
     }
 
     #[cfg(test)]
