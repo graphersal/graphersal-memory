@@ -2,7 +2,7 @@
 // waits for a decision, the indexed sessions, and the health of the daemon and the agents'
 // setup (the lines `graphersal-memory status` and `doctor` print). Read-only.
 
-import { ref, watch, onMounted, computed } from 'vue';
+import { ref, watch, onMounted, computed, nextTick } from 'vue';
 import * as model from './model.js';
 import { state, init, Header, forSelection, errorText, refreshStatus, selectionName } from './shared.js';
 import { getStartContext } from './api-ui.js';
@@ -37,6 +37,23 @@ export default {
     }
     onMounted(load);
     watch(() => [state.selection, state.version], load);
+    // The top bar's notices open a section (shared.js openOverviewAt): scroll to it and
+    // highlight it for a moment, then forget the request.
+    async function reveal() {
+      const id = model.revealId(state.reveal);
+      if (!id) return;
+      state.reveal = '';
+      await nextTick();
+      const section = document.getElementById(id);
+      if (!section) return;
+      section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      section.classList.remove('mem-flash');
+      void section.offsetWidth;
+      section.classList.add('mem-flash');
+      setTimeout(() => section.classList.remove('mem-flash'), 1600);
+    }
+    onMounted(reveal);
+    watch(() => state.reveal, reveal);
     const bar = computed(() => model.budgetBar(start.value));
     const problems = computed(() => model.healthProblems(state.status));
     const indexing = computed(() => {
@@ -97,7 +114,7 @@ export default {
       </section>
     </div>
     <p v-else-if="busy" class="muted">Loading…</p>
-    <section v-if="model.updateText(state.update)" class="mem-update" aria-live="polite">
+    <section v-if="model.updateText(state.update)" id="mem-update" class="mem-update" aria-live="polite">
       <h3>{{ model.updateText(state.update) }}</h3>
       <p>You have {{ state.update.current }}. <a v-if="state.update.release_notes" :href="state.update.release_notes" target="_blank" rel="noopener noreferrer">What's new in {{ state.update.latest }}</a></p>
       <p>Upgrade in a terminal (it shows the plan and asks first):</p>
@@ -108,7 +125,7 @@ export default {
       </details>
       <p class="muted">The UI asks GitHub for the latest release at most once a day. To switch that off: {{ state.update.switch_off }}.</p>
     </section>
-    <section class="mem-health">
+    <section id="mem-health" class="mem-health">
       <h3>Health</h3>
       <p>{{ model.daemonText(state.status) }}<span v-if="state.status"> · graphersal-memory {{ state.status.version }}</span><span v-if="api.info && api.info.version" class="muted"> · Graphersal engine {{ api.info.version }}</span></p>
       <ul v-if="problems.length" class="mem-problems-list">

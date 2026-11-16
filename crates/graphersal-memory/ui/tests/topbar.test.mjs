@@ -14,7 +14,7 @@ test('the profile names the top-bar module, and it is a file of the profile that
   const profile = JSON.parse(read('profile.json'));
   assert.deepEqual(profile.header, { module: 'topbar.js' });
   assert.ok(existsSync(new URL(profile.header.module, ui)));
-  assert.ok(read('../src/ui_assets.rs').includes('("topbar.js", include_bytes!("../ui/topbar.js"))'), 'served under /memory-ui/');
+  assert.ok(read('../src/ui/ui_assets.rs').includes('("topbar.js", include_bytes!("../../ui/topbar.js"))'), 'served under /memory-ui/');
 });
 
 test('the Project select is in the top bar only; it sets the shared selection', () => {

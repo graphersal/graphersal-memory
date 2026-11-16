@@ -562,6 +562,14 @@ export function problemsText(count) {
   return `${count} setup ${count === 1 ? 'problem' : 'problems'}`;
 }
 
+/** The Overview's sections the top bar's notices open: the key -> the section's element id. */
+export const OVERVIEW_SECTIONS = { update: 'mem-update', health: 'mem-health' };
+
+/** The element id of an Overview section to reveal, or '' for none or an unknown key. */
+export function revealId(section) {
+  return Object.prototype.hasOwnProperty.call(OVERVIEW_SECTIONS, section) ? OVERVIEW_SECTIONS[section] : '';
+}
+
 /** The top bar's update notice, or '' when there is nothing newer (or the check is off). */
 export function updateText(update) {
   if (!update || update.enabled === false || update.newer !== true || !update.latest) return '';

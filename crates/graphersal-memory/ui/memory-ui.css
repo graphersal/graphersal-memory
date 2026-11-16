@@ -20,6 +20,10 @@
 @media (max-width: 760px) { .mem-topbar-update .show-narrow { display: inline; } }
 .mem-update { border: 1px solid var(--accent, #2f6fde); border-radius: 10px; padding: 12px 16px; margin: 16px 0; }
 .mem-update h3 { margin-top: 0; }
+#mem-update, #mem-health { scroll-margin-top: 72px; }
+.mem-flash { animation: mem-flash 1.6s ease-out; }
+@keyframes mem-flash { 0%, 30% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, #2f6fde) 45%, transparent); } 100% { box-shadow: 0 0 0 4px transparent; } }
+@media (prefers-reduced-motion: reduce) { .mem-flash { animation: none; } }
 .mem-command { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
 .mem-command code { flex: 1; min-width: 0; overflow-x: auto; white-space: pre; padding: 6px 8px; border-radius: 6px; background: var(--surface-2, rgba(127,127,127,.12)); font-size: 12.5px; }
 .mem-topbar-error { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 24em; cursor: help; }
