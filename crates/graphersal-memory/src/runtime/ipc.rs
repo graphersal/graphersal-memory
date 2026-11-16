@@ -83,9 +83,10 @@ pub const READ_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 /// On macOS the read does not wait on the kernel's wake-up alone: macOS 27 (Darwin 27.0.0)
 /// sometimes loses the wake-up of a thread blocked in `recv` on an accepted AF_UNIX stream
 /// socket when the peer shuts its writing side down: the end of the stream is there (a
-/// non-blocking peek answers it), but the blocked read never returns. Seen about once in 1,500
-/// shutdowns, reproduced without this program (a plain socket pair through `listen`/`accept`,
-/// one thread blocked in `recv`, the peer's `shutdown(SHUT_WR)`); a shim whose harness ended
+/// non-blocking peek answers it), but the blocked read never returns. Seen from about once in
+/// 1,500 to once in 24,000 shutdowns, reproduced without this program
+/// (`tools/macos-unix-shutdown-wakeup.py`: a socket pair through `listen`/`accept`, one thread
+/// blocked in `recv`, the peer's `shutdown(SHUT_WR)`); a shim whose harness ended
 /// its session then waited for the daemon forever, and the daemon's connection with it. So
 /// there every read waits at most [`READ_TICK`] in the kernel and then reads again, which finds
 /// the end of the stream at once; a read without data for its `limit` (when there is one) fails

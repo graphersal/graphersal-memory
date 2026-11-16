@@ -30,6 +30,8 @@ Unit tests that need more than one module's helpers sit beside their module as
 `<name>_tests.rs` (`install/install_tests.rs`, `runtime/mcp_tests.rs`, ...).
 
 - `install.sh`, `install.ps1`: the one-line installers attached to every release (see Releases).
+- `tools/macos-unix-shutdown-wakeup.py`: the standalone reproduction of the macOS 27 lost
+  wake-up that `runtime::ipc::Patient` works around (for Apple Feedback; not run by tests or CI).
 - `crates/graphersal-memory/`: the single binary crate (`graphersal-memory`). There is one crate
   until a second binary or a library user appears, with modules per area:
   - `src/main.rs`: the entry point (parse, run, exit code);
