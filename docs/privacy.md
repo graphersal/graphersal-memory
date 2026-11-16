@@ -104,8 +104,9 @@ open threads. They also cost model usage on your account. So:
   resume them. `status`, `doctor` and `summaries status` show the failure with your harness's
   exit code and its own output; fix the command, then `summaries enable` (or `install` with
   summaries on) resumes them. The pause is `sessions/summaries-paused.json` in the data
-  directory. A harness run still going when the daemon stops (`daemon stop`, `uninstall`) is
-  ended with it, without a pause.
+  directory. When the daemon stops (`daemon stop`, `uninstall`) during a summary, it ends the
+  background harness run it started itself for that summary (never your own sessions), without
+  a pause.
 
 Without summaries, raw turns are still indexed locally and searchable.
 
