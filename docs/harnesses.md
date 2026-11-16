@@ -1,10 +1,10 @@
 # Supported harnesses
 
-> graphersal-memory 0.2.1 supports Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI, Cursor and
+> graphersal-memory 0.3.0 supports Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI, Cursor and
 > CodeWhale (Cursor without summaries and `bench`, and checked against its documentation and
 > fixtures only: a live check is pending; CodeWhale, new in 0.2.0, is a **preview**: built from its
 > source (v0.10.2), tested against fixtures and run live once on macOS, details in its section).
-> DeepSeek Harness (`dsh`, new after 0.2.1) is a **preview** too: built from its source (dsh-v0.2.2-rc.3) and
+> DeepSeek Harness (`dsh`, new in 0.3.0) is a **preview** too: built from its source (dsh-v0.2.2-rc.3) and
 > tested against fixtures, not run live yet, without summaries and `bench`.
 > Any of them can be installed at once and share one store and one daemon.
 

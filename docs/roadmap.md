@@ -1,16 +1,16 @@
 # Roadmap
 
-What graphersal-memory 0.2.1 does today, and what we plan next. Planned work is tracked in
+What graphersal-memory 0.3.0 does today, and what we plan next. Planned work is tracked in
 [GitHub issues](https://github.com/graphersal/graphersal-memory/issues); a use case we have not
 thought of is welcome there.
 
-## In 0.2.1
+## In 0.3.0
 
 | Area | What you get |
 |---|---|
 | Memory core | A local graph store with the memory tools over MCP (search, read, remember, forget, pin, past sessions), project and global memories, and two MCP servers: `use` (on) and `develop` (structure tools, off by default). |
 | Shared daemon | Several agent sessions share one memory at once. A small background daemon starts on demand and exits after two idle hours, with no ports and no setup; upgrades and crashes are handled without your help. |
-| One-command install | `install` (a short wizard) and `uninstall` for Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI, Cursor, CodeWhale (new in 0.2.0, a preview) and DeepSeek Harness (`dsh`; new after 0.2.1, a preview, not yet run live: install, uninstall, status, doctor, past sessions, the short start context, other memory reported; no summaries or `bench` through it), any combination on one store; `status` and `doctor`; the import of Claude Code's file memory; the export back into files on `uninstall` (`export --to-files`); a moved repository keeps its memories (`projects`). |
+| One-command install | `install` (a short wizard) and `uninstall` for Claude Code, opencode 1.x and 2.x, OpenAI Codex CLI, Cursor, CodeWhale (new in 0.2.0, a preview) and DeepSeek Harness (`dsh`; new in 0.3.0, a preview, not yet run live: install, uninstall, status, doctor, past sessions, the short start context, other memory reported; no summaries or `bench` through it), any combination on one store; `status` and `doctor`; the import of Claude Code's file memory; the export back into files on `uninstall` (`export --to-files`); a moved repository keeps its memories (`projects`). |
 | Embedding model | `minishlab/potion-retrieval-32M` (English) or `minishlab/potion-multilingual-128M`, downloaded once from Hugging Face and run locally on the CPU, or a built-in embedder with no download. |
 | Start context | Pinned, "how to work" and "about you" memories at the start of every session, within a character budget (8,000 by default), so a harness's own file memory can be switched off without losing your rules. |
 | Conflicts | `remember` checks a new memory against its nearest neighbours; a later decision supersedes an older one and keeps its history; open conflicts and unchecked imported memories in `conflicts()`, settled with `settle`. |
