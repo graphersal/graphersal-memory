@@ -313,9 +313,25 @@ jobs:
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'bin1'
+          # The user PATH with an unexpanded reference, which the installer must keep as it is.
+          $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+          $before = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          $marker = '%USERPROFILE%\graphersal-path-check'
+          $key.SetValue('Path', ($before.TrimEnd(';') + ';' + $marker).TrimStart(';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
           & ./dist/install.ps1 -BaseUrl http://127.0.0.1:8765 -Dir $dir
           $version = & (Join-Path $dir 'graphersal-memory.exe') --version
           if ($version -notlike "graphersal-memory $env:VERSION *") { throw "unexpected: $version" }
+          # On PATH in this session and in the user's registry, the rest of it unchanged.
+          $version = graphersal-memory --version
+          if ($version -notlike "graphersal-memory $env:VERSION *") { throw "not on this session's PATH: $version" }
+          $after = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          if ($after -notlike "*$marker;$dir") { throw "user PATH: $after" }
+          if ($key.GetValueKind('Path') -ne [Microsoft.Win32.RegistryValueKind]::ExpandString) { throw 'the value kind changed' }
+          # A second install adds nothing.
+          & ./dist/install.ps1 -BaseUrl http://127.0.0.1:8765 -Dir $dir
+          $again = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          if ($again -ne $after) { throw "added twice: $again" }
+          $key.SetValue('Path', $before, [Microsoft.Win32.RegistryValueKind]::ExpandString)
       - name: install.ps1 (Windows PowerShell 5.1 through iex, a given version)
         if: runner.os == 'Windows'
         shell: powershell
@@ -323,9 +339,14 @@ jobs:
           $env:GRAPHERSAL_MEMORY_BASE_URL = 'http://127.0.0.1:8765'
           $env:GRAPHERSAL_MEMORY_VERSION = "v$env:VERSION"
           $env:GRAPHERSAL_MEMORY_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'bin2'
+          $env:GRAPHERSAL_MEMORY_NO_PATH_UPDATE = '1'
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
           Get-Content -Raw ./dist/install.ps1 | Invoke-Expression
           $version = & (Join-Path $env:GRAPHERSAL_MEMORY_INSTALL_DIR 'graphersal-memory.exe') --version
           if ($version -notlike "graphersal-memory $env:VERSION *") { throw "unexpected: $version" }
+          # GRAPHERSAL_MEMORY_NO_PATH_UPDATE: PATH left alone.
+          if ([Environment]::GetEnvironmentVariable('Path', 'User') -ne $userPath) { throw 'the user PATH changed' }
+          if (($env:Path -split ';') -contains $env:GRAPHERSAL_MEMORY_INSTALL_DIR) { throw 'the session PATH changed' }
 
   # A real release of a public repository only: a dry run never asks for more than
   # `contents: read`, and GitHub refuses attestations in a private repository outside Enterprise
